@@ -18,6 +18,8 @@ app/temp/*
 !app/temp/.gitkeep
 app/exports/*
 !app/exports/.gitkeep
+projects/*
+!projects/.gitkeep
 app/style_library.json
 tools/ffmpeg/
 models/

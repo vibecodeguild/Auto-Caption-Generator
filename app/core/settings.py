@@ -11,6 +11,8 @@ MODEL_OPTIONS = {
     "Tiny - fastest": "tiny.en",
     "Base - balanced": "base.en",
     "Small - better accuracy": "small.en",
+    "Medium - high accuracy": "medium.en",
+    "Large v3 - best accuracy": "large-v3",
 }
 COMPUTE_OPTIONS = {
     "CPU": {"device": "cpu", "compute_type": "int8"},

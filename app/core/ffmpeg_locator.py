@@ -19,6 +19,16 @@ def find_executable(name: str) -> Path | None:
     if found:
         return Path(found)
 
+    if name == "ffmpeg":
+        try:
+            import imageio_ffmpeg
+        except ImportError:
+            pass
+        else:
+            packaged = Path(imageio_ffmpeg.get_ffmpeg_exe())
+            if packaged.exists():
+                return packaged
+
     return None
 
 

@@ -4,10 +4,17 @@ import subprocess
 from pathlib import Path
 
 from app.core.ffmpeg_locator import find_ffmpeg
+from app.core.process_utils import hidden_subprocess_flags
 
 
 def _run(command: list[str], friendly_error: str) -> None:
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+        creationflags=hidden_subprocess_flags(),
+    )
     if result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip()
         if details:

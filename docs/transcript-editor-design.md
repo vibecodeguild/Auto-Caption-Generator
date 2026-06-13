@@ -2,8 +2,33 @@
 
 This document captures the planned direction for expanding VCG AutoCaption from
 a caption generator into a local transcript-based video editor. The current app
-generates burned-in captions. The editor described here is planned scope and is
-not implemented yet.
+generates burned-in captions and includes an early transcript editor foundation.
+The full editor described here remains planned scope.
+
+## Current Implementation Status
+
+Implemented foundation:
+
+- Canonical transcript, silence, edit decision, kept range, and dynamic splice
+  models.
+- Dynamic splice generation from deleted words and deleted silence.
+- OUT and IN frame nudges that update export intervals.
+- Transcript remapping for cut timelines.
+- FFmpeg trim/concat command generation for future cut export.
+- A PySide6 transcript edit tab with sample data, fixed preview area,
+  independently scrollable transcript panel, dynamic splice rows, inline
+  controls, expanded selected-splice state, and configurable shortcut defaults.
+- Real video transcription into the transcript editor tab.
+- Project save/open for editor project JSON.
+- Clickable word and dead-space controls for creating cut decisions.
+- Rough cut export from the adjusted kept ranges.
+
+Still planned:
+
+- Embedded media playback around real splice points.
+- Frame thumbnail extraction for selected splices.
+- Remapping captions/transcripts as part of the integrated export workflow.
+- Full per-video project folder workflow.
 
 ## Goals
 
@@ -358,4 +383,3 @@ should remain separated:
   frame thumbnails for selected splices immediately.
 - How large the first transcript editor milestone should be: transcript editing
   only, or transcript editing plus export.
-

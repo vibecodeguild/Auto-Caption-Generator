@@ -2,4 +2,5 @@ PySide6
 faster-whisper
 ctranslate2
 huggingface-hub
+imageio-ffmpeg
 pytest

@@ -26,13 +26,16 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from app.core.ffmpeg_locator import find_ffmpeg
+from app.core.process_utils import hidden_subprocess_flags
 from app.core.settings import COMPUTE_OPTIONS, MODEL_OPTIONS, PRESETS, CaptionPreset, CaptionStyle, exports_dir, temp_dir
 from app.core.style_library import delete_user_style, is_built_in_style, load_style_library, save_user_style
+from app.transcript_editor import TranscriptEditor
 from app.worker import CaptionWorker, JobSettings
 
 
@@ -449,7 +452,21 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(14)
 
+        self.stack = QStackedWidget()
+        self.transcript_tab = TranscriptEditor()
+        self.caption_tab = self._build_caption_tab()
+        self.stack.addWidget(self.transcript_tab)
+        self.stack.addWidget(self.caption_tab)
+
         layout.addLayout(self._build_header())
+        layout.addWidget(self.stack, 1)
+        self.setCentralWidget(root)
+
+    def _build_caption_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
 
         body = QHBoxLayout()
         body.setSpacing(12)
@@ -458,25 +475,41 @@ class MainWindow(QMainWindow):
         layout.addLayout(body, 1)
 
         layout.addWidget(self._build_status_bar())
-        self.setCentralWidget(root)
+        return tab
 
     def _build_header(self) -> QHBoxLayout:
         header = QHBoxLayout()
-        title_block = QVBoxLayout()
         title = QLabel("VCG AutoCaption")
         title.setObjectName("AppTitle")
-        subtitle = QLabel("Local caption generation for creator videos")
-        subtitle.setObjectName("SubtleText")
-        title_block.addWidget(title)
-        title_block.addWidget(subtitle)
+
+        self.transcript_tab_button = QPushButton("Transcript Edit")
+        self.transcript_tab_button.setObjectName("HeaderTabSelected")
+        self.transcript_tab_button.clicked.connect(lambda: self._set_active_screen(0))
+        self.caption_tab_button = QPushButton("Caption Generator")
+        self.caption_tab_button.setObjectName("HeaderTab")
+        self.caption_tab_button.clicked.connect(lambda: self._set_active_screen(1))
 
         self.generate_button = QPushButton("Generate Video")
         self.generate_button.setObjectName("PrimaryButton")
         self.generate_button.clicked.connect(self.generate)
+        self.generate_button.hide()
 
-        header.addLayout(title_block, 1)
+        header.addWidget(title)
+        header.addSpacing(18)
+        header.addWidget(self.transcript_tab_button)
+        header.addWidget(self.caption_tab_button)
+        header.addStretch(1)
         header.addWidget(self.generate_button)
         return header
+
+    def _set_active_screen(self, index: int) -> None:
+        self.stack.setCurrentIndex(index)
+        self.generate_button.setVisible(index == 1)
+        self.transcript_tab_button.setObjectName("HeaderTabSelected" if index == 0 else "HeaderTab")
+        self.caption_tab_button.setObjectName("HeaderTabSelected" if index == 1 else "HeaderTab")
+        for button in (self.transcript_tab_button, self.caption_tab_button):
+            button.style().unpolish(button)
+            button.style().polish(button)
 
     def _build_preview_area(self) -> QWidget:
         panel = QFrame()
@@ -732,11 +765,112 @@ class MainWindow(QMainWindow):
                 border: 1px solid {BORDER};
                 border-radius: 10px;
             }}
+            QPushButton#HeaderTab, QPushButton#HeaderTabSelected {{
+                background: {PANEL};
+                border: 1px solid {BORDER};
+                border-radius: 7px;
+                color: {MUTED};
+                font-weight: 800;
+                padding: 10px 16px;
+            }}
+            QPushButton#HeaderTabSelected {{
+                background: {PANEL_ALT};
+                color: {TEXT};
+                border-color: {TEAL};
+            }}
+            QFrame#EditorPanel {{
+                background: {PANEL};
+                border: 1px solid {BORDER};
+                border-radius: 10px;
+            }}
+            QFrame#ActionRail {{
+                background: #11131C;
+                border: 1px solid #242838;
+                border-radius: 8px;
+            }}
+            QFrame#SentenceBlock {{
+                background: #11131C;
+                border: 1px solid #242838;
+                border-radius: 8px;
+            }}
+            QFrame#SpliceRow {{
+                background: #171426;
+                border: 1px solid {MAGENTA};
+                border-radius: 6px;
+            }}
+            QFrame#SelectedSpliceRow {{
+                background: #171426;
+                border: 1px solid {MAGENTA};
+                border-radius: 6px;
+            }}
+            QFrame#ExpandedSplice, QFrame#FrameStrip {{
+                background: #0F1118;
+                border: 1px solid #2A3140;
+                border-radius: 6px;
+            }}
+            QLabel#VideoPreview {{
+                background: #07080D;
+                border: 1px solid #303443;
+                border-radius: 8px;
+                color: {MUTED};
+                font-size: 15px;
+                font-weight: 800;
+            }}
+            QLabel#WordToken, QPushButton#WordToken {{
+                background: transparent;
+                border: none;
+                color: {TEXT};
+                font-size: 18px;
+                padding: 2px 1px;
+                font-weight: 400;
+            }}
+            QLabel#DeletedToken, QPushButton#DeletedToken {{
+                background: transparent;
+                border: none;
+                color: #8B4B62;
+                font-size: 18px;
+                text-decoration: line-through;
+                padding: 2px 1px;
+                font-weight: 400;
+            }}
+            QPushButton#WordToken:hover {{
+                color: {TEAL};
+            }}
+            QPushButton#SelectedToken {{
+                background: #263156;
+                border: 1px solid {TEAL};
+                border-radius: 4px;
+                color: {TEXT};
+                font-size: 18px;
+                padding: 2px 5px;
+                font-weight: 700;
+            }}
+            QPushButton#SilenceToken {{
+                background: #152033;
+                border: 1px solid #304863;
+                border-radius: 4px;
+                color: {MUTED};
+                font-style: italic;
+                padding: 3px 7px;
+                font-weight: 600;
+            }}
+            QPushButton#ReviewedButton {{
+                background: {TEAL};
+                border-color: {TEAL};
+                color: white;
+            }}
             QScrollArea#SettingsScroll {{
                 border: none;
                 background: transparent;
             }}
+            QScrollArea#TranscriptScroll {{
+                border: none;
+                background: transparent;
+            }}
             QScrollArea#SettingsScroll > QWidget > QWidget {{
+                background: transparent;
+            }}
+            QScrollArea#TranscriptScroll > QWidget > QWidget {{
                 background: transparent;
             }}
             QPushButton {{
@@ -944,6 +1078,7 @@ class MainWindow(QMainWindow):
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=hidden_subprocess_flags(),
             )
             self.preview_frame_path = target
             self.preview.set_frame(target)

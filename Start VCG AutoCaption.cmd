@@ -2,21 +2,19 @@
 setlocal
 cd /d "%~dp0"
 
+if not exist "app\temp" mkdir "app\temp"
+del "app\temp\startup.log" >nul 2>nul
+
 set "APP_PYTHON=.venv\Scripts\pythonw.exe"
 if exist "%APP_PYTHON%" goto :paths
 
-where pythonw.exe >nul 2>nul
-if not errorlevel 1 (
-    set "APP_PYTHON=pythonw.exe"
-    goto :paths
-)
-
-echo Python runtime not found.
-echo Create a virtual environment and install dependencies first:
+echo Project virtual environment not found.
+echo Create the local environment and install dependencies first:
 echo.
 echo   py -3 -m venv .venv
 echo   .venv\Scripts\python.exe -m pip install -r requirements.txt
 echo.
+> "app\temp\startup.log" echo Project virtual environment not found. Create .venv and install requirements.txt.
 pause
 exit /b 1
 

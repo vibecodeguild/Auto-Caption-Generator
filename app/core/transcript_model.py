@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class TranscriptWord:
+    id: str
+    raw: str
+    text: str
+    start: float
+    end: float
+    start_frame: int
+    end_frame: int
+    sentence_id: int
+
+
+@dataclass(frozen=True)
+class SilenceRange:
+    id: str
+    start: float
+    end: float
+    start_frame: int
+    end_frame: int
+
+
+@dataclass(frozen=True)
+class TranscriptProject:
+    source: str
+    fps: float
+    words: list[TranscriptWord]
+    silence_ranges: list[SilenceRange]
+
+    def word_index(self, word_id: str) -> int:
+        for index, word in enumerate(self.words):
+            if word.id == word_id:
+                return index
+        raise ValueError(f"Unknown word id: {word_id}")
+
+    def word_by_id(self, word_id: str) -> TranscriptWord:
+        return self.words[self.word_index(word_id)]
+
+    def silence_by_id(self, silence_id: str) -> SilenceRange:
+        for silence in self.silence_ranges:
+            if silence.id == silence_id:
+                return silence
+        raise ValueError(f"Unknown silence id: {silence_id}")

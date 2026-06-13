@@ -11,6 +11,7 @@ The app does not require user accounts, cloud uploads, analytics, or API keys.
 
 - Dark desktop editor UI built with PySide6
 - First-frame video preview with live caption styling
+- Embedded splice preview playback for transcript edits
 - Local transcription through `faster-whisper`
 - Word-level timestamp captions
 - Active-word highlighting
@@ -19,21 +20,27 @@ The app does not require user accounts, cloud uploads, analytics, or API keys.
 - Optional NVIDIA GPU mode
 - Reusable caption style library
 - Font, color, outline, shadow, glow, position, and grouping controls
-- FFmpeg subtitle burn-in to MP4
+- FFmpeg subtitle burn-in and transcript cut export to MP4
+- Experimental transcript edit tab with video transcription, dynamic splice rows, frame nudge controls, project save/open, splice preview, and rough cut export
 
 ## Planned Direction
 
-The next major direction is transcript-based video editing with non-destructive,
-frame-based cutting. The design is documented in
+The next major direction is full transcript-based video editing with
+non-destructive, frame-based cutting. The design is documented in
 [`docs/transcript-editor-design.md`](docs/transcript-editor-design.md).
 
-That work is planned scope. The current app is a local caption generator.
+The current transcript editor tab is an early working foundation. It can
+transcribe a selected video, save/open editor project JSON, select words and
+dead-space chips as cut decisions, review dynamic splice rows, nudge OUT/IN
+frames, preview splice playback, and export a rough cut. Frame thumbnails and
+full project-folder workflow are still planned scope.
 
 ## Requirements
 
 - Windows
 - Python 3.10 or newer
-- FFmpeg available on `PATH`, or `ffmpeg.exe` placed at `tools/ffmpeg/ffmpeg.exe`
+- FFmpeg from the `imageio-ffmpeg` Python dependency, FFmpeg available on
+  `PATH`, or `ffmpeg.exe` placed at `tools/ffmpeg/ffmpeg.exe`
 - For CPU mode: no GPU setup is required
 - For NVIDIA GPU mode: an NVIDIA driver compatible with CUDA 12, plus CUDA/cuDNN runtime DLLs
 
@@ -53,7 +60,9 @@ For optional NVIDIA GPU support, install the GPU dependency set instead:
 .\.venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
 ```
 
-Install FFmpeg from a trusted source and make sure `ffmpeg` is available:
+The base dependency set includes `imageio-ffmpeg`, which provides an FFmpeg
+binary inside the virtual environment. If you prefer a system FFmpeg install,
+install FFmpeg from a trusted source and make sure `ffmpeg` is available:
 
 ```powershell
 ffmpeg -version
@@ -65,7 +74,7 @@ You can also place FFmpeg manually here:
 tools\ffmpeg\ffmpeg.exe
 ```
 
-FFmpeg binaries are not included in this repository.
+FFmpeg binaries are not committed to this repository.
 
 ## Run
 
@@ -114,6 +123,7 @@ input-name_captioned.mp4
 - No API keys are required.
 - No videos are uploaded by this app.
 - Temporary audio, preview, and subtitle files are written under `app/temp/`.
+- Per-run editor logs are written under `app/temp/logs/`.
 - Exported videos are written to the selected output folder.
 
 `faster-whisper` may download model files on first use through the Hugging Face
@@ -144,4 +154,5 @@ subtitle events, style persistence, and effect rendering flags.
 - Word timing is only as accurate as Whisper's timestamps.
 - Noisy audio can reduce caption accuracy.
 - Captions are burned permanently into the exported video.
-- Manual caption editing, batch processing, and transcript-based video cutting are not included yet.
+- Manual caption editing and batch processing are not included yet.
+- Transcript-based cutting has an experimental editor foundation. Embedded media playback, frame thumbnails, and full project-folder workflow are not complete yet.
