@@ -1,0 +1,1 @@
+"""Core caption generation modules."""

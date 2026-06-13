@@ -1,0 +1,1 @@
+"""VCG AutoCaption desktop application."""
