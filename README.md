@@ -21,6 +21,14 @@ The app does not require user accounts, cloud uploads, analytics, or API keys.
 - Font, color, outline, shadow, glow, position, and grouping controls
 - FFmpeg subtitle burn-in to MP4
 
+## Planned Direction
+
+The next major direction is transcript-based video editing with non-destructive,
+frame-based cutting. The design is documented in
+[`docs/transcript-editor-design.md`](docs/transcript-editor-design.md).
+
+That work is planned scope. The current app is a local caption generator.
+
 ## Requirements
 
 - Windows
@@ -136,4 +144,4 @@ subtitle events, style persistence, and effect rendering flags.
 - Word timing is only as accurate as Whisper's timestamps.
 - Noisy audio can reduce caption accuracy.
 - Captions are burned permanently into the exported video.
-- Manual caption editing, batch processing, and timeline editing are not included.
+- Manual caption editing, batch processing, and transcript-based video cutting are not included yet.
