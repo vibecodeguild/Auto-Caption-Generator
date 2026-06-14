@@ -243,56 +243,70 @@ The player and selected-splice details should remain fixed while the transcript
 panel scrolls independently. The user should not need to scroll back to the top
 to preview a cut after making transcript edits.
 
-### Transcript Panel As The Editing Cockpit
+### Transcript Panel As The Content Editing Surface
 
-The transcript panel should be the primary work surface. It should show sentence
-blocks, selectable word tokens, silence chips, deleted content, and dynamic
-splice rows.
+The transcript panel should focus on content decisions. It should show sentence
+blocks, selectable word tokens, silence chips, deleted content, and compact
+splice markers. It should not carry the full frame-tuning UI inline.
 
 Deleted content should remain visible, but muted and struck through, so the user
 can understand and restore prior decisions.
 
-### Inline Splice Controls
+### Compact Inline Splice Markers
 
-Each dynamic splice row should include the controls needed for the fast review
-loop:
-
-```text
-Play [2] [4] [6] [Loop]   Out [-] [+]   In [-] [+]
-```
-
-Meaning:
-
-- `2` plays one second before and one second after the splice.
-- `4` plays two seconds before and two seconds after the splice.
-- `6` plays three seconds before and three seconds after the splice.
-- `Loop` repeats the selected splice preview.
-- `Out [-] [+]` nudges the outgoing frame of the previous kept range.
-- `In [-] [+]` nudges the incoming frame of the next kept range.
-
-The minus and plus buttons should sit next to each other to minimize mouse
-travel.
-
-### Expanded Splice State
-
-Each splice row can have a compact and expanded state.
-
-The compact state should support normal fast editing:
+Each dynamic splice in the transcript should appear as a compact marker:
 
 ```text
-Splice 03  "...and it was super easy." -> "Luckily for me..."
-Play [2] [4] [6] [Loop]   Out [-] [+]   In [-] [+]   Reviewed
+Splice 003 - Needs review
 ```
 
-The expanded state can show:
+Clicking the marker selects the splice in the splice review panel and scrolls
+the transcript context so the selected cut is centered. The inline marker is for
+navigation and status only. It should not include play buttons, frame nudges, or
+review controls.
 
-- Previous phrase and next phrase.
-- OUT frame and IN frame numbers.
-- Small before/after frame thumbnails.
-- Reviewed status.
-- Any export warnings for that splice.
+### Splice Review Queue
 
-The selected splice should also sync with the fixed preview area.
+Every dynamic splice must be reviewed as its own item in a queue. The selected
+splice panel should provide:
+
+- Previous and next splice navigation.
+- Current position, such as `Splice 003 of 018`.
+- Needs review / reviewed status.
+- Source-video preview playback for 2, 4, and 6 second splice windows.
+- Loop toggle for repeated listening.
+- OUT cut frame showing the last kept frame before the cut.
+- IN cut frame showing the first kept frame after the cut.
+- Nudge controls for 1, 5, and 10 frames in either direction.
+- A clear visual distinction between the selected cut frame and surrounding
+  frames.
+
+The user should be able to work through all splices one by one without hunting
+through the transcript manually. The transcript view should follow the selected
+splice, not the other way around.
+
+### Splice Panel Layout Direction
+
+The splice panel should receive the most visual space during review. A useful
+landscape layout is:
+
+```text
+Top row:
+  compact project controls | source preview | transcript context around selected splice
+
+Bottom row:
+  splice review panel with OUT/IN cut frames and nudge controls
+```
+
+This separates content editing from frame tuning:
+
+- Transcript context answers "what text did I remove?"
+- Splice review answers "does this cut sound and look perfect?"
+
+After testing, the five-frame strips were removed from the first review layout.
+They added visual weight without enough editing value. The review panel should
+show the two active cut frames clearly, then rely on frame-step controls to move
+those frames through the source video.
 
 ### Keyboard Shortcuts
 
@@ -307,10 +321,10 @@ Initial shortcut actions should include:
   "play_splice_4s": "4",
   "play_splice_6s": "6",
   "toggle_loop": "L",
-  "out_frame_back": "A",
-  "out_frame_forward": "S",
-  "in_frame_back": "D",
-  "in_frame_forward": "F",
+  "out_frame_earlier": "A",
+  "out_frame_later": "S",
+  "in_frame_earlier": "D",
+  "in_frame_later": "F",
   "previous_splice": "J",
   "next_splice": "K",
   "mark_reviewed": "Enter",

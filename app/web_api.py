@@ -137,6 +137,16 @@ def restore_selection(payload: TokenSelectionRequest) -> dict:
     return _project_response()
 
 
+@app.post("/api/projects/current/delete-dead-space")
+def delete_dead_space() -> dict:
+    project = _require_project()
+    deleted = _deleted_silence_ids()
+    for silence in project.silence_ranges:
+        if silence.id not in deleted:
+            state.edits.delete_silence(f"delete_{silence.id}", silence.id)
+    return _project_response()
+
+
 @app.post("/api/projects/current/splices/adjust")
 def adjust_splice(payload: AdjustSpliceRequest) -> dict:
     _require_project()

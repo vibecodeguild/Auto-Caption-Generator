@@ -215,11 +215,20 @@ exports, local models, virtual environments, and secret files.
 
 2. **Move transcript editor first**
    - Use HTML video playback against source video.
-   - Port transcript display, selection, dead-space chips, dynamic splice rows,
+   - Port transcript display, selection, dead-space chips, compact dynamic
+     splice markers, selected-splice navigation, OUT/IN cut frame previews,
      frame nudges, and keyboard shortcuts.
    - Save/open project JSON through the API.
    - Status: first open/edit/preview/save/export workflow implemented for
      existing `.vcg.json` editor projects.
+
+2a. **Refine splice review workflow**
+   - Treat dynamic splices as a review queue.
+   - Show previous/next controls in the splice panel.
+   - Keep the transcript context centered on the selected splice.
+   - Move all play, review, and frame nudge controls out of the inline transcript
+     row and into the selected-splice panel.
+   - Give the splice panel enough space for OUT and IN frame strips.
 
 3. **Wire transcription**
    - Reuse the existing `faster-whisper` backend logic.

@@ -114,6 +114,13 @@ export function restoreTokens(tokenIds: string[]) {
   });
 }
 
+export function deleteDeadSpace() {
+  return request<EditorProjectResponse>("/api/projects/current/delete-dead-space", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
 export function adjustSplice(anchorKey: string, leftDelta = 0, rightDelta = 0) {
   return request<EditorProjectResponse>("/api/projects/current/splices/adjust", {
     method: "POST",
