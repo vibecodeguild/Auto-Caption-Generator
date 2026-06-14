@@ -1,0 +1,24 @@
+{
+  "name": "vcg-autocaption-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "api": ".\\.venv\\Scripts\\python.exe -m uvicorn app.web_api:app --host 127.0.0.1 --port 8731 --reload",
+    "web": "next dev web -H 127.0.0.1 -p 3000",
+    "dev": ".\\.venv\\Scripts\\python.exe scripts\\dev_web.py",
+    "build": "next build web",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "lucide-react": "^0.561.0",
+    "next": "^16.1.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.2",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.9.3"
+  }
+}

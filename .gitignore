@@ -7,6 +7,10 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+node_modules/
+.next/
+web/.next/
+*.tsbuildinfo
 build/
 dist/
 dist-*/

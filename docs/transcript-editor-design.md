@@ -1,9 +1,12 @@
 # Transcript Editor And Frame-Based Cutting Design
 
-This document captures the planned direction for expanding VCG AutoCaption from
-a caption generator into a local transcript-based video editor. The current app
+This document captures the product model for expanding VCG AutoCaption from a
+caption generator into a local transcript-based video editor. The current app
 generates burned-in captions and includes an early transcript editor foundation.
-The full editor described here remains planned scope.
+
+The implementation direction has changed since the first PySide6 prototype. New
+UI work should target the local web app architecture described in
+[`web-app-architecture-pivot.md`](web-app-architecture-pivot.md).
 
 ## Current Implementation Status
 
@@ -14,7 +17,7 @@ Implemented foundation:
 - Dynamic splice generation from deleted words and deleted silence.
 - OUT and IN frame nudges that update export intervals.
 - Transcript remapping for cut timelines.
-- FFmpeg trim/concat command generation for future cut export.
+- FFmpeg trim/concat command generation for cut export.
 - A PySide6 transcript edit tab with sample data, fixed preview area,
   independently scrollable transcript panel, dynamic splice rows, inline
   controls, expanded selected-splice state, and configurable shortcut defaults.
@@ -25,10 +28,19 @@ Implemented foundation:
 
 Still planned:
 
-- Embedded media playback around real splice points.
 - Frame thumbnail extraction for selected splices.
 - Remapping captions/transcripts as part of the integrated export workflow.
 - Full per-video project folder workflow.
+
+Architecture pivot:
+
+- The PySide6 transcript editor is a prototype and reference, not the target UI
+  architecture.
+- The next editor should use browser-native source video playback inside a
+  Next.js frontend.
+- The Python backend should serve source video ranges and run Whisper/FFmpeg.
+- Preview should seek/jump through the source video; only export should create a
+  new MP4.
 
 ## Goals
 
@@ -318,11 +330,12 @@ The embedded player should support splice-specific preview playback:
 - 4-second preview: two seconds before and two seconds after.
 - 6-second preview: three seconds before and three seconds after.
 
-For the first implementation, PySide6 playback can be used for fast preview.
-FFmpeg and ffprobe should remain the source of truth for frame calculations and
-final export. If exact frame stepping in the player becomes necessary, the app
-can later add FFmpeg, OpenCV, or PyAV-backed frame previews for selected splice
-points.
+The next implementation should use browser-native source video playback. The
+frontend should seek through the original source video, play the outgoing side
+of the splice, jump to the incoming side, then play the after-cut window.
+
+Preview should not create temporary MP4 files. FFmpeg and ffprobe should remain
+the source of truth for frame calculations and final export.
 
 ## Export
 
@@ -338,19 +351,30 @@ timeline, so captions and final transcripts line up with the cut video.
 
 ## Suggested Module Boundaries
 
-The editor should be built as reusable core logic with a PySide6 UI layer:
+The editor should be built as reusable core logic with a web UI layer and a
+Python local API:
 
 ```text
-app/core/transcription.py
-app/core/project_store.py
-app/core/edit_decisions.py
-app/core/splice_generation.py
-app/core/frame_time.py
-app/core/video_cutter.py
-app/core/transcript_remap.py
-app/ui/transcript_editor.py
-app/ui/splice_controls.py
-app/ui/video_preview.py
+web/
+  transcript editor components
+  caption generator components
+  source video player
+  shortcut/settings UI
+
+api/
+  local project endpoints
+  source video range endpoint
+  transcription jobs
+  export jobs
+
+app/core/
+  transcription
+  project_store
+  edit_decisions
+  splice_generation
+  frame_time
+  video_cutter
+  transcript_remap
 ```
 
 The exact file names can change during implementation, but the responsibilities
@@ -363,7 +387,7 @@ should remain separated:
 - Frame/time conversion isolates video timing details.
 - Video cutting exports adjusted kept ranges.
 - Transcript remapping updates transcript timings after export.
-- UI widgets render and manipulate the model without owning export logic.
+- UI components render and manipulate the model without owning export logic.
 
 ## Non-Goals
 
@@ -379,7 +403,8 @@ should remain separated:
 - Whether to port selected backend code from another prototype or rewrite the
   cutter and remapper inside this codebase.
 - How much variable-frame-rate support is needed in the first implementation.
-- Whether the first player version uses only `QMediaPlayer` or adds extracted
-  frame thumbnails for selected splices immediately.
-- How large the first transcript editor milestone should be: transcript editing
-  only, or transcript editing plus export.
+- Whether the local web app uses one combined dev command or separate frontend
+  and backend dev commands at first.
+- Whether the first migrated milestone includes only transcript editing/preview
+  or transcript editing plus export.
+- Whether frame thumbnails are part of the first web migration or a follow-up.

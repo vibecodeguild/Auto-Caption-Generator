@@ -1,9 +1,9 @@
 # VCG AutoCaption
 
-VCG AutoCaption is a local Windows desktop app for generating burned-in,
-CapCut-style captions for creator videos. It transcribes speech locally with
-`faster-whisper`, creates active-word ASS subtitles, and renders a finished
-MP4 with FFmpeg.
+VCG AutoCaption is a local Windows app prototype for generating burned-in,
+CapCut-style captions and experimenting with transcript-based video editing. It
+transcribes speech locally with `faster-whisper`, creates active-word ASS
+subtitles, and renders finished MP4 files with FFmpeg.
 
 The app does not require user accounts, cloud uploads, analytics, or API keys.
 
@@ -25,15 +25,23 @@ The app does not require user accounts, cloud uploads, analytics, or API keys.
 
 ## Planned Direction
 
-The next major direction is full transcript-based video editing with
-non-destructive, frame-based cutting. The design is documented in
+The next major direction is a local web app architecture:
+
+- Next.js frontend for the transcript editor and caption generator UI.
+- Python local API for Whisper, FFmpeg, project files, and source video serving.
+- Browser-native source video playback for splice preview.
+- No preview MP4 rendering; only final export creates new video files.
+
+The pivot is documented in
+[`docs/web-app-architecture-pivot.md`](docs/web-app-architecture-pivot.md).
+The transcript editing product model is documented in
 [`docs/transcript-editor-design.md`](docs/transcript-editor-design.md).
 
-The current transcript editor tab is an early working foundation. It can
-transcribe a selected video, save/open editor project JSON, select words and
-dead-space chips as cut decisions, review dynamic splice rows, nudge OUT/IN
-frames, preview splice playback, and export a rough cut. Frame thumbnails and
-full project-folder workflow are still planned scope.
+The current PySide6 app is a working prototype and reference implementation for
+the core local caption pipeline, style settings, transcription settings,
+transcript models, edit decisions, and rough export logic. New UI development
+should move toward the web app architecture instead of deeper Qt video playback
+work.
 
 ## Requirements
 
@@ -77,6 +85,28 @@ tools\ffmpeg\ffmpeg.exe
 FFmpeg binaries are not committed to this repository.
 
 ## Run
+
+### Web App Prototype
+
+The current development direction is the local web app. Start the Python API and
+Next.js UI together with:
+
+```powershell
+npm run dev
+```
+
+Then open:
+
+```text
+http://127.0.0.1:3000
+```
+
+The web editor currently opens an existing `.vcg.json` editor project by path,
+plays the original source video through the browser video element, supports
+word/dead-space delete and restore decisions, previews dynamic splices by
+seeking through the source video, saves the project, and exports a rough cut.
+
+### PySide Prototype
 
 Double-click:
 

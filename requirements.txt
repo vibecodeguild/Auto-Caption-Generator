@@ -1,6 +1,9 @@
 PySide6
+fastapi
 faster-whisper
 ctranslate2
 huggingface-hub
 imageio-ffmpeg
+httpx
 pytest
+uvicorn
