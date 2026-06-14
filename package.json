@@ -10,9 +10,18 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fontsource/anton": "^5.2.7",
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/lato": "^5.2.7",
+    "@fontsource/montserrat": "^5.2.8",
+    "@fontsource/open-sans": "^5.2.7",
+    "@fontsource/oswald": "^5.2.8",
+    "@fontsource/poppins": "^5.2.7",
+    "@fontsource/roboto": "^5.2.10",
     "lucide-react": "^0.561.0",
     "next": "^16.1.0",
     "react": "^19.2.3",
+    "react-colorful": "^5.7.0",
     "react-dom": "^19.2.3"
   },
   "devDependencies": {

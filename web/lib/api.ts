@@ -61,6 +61,54 @@ export type EditorProjectResponse = {
   kept_ranges: unknown[];
 };
 
+export type CaptionPresetPayload = {
+  name: string;
+  max_words: number;
+  max_duration: number;
+  max_chars: number;
+};
+
+export type CaptionStylePayload = {
+  font_family: string;
+  main_font_size: number;
+  active_font_size: number;
+  main_color: string;
+  active_color: string;
+  outline_color: string;
+  outline_width: number;
+  bold: boolean;
+  active_bold: boolean;
+  position: string;
+  margin_v: number;
+  outline_enabled: boolean;
+  shadow_enabled: boolean;
+  shadow_color: string;
+  shadow_depth: number;
+  glow_enabled: boolean;
+  glow_color: string;
+  glow_strength: number;
+};
+
+export type CaptionOptionsResponse = {
+  presets: Record<string, CaptionPresetPayload>;
+  models: Record<string, string>;
+  compute: Record<string, { device: string; compute_type: string }>;
+  styles: Record<string, CaptionStylePayload>;
+  built_in_styles: string[];
+  default_style: CaptionStylePayload;
+  source: string | null;
+  output_folder: string;
+};
+
+export type CaptionGenerateRequest = {
+  input_video_path?: string | null;
+  output_folder?: string | null;
+  style: CaptionStylePayload;
+  preset: CaptionPresetPayload;
+  model_label: string;
+  compute_label: string;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -149,4 +197,46 @@ export function sourceVideoUrl() {
 
 export function frameImageUrl(frame: number) {
   return `${API_BASE}/api/projects/current/frame?frame=${frame}`;
+}
+
+export function captionOptions() {
+  return request<CaptionOptionsResponse>("/api/caption/options");
+}
+
+export function chooseCaptionVideo() {
+  return request<{ source: string; output_folder: string }>("/api/caption/choose-video", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function chooseCaptionOutputFolder() {
+  return request<{ output_folder: string }>("/api/caption/choose-output-folder", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function saveCaptionStyle(name: string, style: CaptionStylePayload) {
+  return request<CaptionOptionsResponse>("/api/caption/styles", {
+    method: "POST",
+    body: JSON.stringify({ name, style }),
+  });
+}
+
+export function deleteCaptionStyle(name: string) {
+  return request<CaptionOptionsResponse>(`/api/caption/styles/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+}
+
+export function generateCaptionVideo(payload: CaptionGenerateRequest) {
+  return request<{ output_path: string; progress: { value: number; message: string }[] }>("/api/caption/generate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function captionSourceVideoUrl() {
+  return `${API_BASE}/api/caption/source-video`;
 }

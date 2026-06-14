@@ -12,13 +12,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
+from app.core.pipeline import generate_captioned_video
 from app.core.edit_decisions import EditDecisionList
 from app.core.editor_tokens import transcript_tokens
 from app.core.ffmpeg_locator import find_ffmpeg
 from app.core.project_store import load_editor_project, save_editor_project
-from app.core.settings import exports_dir
+from app.core.settings import COMPUTE_OPTIONS, MODEL_OPTIONS, PRESETS, CaptionPreset, CaptionStyle, default_style, exports_dir, temp_dir
 from app.core.splice_generation import DynamicSplice, SplicePlan, generate_splices
 from app.core.splice_preview import source_splice_preview_segments
+from app.core.style_library import delete_user_style, is_built_in_style, load_style_library, save_user_style
 from app.core.transcript_model import TranscriptProject
 from app.core.video_cutter import frame_intervals_to_seconds, run_cut
 
@@ -27,6 +29,7 @@ class ApiState:
     project: TranscriptProject | None = None
     edits: EditDecisionList = EditDecisionList()
     project_path: Path | None = None
+    caption_video_path: Path | None = None
 
 
 state = ApiState()
@@ -62,6 +65,54 @@ class ReviewSpliceRequest(BaseModel):
 
 class ExportCutRequest(BaseModel):
     output_path: str | None = None
+
+
+class CaptionStylePayload(BaseModel):
+    font_family: str
+    main_font_size: int
+    active_font_size: int
+    main_color: str
+    active_color: str
+    outline_color: str
+    outline_width: int
+    bold: bool
+    active_bold: bool
+    position: str
+    margin_v: int
+    outline_enabled: bool = True
+    shadow_enabled: bool = False
+    shadow_color: str = "#000000"
+    shadow_depth: int = 5
+    glow_enabled: bool = False
+    glow_color: str = "#FF00CE"
+    glow_strength: int = 5
+
+    def to_style(self) -> CaptionStyle:
+        return CaptionStyle(**self.model_dump())
+
+
+class CaptionPresetPayload(BaseModel):
+    name: str
+    max_words: int
+    max_duration: float
+    max_chars: int
+
+    def to_preset(self) -> CaptionPreset:
+        return CaptionPreset(**self.model_dump())
+
+
+class CaptionGenerateRequest(BaseModel):
+    input_video_path: str | None = None
+    output_folder: str | None = None
+    style: CaptionStylePayload
+    preset: CaptionPresetPayload
+    model_label: str
+    compute_label: str
+
+
+class CaptionStyleSaveRequest(BaseModel):
+    name: str
+    style: CaptionStylePayload
 
 
 @app.get("/api/health")
@@ -105,6 +156,31 @@ def _choose_project_file() -> Path | None:
     finally:
         root.destroy()
     return Path(filename).resolve() if filename else None
+
+
+def _choose_video_file() -> Path | None:
+    root = Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        filename = filedialog.askopenfilename(
+            title="Choose video",
+            filetypes=[("Video files", "*.mp4 *.mov *.mkv *.avi *.webm"), ("All files", "*.*")],
+        )
+    finally:
+        root.destroy()
+    return Path(filename).resolve() if filename else None
+
+
+def _choose_output_folder() -> Path | None:
+    root = Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        folder = filedialog.askdirectory(title="Choose output folder")
+    finally:
+        root.destroy()
+    return Path(folder).resolve() if folder else None
 
 
 @app.get("/api/projects/current")
@@ -193,6 +269,109 @@ def export_cut(payload: ExportCutRequest) -> dict:
         intervals=frame_intervals_to_seconds(intervals, project.fps),
     )
     return {"output_path": str(output_path)}
+
+
+@app.get("/api/caption/options")
+def caption_options() -> dict:
+    styles = {name: asdict(style) for name, style in load_style_library().items()}
+    project_source = state.project.source if state.project is not None else None
+    caption_source = str(state.caption_video_path) if state.caption_video_path is not None else project_source
+    return {
+        "presets": {name: asdict(preset) for name, preset in PRESETS.items()},
+        "models": MODEL_OPTIONS,
+        "compute": COMPUTE_OPTIONS,
+        "styles": styles,
+        "built_in_styles": [name for name in styles if is_built_in_style(name)],
+        "default_style": asdict(default_style()),
+        "source": caption_source,
+        "output_folder": str(exports_dir()),
+    }
+
+
+@app.post("/api/caption/choose-video")
+def choose_caption_video() -> dict:
+    path = _choose_video_file()
+    if path is None:
+        raise HTTPException(status_code=400, detail="No video file selected.")
+    state.caption_video_path = path
+    return {"source": str(path), "output_folder": str(exports_dir())}
+
+
+@app.post("/api/caption/choose-output-folder")
+def choose_caption_output_folder() -> dict:
+    path = _choose_output_folder()
+    if path is None:
+        raise HTTPException(status_code=400, detail="No output folder selected.")
+    return {"output_folder": str(path)}
+
+
+@app.post("/api/caption/styles")
+def save_caption_style(payload: CaptionStyleSaveRequest) -> dict:
+    try:
+        save_user_style(payload.name, payload.style.to_style())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return caption_options()
+
+
+@app.delete("/api/caption/styles/{name}")
+def delete_caption_style(name: str) -> dict:
+    if is_built_in_style(name):
+        raise HTTPException(status_code=400, detail="Built-in styles cannot be deleted.")
+    delete_user_style(name)
+    return caption_options()
+
+
+@app.post("/api/caption/generate")
+def generate_caption_video(payload: CaptionGenerateRequest) -> dict:
+    source_text = payload.input_video_path or (str(state.caption_video_path) if state.caption_video_path else None)
+    if source_text is None and state.project is not None:
+        source_text = state.project.source
+    if source_text is None:
+        raise HTTPException(status_code=400, detail="Choose a video before generating captions.")
+
+    source = Path(source_text).expanduser().resolve()
+    if not source.exists():
+        raise HTTPException(status_code=400, detail=f"Source video not found: {source}")
+    if payload.model_label not in MODEL_OPTIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown Whisper model: {payload.model_label}")
+    if payload.compute_label not in COMPUTE_OPTIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown compute device: {payload.compute_label}")
+
+    output_root = Path(payload.output_folder).expanduser().resolve() if payload.output_folder else exports_dir()
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_path = output_root / f"{source.stem}_captioned.mp4"
+
+    progress: list[dict[str, object]] = []
+
+    def collect_progress(value: int, message: str) -> None:
+        progress.append({"value": value, "message": message})
+
+    output = generate_captioned_video(
+        input_video_path=str(source),
+        output_video_path=str(output_path),
+        working_dir=str(temp_dir()),
+        style=payload.style.to_style(),
+        preset=payload.preset.to_preset(),
+        model_size=MODEL_OPTIONS[payload.model_label],
+        compute_mode=payload.compute_label,
+        progress_callback=collect_progress,
+    )
+    state.caption_video_path = source
+    return {"output_path": output, "progress": progress}
+
+
+@app.get("/api/caption/source-video")
+def caption_source_video(request: Request, range_header: str | None = Header(default=None, alias="Range")) -> Response:
+    source_text = str(state.caption_video_path) if state.caption_video_path else None
+    if source_text is None and state.project is not None:
+        source_text = state.project.source
+    if source_text is None:
+        raise HTTPException(status_code=404, detail="No caption source video is loaded.")
+    path = Path(source_text)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Source video not found: {path}")
+    return _range_response(path, range_header)
 
 
 @app.get("/api/projects/current/source-video")
