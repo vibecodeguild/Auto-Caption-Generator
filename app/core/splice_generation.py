@@ -131,7 +131,31 @@ def _build_splices(
     edits: EditDecisionList,
 ) -> list[DynamicSplice]:
     splices: list[DynamicSplice] = []
-    for index, (left_range, right_range) in enumerate(zip(kept_ranges, kept_ranges[1:]), start=1):
+    first_kept = kept_ranges[0] if kept_ranges else None
+    if first_kept is not None and first_kept.start_word_id != project.words[0].id:
+        anchor_key = f"START->{first_kept.start_word_id}"
+        adjustment = edits.splice_adjustments.get(anchor_key)
+        right_delta = adjustment.right_in_delta if adjustment else 0
+        right_word = project.word_by_id(first_kept.start_word_id)
+        splices.append(
+            DynamicSplice(
+                id="splice_001",
+                anchor_key=anchor_key,
+                left_keep_range_id="",
+                right_keep_range_id=first_kept.id,
+                left_word_id="",
+                right_word_id=right_word.id,
+                left_out_frame=0,
+                right_in_frame=right_word.start_frame + right_delta,
+                left_out_adjustment=0,
+                right_in_adjustment=right_delta,
+                left_context="Start of source",
+                right_context=_context_after(project.words, right_word.id),
+                reviewed=adjustment.reviewed if adjustment else False,
+            )
+        )
+
+    for index, (left_range, right_range) in enumerate(zip(kept_ranges, kept_ranges[1:]), start=len(splices) + 1):
         if (left_range.end_word_id, right_range.start_word_id) not in boundaries:
             continue
         anchor_key = f"{left_range.end_word_id}->{right_range.start_word_id}"
@@ -163,25 +187,25 @@ def _build_splices(
 def _apply_splice_adjustments(kept_ranges: list[KeptRange], splices: list[DynamicSplice]) -> list[KeptRange]:
     adjusted = {kept_range.id: kept_range for kept_range in kept_ranges}
     for splice in splices:
-        left = adjusted[splice.left_keep_range_id]
-        right = adjusted[splice.right_keep_range_id]
-        adjusted[splice.left_keep_range_id] = KeptRange(
-            id=left.id,
-            start_word_id=left.start_word_id,
-            end_word_id=left.end_word_id,
-            suggested_start_frame=left.suggested_start_frame,
-            suggested_end_frame=left.suggested_end_frame,
-            adjusted_start_frame=left.adjusted_start_frame,
-            adjusted_end_frame=splice.left_out_frame,
-        )
+        if splice.left_keep_range_id:
+            left = adjusted[splice.left_keep_range_id]
+            adjusted[splice.left_keep_range_id] = KeptRange(
+                id=left.id,
+                start_word_id=left.start_word_id,
+                end_word_id=left.end_word_id,
+                suggested_start_frame=left.suggested_start_frame,
+                suggested_end_frame=left.suggested_end_frame,
+                adjusted_start_frame=left.adjusted_start_frame,
+                adjusted_end_frame=splice.left_out_frame,
+            )
         adjusted[splice.right_keep_range_id] = KeptRange(
-            id=right.id,
-            start_word_id=right.start_word_id,
-            end_word_id=right.end_word_id,
-            suggested_start_frame=right.suggested_start_frame,
-            suggested_end_frame=right.suggested_end_frame,
+            id=adjusted[splice.right_keep_range_id].id,
+            start_word_id=adjusted[splice.right_keep_range_id].start_word_id,
+            end_word_id=adjusted[splice.right_keep_range_id].end_word_id,
+            suggested_start_frame=adjusted[splice.right_keep_range_id].suggested_start_frame,
+            suggested_end_frame=adjusted[splice.right_keep_range_id].suggested_end_frame,
             adjusted_start_frame=splice.right_in_frame,
-            adjusted_end_frame=right.adjusted_end_frame,
+            adjusted_end_frame=adjusted[splice.right_keep_range_id].adjusted_end_frame,
         )
     return [adjusted[kept_range.id] for kept_range in kept_ranges]
 

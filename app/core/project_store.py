@@ -13,7 +13,11 @@ PROJECT_VERSION = 1
 
 def save_editor_project(path: Path, project: TranscriptProject, edits: EditDecisionList) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
+    path.write_text(json.dumps(editor_project_document(project, edits), indent=2), encoding="utf-8")
+
+
+def editor_project_document(project: TranscriptProject, edits: EditDecisionList) -> dict:
+    return {
         "version": PROJECT_VERSION,
         "project": {
             "source": project.source,
@@ -27,7 +31,6 @@ def save_editor_project(path: Path, project: TranscriptProject, edits: EditDecis
             "splice_adjustments": {key: asdict(value) for key, value in edits.splice_adjustments.items()},
         },
     }
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def load_editor_project(path: Path) -> tuple[TranscriptProject, EditDecisionList]:

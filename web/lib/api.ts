@@ -109,6 +109,55 @@ export type CaptionGenerateRequest = {
   compute_label: string;
 };
 
+export type TranscribeProjectRequest = {
+  model_label: string;
+  compute_label: string;
+};
+
+export type TranscriptionJobResponse = {
+  job_id: string;
+};
+
+export type TranscriptionJobStatus = {
+  status: "running" | "complete" | "failed";
+  value: number;
+  message: string;
+  result: EditorProjectResponse | null;
+  error: string | null;
+};
+
+export type ProjectDocumentResponse = {
+  filename: string;
+  document: unknown;
+};
+
+export type CaptionPreviewWord = {
+  text: string;
+  start: number;
+  end: number;
+};
+
+export type CaptionPreviewGroup = {
+  start: number;
+  end: number;
+  words: CaptionPreviewWord[];
+};
+
+export type CaptionPreviewResponse = {
+  source: string;
+  word_count: number;
+  used_project_transcript: boolean;
+  words: CaptionPreviewWord[];
+  groups: CaptionPreviewGroup[];
+};
+
+export type CaptionPreviewRequest = {
+  input_video_path?: string | null;
+  preset: CaptionPresetPayload;
+  model_label: string;
+  compute_label: string;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -148,6 +197,31 @@ export function getCurrentProject() {
   return request<EditorProjectResponse>("/api/projects/current");
 }
 
+export function chooseTranscriptVideo() {
+  return request<{ source: string }>("/api/projects/choose-video", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function transcribeProject(payload: TranscribeProjectRequest) {
+  return request<EditorProjectResponse>("/api/projects/transcribe", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function startTranscription(payload: TranscribeProjectRequest) {
+  return request<TranscriptionJobResponse>("/api/projects/transcribe/start", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getTranscriptionJob(jobId: string) {
+  return request<TranscriptionJobStatus>(`/api/projects/transcribe/jobs/${encodeURIComponent(jobId)}`);
+}
+
 export function deleteTokens(tokenIds: string[]) {
   return request<EditorProjectResponse>("/api/projects/current/delete", {
     method: "POST",
@@ -185,6 +259,10 @@ export function reviewSplice(anchorKey: string, reviewed: boolean) {
 
 export function saveProject() {
   return request<{ saved: string }>("/api/projects/current/save", { method: "POST" });
+}
+
+export function getProjectDocument() {
+  return request<ProjectDocumentResponse>("/api/projects/current/document");
 }
 
 export function exportCut() {
@@ -232,6 +310,13 @@ export function deleteCaptionStyle(name: string) {
 
 export function generateCaptionVideo(payload: CaptionGenerateRequest) {
   return request<{ output_path: string; progress: { value: number; message: string }[] }>("/api/caption/generate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function prepareCaptionPreview(payload: CaptionPreviewRequest) {
+  return request<CaptionPreviewResponse>("/api/caption/preview", {
     method: "POST",
     body: JSON.stringify(payload),
   });

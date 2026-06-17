@@ -24,6 +24,7 @@ app/exports/*
 !app/exports/.gitkeep
 projects/*
 !projects/.gitkeep
+*.vcg.json
 app/style_library.json
 tools/ffmpeg/
 models/

@@ -84,3 +84,28 @@ def test_deleted_silence_creates_splice_between_adjacent_words() -> None:
     assert plan.splices[0].right_word_id == "w6"
     assert plan.splices[0].left_out_frame == 51
     assert plan.splices[0].right_in_frame == 66
+
+
+def test_deleting_from_start_creates_adjustable_front_trim_splice() -> None:
+    edits = EditDecisionList()
+    edits.delete_words("delete_intro", "w1", "w3", reason="selection")
+
+    plan = generate_splices(_project(), edits)
+
+    assert [(item.start_word_id, item.end_word_id) for item in plan.kept_ranges] == [
+        ("w4", "w7"),
+    ]
+    assert len(plan.splices) == 1
+    splice = plan.splices[0]
+    assert splice.anchor_key == "START->w4"
+    assert splice.left_word_id == ""
+    assert splice.right_word_id == "w4"
+    assert splice.left_out_frame == 0
+    assert splice.right_in_frame == 30
+    assert plan.kept_ranges[0].adjusted_start_frame == 30
+
+    edits.adjust_splice(splice.anchor_key, right_in_delta=-3)
+    adjusted = generate_splices(_project(), edits)
+
+    assert adjusted.splices[0].right_in_frame == 27
+    assert adjusted.kept_ranges[0].adjusted_start_frame == 27

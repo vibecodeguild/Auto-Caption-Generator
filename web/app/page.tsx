@@ -13,34 +13,42 @@ import {
   Scissors,
   Upload,
 } from "lucide-react";
-import type { Dispatch, ReactNode, RefObject, SetStateAction } from "react";
+import type { Dispatch, MutableRefObject, ReactNode, RefObject, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HexColorInput, HexColorPicker } from "react-colorful";
 import {
   API_BASE,
   type CaptionOptionsResponse,
+  type CaptionPreviewGroup,
+  type CaptionPreviewResponse,
   type CaptionPresetPayload,
   type CaptionStylePayload,
   type DynamicSplice,
   type EditorProjectResponse,
+  type ProjectDocumentResponse,
+  type TranscriptionJobStatus,
   adjustSplice,
   captionOptions,
   captionSourceVideoUrl,
   chooseCaptionOutputFolder,
   chooseCaptionVideo,
+  chooseTranscriptVideo,
   deleteDeadSpace,
   deleteCaptionStyle,
   deleteTokens,
   exportCut,
   frameImageUrl,
   generateCaptionVideo,
+  getProjectDocument,
+  getTranscriptionJob,
   getCurrentProject,
   openProjectDialog,
+  prepareCaptionPreview,
   restoreTokens,
   reviewSplice,
   saveCaptionStyle,
-  saveProject,
   sourceVideoUrl,
+  startTranscription,
 } from "../lib/api";
 
 type PreviewState = {
@@ -50,6 +58,30 @@ type PreviewState = {
 };
 
 type ActiveTab = "transcript" | "caption";
+
+type ExportProgressState = {
+  status: "running" | "complete" | "failed";
+  message: string;
+  outputPath?: string;
+};
+
+type ProjectFileHandle = {
+  name: string;
+  createWritable: () => Promise<{
+    write: (data: Blob) => Promise<void>;
+    close: () => Promise<void>;
+  }>;
+};
+
+type WindowWithSaveFilePicker = Window & {
+  showSaveFilePicker?: (options: {
+    suggestedName: string;
+    types: Array<{
+      description: string;
+      accept: Record<string, string[]>;
+    }>;
+  }) => Promise<ProjectFileHandle>;
+};
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("transcript");
@@ -69,6 +101,7 @@ export default function Home() {
   const previewFrameRef = useRef<number | null>(null);
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
   const spliceMarkerRefs = useRef(new Map<string, HTMLButtonElement>());
+  const projectFileHandleRef = useRef<ProjectFileHandle | null>(null);
   const [captionOptionsData, setCaptionOptionsData] = useState<CaptionOptionsResponse | null>(null);
   const [captionSource, setCaptionSource] = useState<string | null>(null);
   const [captionOutputFolder, setCaptionOutputFolder] = useState("");
@@ -77,6 +110,10 @@ export default function Home() {
   const [captionStyleName, setCaptionStyleName] = useState("Magenta Pop");
   const [captionModel, setCaptionModel] = useState("Base - balanced");
   const [captionCompute, setCaptionCompute] = useState("CPU");
+  const [captionPreview, setCaptionPreview] = useState<CaptionPreviewResponse | null>(null);
+  const [transcriptSource, setTranscriptSource] = useState<string | null>(null);
+  const [transcriptionProgress, setTranscriptionProgress] = useState<TranscriptionJobStatus | null>(null);
+  const [exportProgress, setExportProgress] = useState<ExportProgressState | null>(null);
 
   const deletedWordIds = useMemo(() => new Set(project?.deleted_word_ids ?? []), [project]);
   const deletedSilenceIds = useMemo(() => new Set(project?.deleted_silence_ids ?? []), [project]);
@@ -87,6 +124,7 @@ export default function Home() {
   );
   const selectedSplice = project?.splices.find((splice) => splice.anchor_key === activeSplice) ?? project?.splices[0];
   const selectedSpliceIndex = project?.splices.findIndex((splice) => splice.anchor_key === selectedSplice?.anchor_key) ?? -1;
+  const transcriptVideoKey = project?.project.source ?? transcriptSource ?? "";
 
   const applyProject = useCallback((data: EditorProjectResponse) => {
     setProject(data);
@@ -180,9 +218,79 @@ export default function Home() {
     void run(
       () => openProjectDialog(),
       (data) => {
+        projectFileHandleRef.current = null;
         applyProject(data);
+        setTranscriptSource(data.project.source);
       },
     );
+  };
+
+  const handleChooseTranscriptVideo = () => {
+    void run(
+      () => chooseTranscriptVideo(),
+      (data) => {
+        setTranscriptSource(data.source);
+        setProject(null);
+        projectFileHandleRef.current = null;
+        setSelected([]);
+        setActiveSplice(null);
+        setStatus(`Selected ${data.source}`);
+      },
+    );
+  };
+
+  const handleGenerateTranscript = () => {
+    void run(
+      async () => {
+        const started = await startTranscription({ model_label: captionModel, compute_label: captionCompute });
+        setTranscriptionProgress({
+          status: "running",
+          value: 0,
+          message: "Starting transcription...",
+          result: null,
+          error: null,
+        });
+        try {
+          return await pollTranscriptionJob(started.job_id, setTranscriptionProgress);
+        } catch (error) {
+          setTranscriptionProgress(null);
+          throw error;
+        }
+      },
+      (data) => {
+        projectFileHandleRef.current = null;
+        applyProject(data);
+        setTranscriptSource(data.project.source);
+        setTranscriptionProgress(null);
+        setStatus(`Transcript ready: ${data.project.words.length} words`);
+      },
+    );
+  };
+
+  const handleExportCut = () => {
+    setBusy(true);
+    setExportProgress({
+      status: "running",
+      message: "Exporting edited video with FFmpeg...",
+    });
+    exportCut()
+      .then((result) => {
+        setStatus(`Exported ${result.output_path}`);
+        setExportProgress({
+          status: "complete",
+          message: "Export finished.",
+          outputPath: result.output_path,
+        });
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(message);
+        setExportProgress({
+          status: "failed",
+          message,
+        });
+      })
+      .finally(() => setBusy(false));
   };
 
   const handleChooseCaptionVideo = () => {
@@ -191,6 +299,7 @@ export default function Home() {
       (data) => {
         setCaptionSource(data.source);
         setCaptionOutputFolder(data.output_folder);
+        setCaptionPreview(null);
         setCaptionStatus(`Selected ${data.source}`);
       },
     );
@@ -232,6 +341,22 @@ export default function Home() {
     );
   };
 
+  const handlePrepareCaptionPreview = () => {
+    if (!captionPreset) return;
+    void run(
+      () => prepareCaptionPreview({
+        input_video_path: captionSource,
+        preset: captionPreset,
+        model_label: captionModel,
+        compute_label: captionCompute,
+      }),
+      (data) => {
+        setCaptionPreview(data);
+        setCaptionStatus(`Live preview ready: ${data.word_count} words${data.used_project_transcript ? " from project transcript" : ""}`);
+      },
+    );
+  };
+
   const handleSaveCaptionStyle = () => {
     if (!captionStyle) return;
     const name = window.prompt("Style name:", captionStyleName);
@@ -243,6 +368,16 @@ export default function Home() {
         setCaptionStyleName(name.trim());
         setCaptionStatus(`Saved style ${name.trim()}`);
       },
+    );
+  };
+
+  const handleSaveProject = () => {
+    void run(
+      async () => {
+        const projectDocument = await getProjectDocument();
+        return saveProjectDocument(projectDocument, projectFileHandleRef);
+      },
+      (fileName) => setStatus(`Saved ${fileName}`),
     );
   };
 
@@ -433,6 +568,17 @@ export default function Home() {
 
   return (
     <main className="app-shell">
+      {transcriptionProgress && (
+        <ProgressModal
+          progress={transcriptionProgress}
+        />
+      )}
+      {exportProgress && (
+        <ExportProgressModal
+          progress={exportProgress}
+          onClose={() => setExportProgress(null)}
+        />
+      )}
       <header className="topbar">
         <div>
           <h1>VCG Content Command Center</h1>
@@ -449,10 +595,16 @@ export default function Home() {
         <div className="top-actions">
           {activeTab === "transcript" ? (
             <>
+              <button onClick={handleChooseTranscriptVideo} disabled={busy}>
+                <FolderOpen size={16} /> Open Video
+              </button>
+              <button className="primary" onClick={handleGenerateTranscript} disabled={busy || !transcriptSource}>
+                <Upload size={16} /> Generate Transcript
+              </button>
               <button onClick={handleOpen} disabled={busy}>
                 <FolderOpen size={16} /> Open Project
               </button>
-              <button onClick={() => void run(saveProject, (result) => setStatus(`Saved ${result.saved}`))} disabled={busy || !project}>
+              <button onClick={handleSaveProject} disabled={busy || !project}>
                 <Save size={16} /> Save Project
               </button>
               <button onClick={() => void run(deleteDeadSpace, applyProject)} disabled={busy || !project}>
@@ -460,7 +612,7 @@ export default function Home() {
               </button>
               <button
                 className="primary"
-                onClick={() => void run(exportCut, (result) => setStatus(`Exported ${result.output_path}`))}
+                onClick={handleExportCut}
                 disabled={busy || !project}
               >
                 <Upload size={16} /> Export Cut
@@ -485,14 +637,15 @@ export default function Home() {
           <section className="preview-panel" ref={previewPanelRef}>
             <div className="panel-title">
               <span className="eyebrow">Source Preview</span>
-              <span>{project?.project.source ?? "No project loaded"}</span>
+              <span>{project?.project.source ?? transcriptSource ?? "No video selected"}</span>
             </div>
             <div className="preview-media" style={previewBox}>
               <video
                 ref={previewRef}
+                key={transcriptVideoKey}
                 controls
                 preload="metadata"
-                src={project ? sourceVideoUrl() : undefined}
+                src={transcriptVideoKey ? `${sourceVideoUrl()}?source=${encodeURIComponent(transcriptVideoKey)}` : undefined}
                 onLoadedMetadata={(event) => {
                   const video = event.currentTarget;
                   if (video.videoWidth && video.videoHeight) {
@@ -541,12 +694,14 @@ export default function Home() {
           captionOptionsData={captionOptionsData}
           captionOutputFolder={captionOutputFolder}
           captionPreset={captionPreset}
+          captionPreview={captionPreview}
           captionSource={captionSource}
           captionStatus={captionStatus}
           captionStyle={captionStyle}
           captionStyleName={captionStyleName}
           handleChooseCaptionOutputFolder={handleChooseCaptionOutputFolder}
           handleDeleteCaptionStyle={handleDeleteCaptionStyle}
+          handlePrepareCaptionPreview={handlePrepareCaptionPreview}
           handleSaveCaptionStyle={handleSaveCaptionStyle}
           setCaptionCompute={setCaptionCompute}
           setCaptionModel={setCaptionModel}
@@ -651,12 +806,14 @@ function CaptionGenerator({
   captionOptionsData,
   captionOutputFolder,
   captionPreset,
+  captionPreview,
   captionSource,
   captionStatus,
   captionStyle,
   captionStyleName,
   handleChooseCaptionOutputFolder,
   handleDeleteCaptionStyle,
+  handlePrepareCaptionPreview,
   handleSaveCaptionStyle,
   setCaptionCompute,
   setCaptionModel,
@@ -673,12 +830,14 @@ function CaptionGenerator({
   captionOptionsData: CaptionOptionsResponse | null;
   captionOutputFolder: string;
   captionPreset: CaptionPresetPayload | null;
+  captionPreview: CaptionPreviewResponse | null;
   captionSource: string | null;
   captionStatus: string;
   captionStyle: CaptionStylePayload | null;
   captionStyleName: string;
   handleChooseCaptionOutputFolder: () => void;
   handleDeleteCaptionStyle: () => void;
+  handlePrepareCaptionPreview: () => void;
   handleSaveCaptionStyle: () => void;
   setCaptionCompute: Dispatch<SetStateAction<string>>;
   setCaptionModel: Dispatch<SetStateAction<string>>;
@@ -698,6 +857,17 @@ function CaptionGenerator({
   }
 
   const styleNames = Object.keys(captionOptionsData.styles);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [videoTime, setVideoTime] = useState(0);
+  const captionVideoKey = captionSource ?? "";
+  const livePreviewGroups = useMemo(
+    () => captionPreview ? groupCaptionPreviewWords(captionPreview.words, captionPreset) : null,
+    [captionPreset, captionPreview],
+  );
+  const activePreviewGroup = useMemo(
+    () => livePreviewGroups?.find((group) => videoTime >= group.start && videoTime <= group.end) ?? null,
+    [livePreviewGroups, videoTime],
+  );
 
   const selectStyle = (name: string) => {
     setCaptionStyleName(name);
@@ -717,7 +887,16 @@ function CaptionGenerator({
         </div>
         <div className="caption-preview-media">
           {captionSource ? (
-            <video controls preload="metadata" src={captionSourceVideoUrl()} />
+            <video
+              ref={videoRef}
+              key={captionSource}
+              controls
+              preload="metadata"
+              src={`${captionSourceVideoUrl()}?source=${encodeURIComponent(captionVideoKey)}`}
+              onTimeUpdate={(event) => setVideoTime(event.currentTarget.currentTime)}
+              onSeeked={(event) => setVideoTime(event.currentTarget.currentTime)}
+              onLoadedMetadata={(event) => setVideoTime(event.currentTarget.currentTime)}
+            />
           ) : (
             <div className="empty preview-empty">No video selected</div>
           )}
@@ -737,24 +916,16 @@ function CaptionGenerator({
               textShadow: captionPreviewTextShadow(captionStyle),
             }}
           >
-            {captionPreviewWords(captionPreset).map((word, wordIndex, words) => {
-              const active = wordIndex === Math.min(1, words.length - 1);
-              return (
-                <span
-                  key={`${word}-${wordIndex}`}
-                  style={active ? {
-                    color: captionStyle.active_color,
-                    fontSize: `${Math.max(20, Math.round(captionStyle.active_font_size / 3))}px`,
-                    fontWeight: captionStyle.active_bold ? 900 : 400,
-                  } : undefined}
-                >
-                  {word}
-                  {wordIndex < words.length - 1 ? " " : ""}
-                </span>
-              );
-            })}
+            {activePreviewGroup ? (
+              <LiveCaptionWords group={activePreviewGroup} style={captionStyle} videoTime={videoTime} />
+            ) : captionPreview ? null : (
+              <SampleCaptionWords preset={captionPreset} style={captionStyle} />
+            )}
           </div>
         </div>
+        <button onClick={handlePrepareCaptionPreview} disabled={busy || !captionSource || !captionPreset}>
+          <Play size={16} /> Prepare Live Preview
+        </button>
         <div className="folder-row">
           <label>
             Output folder
@@ -920,6 +1091,67 @@ function EffectRow({
   );
 }
 
+function LiveCaptionWords({ group, style, videoTime }: { group: CaptionPreviewGroup; style: CaptionStylePayload; videoTime: number }) {
+  return (
+    <>
+      {group.words.map((word, wordIndex) => {
+        const active = videoTime >= word.start && videoTime <= word.end;
+        return (
+          <CaptionWordSpan
+            active={active}
+            key={`${word.text}-${word.start}-${wordIndex}`}
+            style={style}
+            text={word.text}
+            trailingSpace={wordIndex < group.words.length - 1}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+function SampleCaptionWords({ preset, style }: { preset: CaptionPresetPayload; style: CaptionStylePayload }) {
+  const words = captionPreviewWords(preset);
+  return (
+    <>
+      {words.map((word, wordIndex) => (
+        <CaptionWordSpan
+          active={wordIndex === Math.min(1, words.length - 1)}
+          key={`${word}-${wordIndex}`}
+          style={style}
+          text={word}
+          trailingSpace={wordIndex < words.length - 1}
+        />
+      ))}
+    </>
+  );
+}
+
+function CaptionWordSpan({
+  active,
+  style,
+  text,
+  trailingSpace,
+}: {
+  active: boolean;
+  style: CaptionStylePayload;
+  text: string;
+  trailingSpace: boolean;
+}) {
+  return (
+    <span
+      style={active ? {
+        color: style.active_color,
+        fontSize: `${Math.max(20, Math.round(style.active_font_size / 3))}px`,
+        fontWeight: style.active_bold ? 900 : 400,
+      } : undefined}
+    >
+      {text}
+      {trailingSpace ? " " : ""}
+    </span>
+  );
+}
+
 function ColorField({ compact = false, label, onChange, value }: { compact?: boolean; label: string; onChange: (value: string) => void; value: string }) {
   const [open, setOpen] = useState(false);
   const normalized = completeHexOrFallback(value);
@@ -976,6 +1208,44 @@ function captionPreviewWords(preset: CaptionPresetPayload) {
   return preview;
 }
 
+function groupCaptionPreviewWords(words: CaptionPreviewResponse["words"], preset: CaptionPresetPayload) {
+  const groups: CaptionPreviewGroup[] = [];
+  let current: CaptionPreviewResponse["words"] = [];
+
+  for (const word of words) {
+    const text = word.text.trim();
+    if (!text || word.end <= word.start) continue;
+    const normalized = { ...word, text };
+    if (!current.length) {
+      current = [normalized];
+      continue;
+    }
+
+    const proposed = [...current, normalized];
+    const proposedText = proposed.map((item) => item.text).join(" ");
+    const proposedDuration = proposed[proposed.length - 1].end - proposed[0].start;
+    const shouldBreak =
+      proposed.length > preset.max_words ||
+      proposedDuration > preset.max_duration ||
+      proposedText.length > preset.max_chars ||
+      current[current.length - 1].text.endsWith(".") ||
+      current[current.length - 1].text.endsWith("?") ||
+      current[current.length - 1].text.endsWith("!");
+
+    if (shouldBreak) {
+      groups.push({ start: current[0].start, end: current[current.length - 1].end, words: current });
+      current = [normalized];
+    } else {
+      current = proposed;
+    }
+  }
+
+  if (current.length) {
+    groups.push({ start: current[0].start, end: current[current.length - 1].end, words: current });
+  }
+  return groups;
+}
+
 function outlineTextShadows(width: number, color: string) {
   const shadows: string[] = [];
   for (let offset = 1; offset <= width; offset += 1) {
@@ -1013,6 +1283,110 @@ function previewFontStack(fontFamily: string) {
   return stacks[fontFamily] ?? `${fontFamily}, "Segoe UI", Arial, sans-serif`;
 }
 
+async function pollTranscriptionJob(
+  jobId: string,
+  setProgress: Dispatch<SetStateAction<TranscriptionJobStatus | null>>,
+) {
+  for (;;) {
+    await delay(400);
+    const status = await getTranscriptionJob(jobId);
+    setProgress(status);
+    if (status.status === "complete" && status.result) {
+      return status.result;
+    }
+    if (status.status === "failed") {
+      throw new Error(status.error ?? status.message);
+    }
+  }
+}
+
+async function saveProjectDocument(
+  projectDocument: ProjectDocumentResponse,
+  fileHandleRef: MutableRefObject<ProjectFileHandle | null>,
+) {
+  const contents = `${JSON.stringify(projectDocument.document, null, 2)}\n`;
+  const blob = new Blob([contents], { type: "application/json" });
+  const picker = (window as WindowWithSaveFilePicker).showSaveFilePicker;
+
+  if (picker) {
+    const handle = fileHandleRef.current ?? await picker({
+      suggestedName: projectDocument.filename,
+      types: [
+        {
+          description: "VCG project",
+          accept: { "application/json": [".vcg.json", ".json"] },
+        },
+      ],
+    });
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    fileHandleRef.current = handle;
+    return handle.name;
+  }
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = projectDocument.filename;
+  link.click();
+  URL.revokeObjectURL(url);
+  return projectDocument.filename;
+}
+
+function delay(milliseconds: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function ProgressModal({ progress }: { progress: TranscriptionJobStatus }) {
+  const determinate = progress.value >= 0;
+  const clamped = Math.max(0, Math.min(100, progress.value));
+  return (
+    <div className="modal-backdrop" role="status" aria-live="polite">
+      <div className="progress-modal">
+        <span className="eyebrow">Transcript Generation</span>
+        <h2>Generating transcript</h2>
+        <p>{progress.message}</p>
+        <div className={determinate ? "progress-track" : "progress-track indeterminate"}>
+          <div className="progress-bar" style={determinate ? { width: `${clamped}%` } : undefined} />
+        </div>
+        <strong>{determinate ? `${clamped}%` : "Working..."}</strong>
+      </div>
+    </div>
+  );
+}
+
+function ExportProgressModal({
+  onClose,
+  progress,
+}: {
+  onClose: () => void;
+  progress: ExportProgressState;
+}) {
+  const running = progress.status === "running";
+  const failed = progress.status === "failed";
+  return (
+    <div className="modal-backdrop" role="status" aria-live="polite">
+      <div className={failed ? "progress-modal failed" : "progress-modal"}>
+        <span className="eyebrow">Video Export</span>
+        <h2>{running ? "Exporting cut" : failed ? "Export failed" : "Export complete"}</h2>
+        <p>{progress.message}</p>
+        {progress.outputPath && <p className="modal-path">{progress.outputPath}</p>}
+        <div className={running ? "progress-track indeterminate" : "progress-track"}>
+          <div className="progress-bar" style={running ? undefined : { width: "100%" }} />
+        </div>
+        {running ? (
+          <strong>Working...</strong>
+        ) : (
+          <button className="modal-action" onClick={onClose}>
+            OK
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SpliceReviewPanel({
   loop,
   moveSpliceSelection,
@@ -1035,6 +1409,7 @@ function SpliceReviewPanel({
   updateSplice: (operation: () => Promise<EditorProjectResponse>) => void;
 }) {
   const count = project?.splices.length ?? 0;
+  const isFrontTrim = selectedSplice?.left_word_id === "";
   return (
     <section className="splice-review-panel">
       <div className="splice-review-header">
@@ -1073,14 +1448,16 @@ function SpliceReviewPanel({
         )}
       </div>
       {selectedSplice ? (
-        <div className="splice-review-body">
+        <div className={isFrontTrim ? "splice-review-body single" : "splice-review-body"}>
+          {!isFrontTrim && (
+            <CutFrameCard
+              title="OUT frame"
+              frame={selectedSplice.left_out_frame}
+              onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, delta, 0))}
+            />
+          )}
           <CutFrameCard
-            title="OUT frame"
-            frame={selectedSplice.left_out_frame}
-            onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, delta, 0))}
-          />
-          <CutFrameCard
-            title="IN frame"
+            title={isFrontTrim ? "START frame" : "IN frame"}
             frame={selectedSplice.right_in_frame}
             onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, 0, delta))}
           />

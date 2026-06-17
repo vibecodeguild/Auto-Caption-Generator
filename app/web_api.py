@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import mimetypes
 import subprocess
+import threading
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 from tkinter import Tk, filedialog
@@ -13,15 +15,20 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from app.core.pipeline import generate_captioned_video
+from app.core.caption_grouping import group_words
+from app.core.editor_pipeline import generate_editor_transcript
 from app.core.edit_decisions import EditDecisionList
 from app.core.editor_tokens import transcript_tokens
 from app.core.ffmpeg_locator import find_ffmpeg
-from app.core.project_store import load_editor_project, save_editor_project
-from app.core.settings import COMPUTE_OPTIONS, MODEL_OPTIONS, PRESETS, CaptionPreset, CaptionStyle, default_style, exports_dir, temp_dir
+from app.core.ffmpeg_runner import extract_audio
+from app.core.project_store import editor_project_document, load_editor_project, save_editor_project
+from app.core.settings import COMPUTE_OPTIONS, MODEL_OPTIONS, PRESETS, CaptionPreset, CaptionStyle, WordTimestamp, default_style, exports_dir, temp_dir
 from app.core.splice_generation import DynamicSplice, SplicePlan, generate_splices
 from app.core.splice_preview import source_splice_preview_segments
 from app.core.style_library import delete_user_style, is_built_in_style, load_style_library, save_user_style
+from app.core.transcriber import transcribe_audio
 from app.core.transcript_model import TranscriptProject
+from app.core.file_utils import validate_input_video
 from app.core.video_cutter import frame_intervals_to_seconds, run_cut
 
 
@@ -29,7 +36,59 @@ class ApiState:
     project: TranscriptProject | None = None
     edits: EditDecisionList = EditDecisionList()
     project_path: Path | None = None
+    transcript_video_path: Path | None = None
     caption_video_path: Path | None = None
+    caption_preview_cache_key: tuple[str, str, str] | None = None
+    caption_preview_words: list[WordTimestamp] | None = None
+    transcription_jobs: dict[str, TranscriptionJob]
+
+    def __init__(self) -> None:
+        self.project = None
+        self.edits = EditDecisionList()
+        self.project_path = None
+        self.transcript_video_path = None
+        self.caption_video_path = None
+        self.caption_preview_cache_key = None
+        self.caption_preview_words = None
+        self.transcription_jobs = {}
+
+
+class TranscriptionJob:
+    def __init__(self) -> None:
+        self.status = "running"
+        self.value = 0
+        self.message = "Starting transcription..."
+        self.result: dict | None = None
+        self.error: str | None = None
+        self.lock = threading.Lock()
+
+    def update(self, value: int, message: str) -> None:
+        with self.lock:
+            self.value = value
+            self.message = message
+
+    def complete(self, result: dict) -> None:
+        with self.lock:
+            self.status = "complete"
+            self.value = 100
+            self.message = "Transcript ready."
+            self.result = result
+
+    def fail(self, error: str) -> None:
+        with self.lock:
+            self.status = "failed"
+            self.error = error
+            self.message = error
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return {
+                "status": self.status,
+                "value": self.value,
+                "message": self.message,
+                "result": self.result,
+                "error": self.error,
+            }
 
 
 state = ApiState()
@@ -65,6 +124,11 @@ class ReviewSpliceRequest(BaseModel):
 
 class ExportCutRequest(BaseModel):
     output_path: str | None = None
+
+
+class TranscribeProjectRequest(BaseModel):
+    model_label: str
+    compute_label: str
 
 
 class CaptionStylePayload(BaseModel):
@@ -105,6 +169,13 @@ class CaptionGenerateRequest(BaseModel):
     input_video_path: str | None = None
     output_folder: str | None = None
     style: CaptionStylePayload
+    preset: CaptionPresetPayload
+    model_label: str
+    compute_label: str
+
+
+class CaptionPreviewRequest(BaseModel):
+    input_video_path: str | None = None
     preset: CaptionPresetPayload
     model_label: str
     compute_label: str
@@ -158,6 +229,27 @@ def _choose_project_file() -> Path | None:
     return Path(filename).resolve() if filename else None
 
 
+def _choose_project_save_file(project: TranscriptProject) -> Path | None:
+    default_name = "editor-project.vcg.json"
+    source_path = Path(project.source)
+    if source_path.exists():
+        default_name = f"{source_path.stem}.vcg.json"
+
+    root = Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        filename = filedialog.asksaveasfilename(
+            title="Save VCG project",
+            initialfile=default_name,
+            defaultextension=".vcg.json",
+            filetypes=[("VCG project", "*.vcg.json"), ("JSON files", "*.json"), ("All files", "*.*")],
+        )
+    finally:
+        root.destroy()
+    return Path(filename).resolve() if filename else None
+
+
 def _choose_video_file() -> Path | None:
     root = Tk()
     root.withdraw()
@@ -189,6 +281,92 @@ def current_project() -> dict:
     return _project_response()
 
 
+@app.post("/api/projects/choose-video")
+def choose_transcript_video() -> dict:
+    path = _choose_video_file()
+    if path is None:
+        raise HTTPException(status_code=400, detail="No video file selected.")
+    state.transcript_video_path = path
+    state.project = None
+    state.edits = EditDecisionList()
+    state.project_path = None
+    return {"source": str(path)}
+
+
+@app.post("/api/projects/transcribe")
+def transcribe_project(payload: TranscribeProjectRequest) -> dict:
+    if payload.model_label not in MODEL_OPTIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown Whisper model: {payload.model_label}")
+    if payload.compute_label not in COMPUTE_OPTIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown compute device: {payload.compute_label}")
+    if state.transcript_video_path is None:
+        raise HTTPException(status_code=400, detail="Choose a video before transcribing.")
+
+    source = state.transcript_video_path.expanduser().resolve()
+    validate_input_video(source)
+    project = generate_editor_transcript(
+        input_video_path=source,
+        working_dir=temp_dir(),
+        model_size=MODEL_OPTIONS[payload.model_label],
+        compute_mode=payload.compute_label,
+    )
+    state.project = project
+    state.edits = EditDecisionList()
+    state.project_path = None
+    state.caption_video_path = source
+    return _project_response()
+
+
+@app.post("/api/projects/transcribe/start")
+def start_transcribe_project(payload: TranscribeProjectRequest) -> dict:
+    if payload.model_label not in MODEL_OPTIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown Whisper model: {payload.model_label}")
+    if payload.compute_label not in COMPUTE_OPTIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown compute device: {payload.compute_label}")
+    if state.transcript_video_path is None:
+        raise HTTPException(status_code=400, detail="Choose a video before transcribing.")
+
+    source = state.transcript_video_path.expanduser().resolve()
+    validate_input_video(source)
+    job_id = uuid.uuid4().hex
+    job = TranscriptionJob()
+    state.transcription_jobs[job_id] = job
+
+    thread = threading.Thread(
+        target=_run_transcription_job,
+        args=(job, source, MODEL_OPTIONS[payload.model_label], payload.compute_label),
+        daemon=True,
+    )
+    thread.start()
+    return {"job_id": job_id}
+
+
+@app.get("/api/projects/transcribe/jobs/{job_id}")
+def transcribe_job_status(job_id: str) -> dict:
+    job = state.transcription_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Transcription job not found.")
+    return job.snapshot()
+
+
+def _run_transcription_job(job: TranscriptionJob, source: Path, model_size: str, compute_mode: str) -> None:
+    try:
+        project = generate_editor_transcript(
+            input_video_path=source,
+            working_dir=temp_dir(),
+            model_size=model_size,
+            compute_mode=compute_mode,
+            progress_callback=job.update,
+        )
+        state.project = project
+        state.edits = EditDecisionList()
+        state.project_path = None
+        state.caption_video_path = source
+        job.complete(_project_response())
+    except Exception as exc:  # noqa: BLE001
+        job.fail(str(exc))
+
+
 @app.post("/api/projects/current/delete")
 def delete_selection(payload: TokenSelectionRequest) -> dict:
     project = _require_project()
@@ -198,6 +376,7 @@ def delete_selection(payload: TokenSelectionRequest) -> dict:
         state.edits.delete_word_selection(start, end)
     for silence_id in silence_ids:
         state.edits.delete_silence(f"delete_{silence_id}", silence_id)
+    _save_current_project_if_loaded(project)
     return _project_response()
 
 
@@ -210,6 +389,7 @@ def restore_selection(payload: TokenSelectionRequest) -> dict:
         state.edits.restore_word_selection(start, end)
     for silence_id in silence_ids:
         state.edits.restore_silence(silence_id)
+    _save_current_project_if_loaded(project)
     return _project_response()
 
 
@@ -220,24 +400,27 @@ def delete_dead_space() -> dict:
     for silence in project.silence_ranges:
         if silence.id not in deleted:
             state.edits.delete_silence(f"delete_{silence.id}", silence.id)
+    _save_current_project_if_loaded(project)
     return _project_response()
 
 
 @app.post("/api/projects/current/splices/adjust")
 def adjust_splice(payload: AdjustSpliceRequest) -> dict:
-    _require_project()
+    project = _require_project()
     state.edits.adjust_splice(
         payload.anchor_key,
         left_out_delta=payload.left_delta,
         right_in_delta=payload.right_delta,
     )
+    _save_current_project_if_loaded(project)
     return _project_response()
 
 
 @app.post("/api/projects/current/splices/review")
 def review_splice(payload: ReviewSpliceRequest) -> dict:
-    _require_project()
+    project = _require_project()
     state.edits.adjust_splice(payload.anchor_key, reviewed=payload.reviewed)
+    _save_current_project_if_loaded(project)
     return _project_response()
 
 
@@ -245,9 +428,23 @@ def review_splice(payload: ReviewSpliceRequest) -> dict:
 def save_project() -> dict:
     project = _require_project()
     if state.project_path is None:
-        raise HTTPException(status_code=400, detail="No project path is loaded.")
+        path = _choose_project_save_file(project)
+        if path is None:
+            raise HTTPException(status_code=400, detail="No project file selected.")
+        state.project_path = path
     save_editor_project(state.project_path, project, state.edits)
     return {"saved": str(state.project_path)}
+
+
+@app.get("/api/projects/current/document")
+def project_document() -> dict:
+    project = _require_project()
+    source = Path(project.source)
+    filename = f"{source.stem if source.stem else 'editor-project'}.vcg.json"
+    return {
+        "filename": filename,
+        "document": editor_project_document(project, state.edits),
+    }
 
 
 @app.post("/api/projects/current/export")
@@ -361,6 +558,76 @@ def generate_caption_video(payload: CaptionGenerateRequest) -> dict:
     return {"output_path": output, "progress": progress}
 
 
+@app.post("/api/caption/preview")
+def caption_preview(payload: CaptionPreviewRequest) -> dict:
+    source = _caption_source_path(payload.input_video_path)
+    if payload.model_label not in MODEL_OPTIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown Whisper model: {payload.model_label}")
+    if payload.compute_label not in COMPUTE_OPTIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown compute device: {payload.compute_label}")
+
+    words, used_project_transcript = _caption_preview_words(
+        source=source,
+        model_size=MODEL_OPTIONS[payload.model_label],
+        compute_label=payload.compute_label,
+    )
+    groups = group_words(
+        words,
+        max_words=payload.preset.max_words,
+        max_duration=payload.preset.max_duration,
+        max_chars=payload.preset.max_chars,
+    )
+    if not groups:
+        raise HTTPException(status_code=400, detail="No speech was detected in this video.")
+    state.caption_video_path = source
+    return {
+        "source": str(source),
+        "word_count": len(words),
+        "used_project_transcript": used_project_transcript,
+        "words": [asdict(word) for word in words],
+        "groups": [
+            {
+                "start": group.start,
+                "end": group.end,
+                "words": [asdict(word) for word in group.words],
+            }
+            for group in groups
+        ],
+    }
+
+
+def _caption_source_path(input_video_path: str | None) -> Path:
+    source_text = input_video_path or (str(state.caption_video_path) if state.caption_video_path else None)
+    if source_text is None and state.project is not None:
+        source_text = state.project.source
+    if source_text is None:
+        raise HTTPException(status_code=400, detail="Choose a video before preparing live captions.")
+
+    source = Path(source_text).expanduser().resolve()
+    if not source.exists():
+        raise HTTPException(status_code=400, detail=f"Source video not found: {source}")
+    return source
+
+
+def _caption_preview_words(source: Path, model_size: str, compute_label: str) -> tuple[list[WordTimestamp], bool]:
+    if state.project is not None and Path(state.project.source).expanduser().resolve() == source:
+        return [
+            WordTimestamp(text=word.text, start=word.start, end=word.end)
+            for word in state.project.words
+        ], True
+
+    cache_key = (str(source), model_size, compute_label)
+    if state.caption_preview_cache_key == cache_key and state.caption_preview_words is not None:
+        return state.caption_preview_words, False
+
+    validate_input_video(source)
+    audio_path = extract_audio(source, temp_dir() / "caption_preview_audio.wav")
+    words = transcribe_audio(audio_path, model_size=model_size, compute_mode=compute_label)
+    state.caption_preview_cache_key = cache_key
+    state.caption_preview_words = words
+    return words, False
+
+
 @app.get("/api/caption/source-video")
 def caption_source_video(request: Request, range_header: str | None = Header(default=None, alias="Range")) -> Response:
     source_text = str(state.caption_video_path) if state.caption_video_path else None
@@ -376,8 +643,9 @@ def caption_source_video(request: Request, range_header: str | None = Header(def
 
 @app.get("/api/projects/current/source-video")
 def source_video(request: Request, range_header: str | None = Header(default=None, alias="Range")) -> Response:
-    project = _require_project()
-    path = Path(project.source)
+    path = Path(state.project.source) if state.project is not None else state.transcript_video_path
+    if path is None:
+        raise HTTPException(status_code=404, detail="No transcript source video is loaded.")
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Source video not found: {path}")
     return _range_response(path, range_header)
@@ -433,6 +701,11 @@ def _require_project() -> TranscriptProject:
     if state.project is None:
         raise HTTPException(status_code=404, detail="No project is loaded.")
     return state.project
+
+
+def _save_current_project_if_loaded(project: TranscriptProject) -> None:
+    if state.project_path is not None:
+        save_editor_project(state.project_path, project, state.edits)
 
 
 def _project_response() -> dict:

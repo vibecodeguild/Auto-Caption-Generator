@@ -181,6 +181,91 @@ label {
   border-color: var(--magenta);
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(7, 8, 13, 0.72);
+}
+
+.progress-modal {
+  display: grid;
+  gap: 12px;
+  width: min(420px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 18px;
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.5);
+}
+
+.progress-modal h2 {
+  margin: 0;
+  font-family: Montserrat, "Segoe UI", Arial, sans-serif;
+  font-size: 22px;
+  line-height: 1.15;
+}
+
+.progress-modal p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.progress-modal strong {
+  justify-self: end;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.progress-modal.failed .progress-bar {
+  background: #ff3d71;
+}
+
+.modal-path {
+  overflow-wrap: anywhere;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.modal-action {
+  justify-self: end;
+  min-width: 96px;
+}
+
+.progress-track {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #0f1118;
+}
+
+.progress-bar {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--teal);
+  transition: width 160ms ease;
+}
+
+.progress-track.indeterminate .progress-bar {
+  width: 42%;
+  animation: progress-slide 950ms ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+
+  100% {
+    transform: translateX(260%);
+  }
+}
+
 .preview-panel,
 .transcript-context-panel,
 .splice-review-panel,
@@ -523,6 +608,10 @@ label {
   grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   gap: 7px;
   min-height: 0;
+}
+
+.splice-review-body.single {
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .frame-preview-grid {
