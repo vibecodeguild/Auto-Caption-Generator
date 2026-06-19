@@ -6,10 +6,45 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.core.edit_decisions import EditDecisionList
+from app.core.audio_normalizer import LoudnessHotspot, LoudnessHotspots, LoudnessMeasurement
 from app.core.project_store import load_editor_project, save_editor_project
 from app.core.transcript_model import SilenceRange, TranscriptProject, TranscriptWord
 from app import web_api
 from app.web_api import app, state
+
+
+def test_api_rejects_untrusted_host() -> None:
+    client = TestClient(app)
+
+    response = client.get("/api/health", headers={"host": "attacker.example"})
+
+    assert response.status_code == 400
+
+
+def test_api_rejects_untrusted_browser_origin() -> None:
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/projects/open-dialog",
+        headers={"origin": "https://attacker.example"},
+        json={},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Requests are only accepted from the local VCG interface."
+
+
+def test_api_accepts_local_browser_origin() -> None:
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/health",
+        headers={"origin": "http://127.0.0.1:3000"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
 
 
 def _project() -> TranscriptProject:
@@ -226,3 +261,206 @@ def test_adjust_splice_updates_preview_segments() -> None:
     assert splice["left_out_adjustment"] == 2
     assert splice["right_in_adjustment"] == -1
     assert splice["preview_segments_4s"] == [[0.0, 0.466667], [1.466667, 3.466667]]
+
+
+def test_audio_analysis_is_required_before_normalized_export(tmp_path: Path, monkeypatch) -> None:
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"video")
+    output_dir = tmp_path / "exports"
+    state.audio_video_path = video_path
+    state.audio_analysis_key = None
+    state.audio_analysis = None
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/audio/normalize",
+        json={
+            "preset_id": "gentle",
+            "target_i": -14,
+            "target_lra": 7,
+            "target_tp": -1.5,
+            "output_folder": str(output_dir),
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Analyze this video" in response.json()["detail"]
+
+
+def test_audio_analyze_and_export_use_matching_settings(tmp_path: Path, monkeypatch) -> None:
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"video")
+    output_dir = tmp_path / "exports"
+    state.audio_video_path = video_path
+    state.audio_analysis_key = None
+    state.audio_analysis = None
+    measurement = LoudnessMeasurement(
+        input_i=-20.0,
+        input_tp=-3.0,
+        input_lra=8.0,
+        input_thresh=-30.0,
+        target_offset=0.1,
+    )
+    monkeypatch.setattr(web_api, "analyze_audio", lambda **kwargs: measurement)
+    hotspots = LoudnessHotspots(
+        loudest=LoudnessHotspot(30.0, 40.0, -12.0),
+        quietest_speech=LoudnessHotspot(70.0, 80.0, -35.0),
+    )
+    monkeypatch.setattr(web_api, "analyze_loudness_hotspots", lambda **kwargs: hotspots)
+
+    exported: dict[str, object] = {}
+
+    def fake_normalize(**kwargs) -> Path:
+        exported.update(kwargs)
+        return kwargs["output_video"]
+
+    monkeypatch.setattr(web_api, "normalize_video_audio", fake_normalize)
+
+    client = TestClient(app)
+    payload = {
+        "preset_id": "gentle",
+        "target_i": -14,
+        "target_lra": 7,
+        "target_tp": -1.5,
+    }
+    analyze_response = client.post("/api/audio/analyze", json=payload)
+    export_response = client.post(
+        "/api/audio/normalize",
+        json={**payload, "output_folder": str(output_dir)},
+    )
+
+    assert analyze_response.status_code == 200
+    assert analyze_response.json()["measurement"]["input_i"] == -20.0
+    assert analyze_response.json()["hotspots"]["loudest"]["start_seconds"] == 30.0
+    assert export_response.status_code == 200
+    assert export_response.json()["output_path"] == str(output_dir / "source_normalized.mp4")
+    assert exported["preset_id"] == "gentle"
+    assert exported["measurement"] == measurement
+
+
+def test_audio_preview_analyzes_when_needed_and_serves_both_versions(tmp_path: Path, monkeypatch) -> None:
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"video")
+    state.audio_video_path = video_path
+    state.audio_analysis_key = None
+    state.audio_analysis = None
+    state.audio_preview_id = None
+    state.audio_preview_original = None
+    state.audio_preview_corrected = None
+    measurement = LoudnessMeasurement(
+        input_i=-19.0,
+        input_tp=-2.8,
+        input_lra=6.0,
+        input_thresh=-29.0,
+        target_offset=0.0,
+    )
+    monkeypatch.setattr(web_api, "analyze_audio", lambda **kwargs: measurement)
+    hotspots = LoudnessHotspots(
+        loudest=LoudnessHotspot(10.0, 20.0, -14.0),
+        quietest_speech=LoudnessHotspot(40.0, 50.0, -33.0),
+    )
+    monkeypatch.setattr(web_api, "analyze_loudness_hotspots", lambda **kwargs: hotspots)
+    monkeypatch.setattr(web_api, "temp_dir", lambda: tmp_path)
+
+    captured: dict[str, object] = {}
+
+    def fake_preview(**kwargs):
+        captured.update(kwargs)
+        kwargs["original_preview"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["original_preview"].write_bytes(b"original")
+        kwargs["corrected_preview"].write_bytes(b"corrected")
+        return kwargs["original_preview"], kwargs["corrected_preview"]
+
+    monkeypatch.setattr(web_api, "create_audio_preview", fake_preview)
+    client = TestClient(app)
+    response = client.post(
+        "/api/audio/preview",
+        json={
+            "preset_id": "gentle",
+            "target_i": -14,
+            "target_lra": 7,
+            "target_tp": -1.5,
+            "start_seconds": 12.5,
+            "duration_seconds": 20,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["start_seconds"] == 12.5
+    assert data["duration_seconds"] == 20
+    assert data["measurement"]["input_i"] == -19.0
+    assert data["hotspots"]["quietest_speech"]["start_seconds"] == 40.0
+    assert captured["start_seconds"] == 12.5
+    assert captured["duration_seconds"] == 20
+
+    original_response = client.get(f"/api/audio/preview/{data['preview_id']}/original")
+    corrected_response = client.get(f"/api/audio/preview/{data['preview_id']}/corrected")
+    assert original_response.status_code == 200
+    assert original_response.content == b"original"
+    assert corrected_response.status_code == 200
+    assert corrected_response.content == b"corrected"
+
+
+def test_audio_preview_rejects_invalid_duration(tmp_path: Path) -> None:
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"video")
+    state.audio_video_path = video_path
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/audio/preview",
+        json={
+            "preset_id": "gentle",
+            "target_i": -14,
+            "target_lra": 7,
+            "target_tp": -1.5,
+            "start_seconds": 0,
+            "duration_seconds": 45,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "between 5 and 30 seconds" in response.json()["detail"]
+
+
+def test_audio_preview_returns_friendly_ffmpeg_error(tmp_path: Path, monkeypatch) -> None:
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"video")
+    state.audio_video_path = video_path
+    state.audio_analysis_key = None
+    state.audio_analysis = None
+    monkeypatch.setattr(
+        web_api,
+        "analyze_audio",
+        lambda **kwargs: LoudnessMeasurement(-19.0, -2.8, 6.0, -29.0, 0.0),
+    )
+    monkeypatch.setattr(
+        web_api,
+        "analyze_loudness_hotspots",
+        lambda **kwargs: LoudnessHotspots(
+            loudest=LoudnessHotspot(10.0, 20.0, -14.0),
+            quietest_speech=LoudnessHotspot(40.0, 50.0, -33.0),
+        ),
+    )
+    monkeypatch.setattr(
+        web_api,
+        "create_audio_preview",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("Could not create preview.\n\nFFmpeg details:\nlong internal output")),
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/audio/preview",
+        json={
+            "preset_id": "gentle",
+            "target_i": -14,
+            "target_lra": 7,
+            "target_tp": -1.5,
+            "start_seconds": 0,
+            "duration_seconds": 20,
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Could not create preview."

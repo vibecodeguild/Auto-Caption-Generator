@@ -7,17 +7,26 @@ import {
   ChevronLeft,
   ChevronRight,
   FolderOpen,
+  Gauge,
+  Headphones,
+  Pause,
   Play,
   RotateCcw,
   Save,
   Scissors,
   Upload,
+  Volume2,
+  VolumeX,
+  WandSparkles,
 } from "lucide-react";
 import type { Dispatch, MutableRefObject, ReactNode, RefObject, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HexColorInput, HexColorPicker } from "react-colorful";
 import {
   API_BASE,
+  type AudioAnalysisResponse,
+  type AudioOptionsResponse,
+  type AudioPreviewResponse,
   type CaptionOptionsResponse,
   type CaptionPreviewGroup,
   type CaptionPreviewResponse,
@@ -28,20 +37,28 @@ import {
   type ProjectDocumentResponse,
   type TranscriptionJobStatus,
   adjustSplice,
+  analyzeVideoAudio,
+  audioOptions,
+  audioPreviewUrl,
+  audioSourceVideoUrl,
   captionOptions,
   captionSourceVideoUrl,
   chooseCaptionOutputFolder,
   chooseCaptionVideo,
+  chooseAudioOutputFolder,
+  chooseAudioVideo,
   chooseTranscriptVideo,
   deleteDeadSpace,
   deleteCaptionStyle,
   deleteTokens,
   exportCut,
   frameImageUrl,
+  generateAudioPreview,
   generateCaptionVideo,
   getProjectDocument,
   getTranscriptionJob,
   getCurrentProject,
+  normalizeVideoAudio,
   openProjectDialog,
   prepareCaptionPreview,
   restoreTokens,
@@ -57,7 +74,7 @@ type PreviewState = {
   loop: boolean;
 };
 
-type ActiveTab = "transcript" | "caption";
+type ActiveTab = "transcript" | "caption" | "audio";
 
 type ExportProgressState = {
   status: "running" | "complete" | "failed";
@@ -114,6 +131,16 @@ export default function Home() {
   const [transcriptSource, setTranscriptSource] = useState<string | null>(null);
   const [transcriptionProgress, setTranscriptionProgress] = useState<TranscriptionJobStatus | null>(null);
   const [exportProgress, setExportProgress] = useState<ExportProgressState | null>(null);
+  const [audioOptionsData, setAudioOptionsData] = useState<AudioOptionsResponse | null>(null);
+  const [audioSource, setAudioSource] = useState<string | null>(null);
+  const [audioOutputFolder, setAudioOutputFolder] = useState("");
+  const [audioPresetId, setAudioPresetId] = useState("gentle");
+  const [audioTargetI, setAudioTargetI] = useState(-14);
+  const [audioTargetLra, setAudioTargetLra] = useState(7);
+  const [audioTargetTp, setAudioTargetTp] = useState(-1.5);
+  const [audioAnalysis, setAudioAnalysis] = useState<AudioAnalysisResponse | null>(null);
+  const [audioPreview, setAudioPreview] = useState<AudioPreviewResponse | null>(null);
+  const [audioStatus, setAudioStatus] = useState("Choose a video, then analyze its audio.");
 
   const deletedWordIds = useMemo(() => new Set(project?.deleted_word_ids ?? []), [project]);
   const deletedSilenceIds = useMemo(() => new Set(project?.deleted_silence_ids ?? []), [project]);
@@ -194,6 +221,25 @@ export default function Home() {
       cancelled = true;
     };
   }, [applyCaptionOptions]);
+
+  useEffect(() => {
+    let cancelled = false;
+    audioOptions()
+      .then((data) => {
+        if (cancelled) return;
+        setAudioOptionsData(data);
+        setAudioSource(data.source);
+        setAudioOutputFolder(data.output_folder);
+        setAudioPresetId(data.defaults.preset_id);
+        setAudioTargetI(data.defaults.target_i);
+        setAudioTargetLra(data.defaults.target_lra);
+        setAudioTargetTp(data.defaults.target_tp);
+      })
+      .catch((error) => setAudioStatus(error instanceof Error ? error.message : String(error)));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     updatePreviewBox();
@@ -337,6 +383,99 @@ export default function Home() {
       (result) => {
         const finalProgress = result.progress.at(-1);
         setCaptionStatus(`${finalProgress?.message ?? "Done."} Exported ${result.output_path}`);
+      },
+    );
+  };
+
+  const audioPayload = {
+    input_video_path: audioSource,
+    preset_id: audioPresetId,
+    target_i: audioTargetI,
+    target_lra: audioTargetLra,
+    target_tp: audioTargetTp,
+  };
+
+  const handleChooseAudioVideo = () => {
+    void run(
+      () => chooseAudioVideo(),
+      (data) => {
+        setAudioSource(data.source);
+        setAudioOutputFolder(data.output_folder);
+        setAudioAnalysis(null);
+        setAudioPreview(null);
+        setAudioStatus("Video selected. Analyze the audio to see its current levels.");
+      },
+    );
+  };
+
+  const handleChooseAudioOutputFolder = () => {
+    void run(
+      () => chooseAudioOutputFolder(),
+      (data) => {
+        setAudioOutputFolder(data.output_folder);
+        setAudioStatus(`Output folder: ${data.output_folder}`);
+      },
+    );
+  };
+
+  const handleAnalyzeAudio = () => {
+    setAudioStatus("Analyzing the complete audio track...");
+    void run(
+      async () => {
+        try {
+          return await analyzeVideoAudio(audioPayload);
+        } catch (error) {
+          setAudioStatus(error instanceof Error ? error.message : String(error));
+          throw error;
+        }
+      },
+      (data) => {
+        setAudioAnalysis(data);
+        setAudioStatus("Analysis complete. Review the measurements, then export when ready.");
+      },
+    );
+  };
+
+  const handleNormalizeAudio = () => {
+    setAudioStatus("Creating a new video with corrected audio...");
+    void run(
+      async () => {
+        try {
+          return await normalizeVideoAudio({ ...audioPayload, output_folder: audioOutputFolder });
+        } catch (error) {
+          setAudioStatus(error instanceof Error ? error.message : String(error));
+          throw error;
+        }
+      },
+      (data) => setAudioStatus(`Done. Exported ${data.output_path}`),
+    );
+  };
+
+  const handleGenerateAudioPreview = (startSeconds: number) => {
+    setAudioStatus("Analyzing settings and creating the 20-second A/B preview...");
+    void run(
+      async () => {
+        try {
+          return await generateAudioPreview({
+            ...audioPayload,
+            start_seconds: startSeconds,
+            duration_seconds: 20,
+          });
+        } catch (error) {
+          setAudioStatus(error instanceof Error ? error.message : String(error));
+          throw error;
+        }
+      },
+      (data) => {
+        setAudioPreview(data);
+        setAudioAnalysis({
+          source: audioSource ?? "",
+          measurement: data.measurement,
+          target: data.target,
+          hotspots: data.hotspots,
+          hotspot_message: data.hotspot_message,
+        });
+        setAudioStatus("Preview ready. Switch between Original and Corrected while listening.");
       },
     );
   };
@@ -591,6 +730,9 @@ export default function Home() {
           <button className={activeTab === "caption" ? "tab active" : "tab"} onClick={() => setActiveTab("caption")}>
             Caption Generator
           </button>
+          <button className={activeTab === "audio" ? "tab active" : "tab"} onClick={() => setActiveTab("audio")}>
+            Audio Normalizer
+          </button>
         </nav>
         <div className="top-actions">
           {activeTab === "transcript" ? (
@@ -618,13 +760,25 @@ export default function Home() {
                 <Upload size={16} /> Export Cut
               </button>
             </>
-          ) : (
+          ) : activeTab === "caption" ? (
             <>
               <button onClick={handleChooseCaptionVideo} disabled={busy}>
                 <FolderOpen size={16} /> Choose Video
               </button>
               <button className="primary" onClick={handleGenerateCaptions} disabled={busy || !captionStyle || !captionPreset || !captionSource}>
                 <Upload size={16} /> Generate Captioned Video
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={handleChooseAudioVideo} disabled={busy}>
+                <FolderOpen size={16} /> Choose Video
+              </button>
+              <button onClick={handleAnalyzeAudio} disabled={busy || !audioSource}>
+                <Gauge size={16} /> Analyze Audio
+              </button>
+              <button className="primary" onClick={handleNormalizeAudio} disabled={busy || !audioAnalysis}>
+                <WandSparkles size={16} /> Export Corrected Video
               </button>
             </>
           )}
@@ -686,7 +840,7 @@ export default function Home() {
           transcriptScrollRef={transcriptScrollRef}
         />
       </section>
-      ) : (
+      ) : activeTab === "caption" ? (
         <CaptionGenerator
           busy={busy}
           captionCompute={captionCompute}
@@ -712,8 +866,377 @@ export default function Home() {
           updateCaptionPreset={updateCaptionPreset}
           updateCaptionStyle={updateCaptionStyle}
         />
+      ) : (
+        <AudioNormalizer
+          analysis={audioAnalysis}
+          busy={busy}
+          options={audioOptionsData}
+          outputFolder={audioOutputFolder}
+          presetId={audioPresetId}
+          preview={audioPreview}
+          source={audioSource}
+          status={audioStatus}
+          targetI={audioTargetI}
+          targetLra={audioTargetLra}
+          targetTp={audioTargetTp}
+          onChooseOutputFolder={handleChooseAudioOutputFolder}
+          onClearPreview={() => setAudioPreview(null)}
+          onGeneratePreview={handleGenerateAudioPreview}
+          onPreviewHotspot={(startSeconds) => handleGenerateAudioPreview(startSeconds)}
+          onPresetChange={(value) => {
+            setAudioPresetId(value);
+            setAudioAnalysis(null);
+            setAudioPreview(null);
+            setAudioStatus("Preset changed. Analyze again before exporting.");
+          }}
+          onOutputFolderChange={setAudioOutputFolder}
+          onTargetIChange={(value) => {
+            setAudioTargetI(value);
+            setAudioAnalysis(null);
+            setAudioPreview(null);
+          }}
+          onTargetLraChange={(value) => {
+            setAudioTargetLra(value);
+            setAudioAnalysis(null);
+            setAudioPreview(null);
+          }}
+          onTargetTpChange={(value) => {
+            setAudioTargetTp(value);
+            setAudioAnalysis(null);
+            setAudioPreview(null);
+          }}
+        />
       )}
     </main>
+  );
+}
+
+function AudioNormalizer({
+  analysis,
+  busy,
+  options,
+  outputFolder,
+  presetId,
+  preview,
+  source,
+  status,
+  targetI,
+  targetLra,
+  targetTp,
+  onChooseOutputFolder,
+  onClearPreview,
+  onGeneratePreview,
+  onPreviewHotspot,
+  onOutputFolderChange,
+  onPresetChange,
+  onTargetIChange,
+  onTargetLraChange,
+  onTargetTpChange,
+}: {
+  analysis: AudioAnalysisResponse | null;
+  busy: boolean;
+  options: AudioOptionsResponse | null;
+  outputFolder: string;
+  presetId: string;
+  preview: AudioPreviewResponse | null;
+  source: string | null;
+  status: string;
+  targetI: number;
+  targetLra: number;
+  targetTp: number;
+  onChooseOutputFolder: () => void;
+  onClearPreview: () => void;
+  onGeneratePreview: (startSeconds: number) => void;
+  onPreviewHotspot: (startSeconds: number) => void;
+  onOutputFolderChange: (value: string) => void;
+  onPresetChange: (value: string) => void;
+  onTargetIChange: (value: number) => void;
+  onTargetLraChange: (value: number) => void;
+  onTargetTpChange: (value: number) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [playheadSeconds, setPlayheadSeconds] = useState(0);
+  const [previewMode, setPreviewMode] = useState<"original" | "corrected">("corrected");
+  const [previewCurrentSeconds, setPreviewCurrentSeconds] = useState(0);
+  const [previewClipDuration, setPreviewClipDuration] = useState(20);
+  const [sourceDuration, setSourceDuration] = useState(0);
+  const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  const [isPreviewMuted, setIsPreviewMuted] = useState(false);
+  const switchTimeRef = useRef(0);
+  const switchWasPlayingRef = useRef(false);
+
+  useEffect(() => {
+    setPreviewMode("corrected");
+    setPreviewCurrentSeconds(0);
+    setIsPreviewPlaying(false);
+    switchTimeRef.current = 0;
+  }, [preview?.preview_id]);
+
+  const generatePreviewAtPlayhead = () => {
+    const video = videoRef.current;
+    const current = video?.currentTime ?? playheadSeconds;
+    const duration = video?.duration;
+    const latestStart = duration && Number.isFinite(duration) ? Math.max(0, duration - 20) : current;
+    onGeneratePreview(Math.max(0, Math.min(current, latestStart)));
+  };
+
+  const switchPreviewMode = (mode: "original" | "corrected") => {
+    switchTimeRef.current = videoRef.current?.currentTime ?? 0;
+    switchWasPlayingRef.current = !(videoRef.current?.paused ?? true);
+    setPreviewMode(mode);
+  };
+
+  const togglePreviewPlayback = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      void video.play();
+    } else {
+      video.pause();
+    }
+  };
+
+  const seekPreviewSourceTime = (sourceTime: number) => {
+    const video = videoRef.current;
+    if (!video || !preview) return;
+    const clipTime = Math.max(0, Math.min(sourceTime - preview.start_seconds, previewClipDuration));
+    video.currentTime = clipTime;
+    setPreviewCurrentSeconds(clipTime);
+  };
+
+  const playerSource = preview
+    ? audioPreviewUrl(preview.preview_id, previewMode)
+    : source
+      ? `${audioSourceVideoUrl()}?source=${encodeURIComponent(source)}`
+      : undefined;
+  const hotspots = analysis?.hotspots ?? null;
+
+  return (
+    <section className="audio-workspace">
+      <section className="audio-preview-panel">
+        <div className="panel-title">
+          <span className="eyebrow">Source Video</span>
+          <span>{source ?? "No video selected"}</span>
+        </div>
+        <div className="audio-preview-media">
+          {playerSource ? (
+            <video
+              ref={videoRef}
+              key={preview ? `${preview.preview_id}-${previewMode}` : source}
+              controls={!preview}
+              preload="metadata"
+              src={playerSource}
+              onLoadedMetadata={(event) => {
+                const video = event.currentTarget;
+                if (preview) {
+                  const duration = Number.isFinite(video.duration) ? video.duration : preview.duration_seconds;
+                  setPreviewClipDuration(duration);
+                  const restoredTime = Math.min(switchTimeRef.current, duration);
+                  video.currentTime = restoredTime;
+                  setPreviewCurrentSeconds(restoredTime);
+                  video.muted = isPreviewMuted;
+                  if (switchWasPlayingRef.current) {
+                    switchWasPlayingRef.current = false;
+                    void video.play();
+                  }
+                } else if (Number.isFinite(video.duration)) {
+                  setSourceDuration(video.duration);
+                }
+              }}
+              onTimeUpdate={(event) => {
+                if (preview) {
+                  setPreviewCurrentSeconds(event.currentTarget.currentTime);
+                } else {
+                  setPlayheadSeconds(event.currentTarget.currentTime);
+                }
+              }}
+              onSeeked={(event) => {
+                if (preview) {
+                  setPreviewCurrentSeconds(event.currentTarget.currentTime);
+                } else {
+                  setPlayheadSeconds(event.currentTarget.currentTime);
+                }
+              }}
+              onPlay={() => setIsPreviewPlaying(true)}
+              onPause={() => setIsPreviewPlaying(false)}
+              onEnded={() => setIsPreviewPlaying(false)}
+            />
+          ) : (
+            <div className="empty preview-empty">Choose a video from the toolbar</div>
+          )}
+        </div>
+        {preview && (
+          <div className="source-time-controls">
+            <button className="icon-control" onClick={togglePreviewPlayback} disabled={busy} title={isPreviewPlaying ? "Pause preview" : "Play preview"}>
+              {isPreviewPlaying ? <Pause size={17} /> : <Play size={17} />}
+            </button>
+            <span className="source-time-current">{formatPreciseTime(preview.start_seconds + previewCurrentSeconds)}</span>
+            <input
+              aria-label="Preview position in source video"
+              type="range"
+              min={preview.start_seconds}
+              max={preview.start_seconds + previewClipDuration}
+              step={0.1}
+              value={preview.start_seconds + previewCurrentSeconds}
+              onChange={(event) => seekPreviewSourceTime(Number(event.target.value))}
+            />
+            <span className="source-time-end">{formatPreciseTime(preview.start_seconds + previewClipDuration)}</span>
+            {sourceDuration > 0 && <span className="source-duration">of {formatTime(sourceDuration)}</span>}
+            <button
+              className="icon-control"
+              onClick={() => {
+                const muted = !isPreviewMuted;
+                setIsPreviewMuted(muted);
+                if (videoRef.current) videoRef.current.muted = muted;
+              }}
+              disabled={busy}
+              title={isPreviewMuted ? "Unmute preview" : "Mute preview"}
+            >
+              {isPreviewMuted ? <VolumeX size={17} /> : <Volume2 size={17} />}
+            </button>
+          </div>
+        )}
+        {source && (
+          <div className="audio-preview-controls">
+            {preview ? (
+              <>
+                <div className="preview-mode-switch" aria-label="Preview audio version">
+                  <button className={previewMode === "original" ? "active" : ""} onClick={() => switchPreviewMode("original")} disabled={busy}>
+                    Original
+                  </button>
+                  <button className={previewMode === "corrected" ? "active" : ""} onClick={() => switchPreviewMode("corrected")} disabled={busy}>
+                    Corrected
+                  </button>
+                </div>
+                <span>Source range {formatPreciseTime(preview.start_seconds)}–{formatPreciseTime(preview.start_seconds + previewClipDuration)}</span>
+                <button onClick={onClearPreview} disabled={busy}>Choose another section</button>
+              </>
+            ) : (
+              <>
+                <span>Move the video playhead to the section you want to compare.</span>
+                <button className="preview-generate" onClick={generatePreviewAtPlayhead} disabled={busy}>
+                  <Headphones size={16} /> Generate 20-Second Preview at {formatTime(playheadSeconds)}
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        <div className="audio-status" aria-live="polite">
+          <Volume2 size={18} />
+          <span>{busy ? "Processing audio. This can take about the length of the video." : status}</span>
+        </div>
+        <div className="folder-row">
+          <label>
+            Output folder
+            <input value={outputFolder} onChange={(event) => onOutputFolderChange(event.target.value)} />
+          </label>
+          <button onClick={onChooseOutputFolder} disabled={busy}>
+            <FolderOpen size={16} /> Change
+          </button>
+        </div>
+      </section>
+
+      <section className="audio-controls">
+        <SettingsCard title="Choose Correction Strength">
+          <div className="audio-preset-list">
+            {(options?.presets ?? []).map((preset) => (
+              <button
+                key={preset.id}
+                className={preset.id === presetId ? "audio-preset active" : "audio-preset"}
+                onClick={() => onPresetChange(preset.id)}
+                disabled={busy}
+              >
+                <span>{preset.name}</span>
+                <small>{preset.description}</small>
+              </button>
+            ))}
+          </div>
+          {presetId === "strong" && (
+            <div className="audio-warning">
+              Strong leveling may make room noise, breaths, and microphone hiss more noticeable.
+            </div>
+          )}
+        </SettingsCard>
+
+        <div className="audio-results-stack">
+          <SettingsCard title="Audio Measurements">
+            {analysis ? (
+              <>
+                {presetId !== "normalize" && (
+                  <div className="measurement-note">
+                    Measurements include the selected voice leveling and show the signal immediately before final loudness normalization.
+                  </div>
+                )}
+                <div className="measurement-grid">
+                  <Measurement label={presetId === "normalize" ? "Source loudness" : "After leveling"} value={`${analysis.measurement.input_i.toFixed(1)} LUFS`} />
+                  <Measurement label="Target loudness" value={`${analysis.target.integrated_lufs.toFixed(1)} LUFS`} emphasized />
+                  <Measurement label={presetId === "normalize" ? "Source true peak" : "Leveled true peak"} value={`${analysis.measurement.input_tp.toFixed(1)} dBTP`} />
+                  <Measurement label="Peak ceiling" value={`${analysis.target.true_peak_dbtp.toFixed(1)} dBTP`} />
+                  <Measurement label={presetId === "normalize" ? "Source loudness range" : "Leveled range"} value={`${analysis.measurement.input_lra.toFixed(1)} LU`} />
+                  <Measurement label="Target loudness range" value={`${analysis.target.loudness_range_lu.toFixed(1)} LU`} />
+                </div>
+                {hotspots ? <div className="hotspot-grid">
+                  <button className="hotspot-option loudest" onClick={() => onPreviewHotspot(hotspots.loudest.start_seconds)} disabled={busy}>
+                    <span>Loudest speech</span>
+                    <strong>{formatTime(hotspots.loudest.focus_seconds)}</strong>
+                    <small>{hotspots.loudest.loudness_lufs.toFixed(1)} LUFS near this point</small>
+                    <em>Preview the section most likely to be turned down</em>
+                  </button>
+                  <button className="hotspot-option quietest" onClick={() => onPreviewHotspot(hotspots.quietest_speech.start_seconds)} disabled={busy}>
+                    <span>Quietest speech</span>
+                    <strong>{formatTime(hotspots.quietest_speech.focus_seconds)}</strong>
+                    <small>{hotspots.quietest_speech.loudness_lufs.toFixed(1)} LUFS near this point</small>
+                    <em>Preview the section most likely to be raised</em>
+                  </button>
+                </div> : (
+                  <div className="measurement-note">
+                    {analysis.hotspot_message ?? "No speech sections were available for automatic loud and quiet previews."}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="analysis-empty">
+                <Gauge size={28} />
+                <strong>No measurements yet</strong>
+                <span>Analyze the video to measure its full audio track before export.</span>
+              </div>
+            )}
+          </SettingsCard>
+
+          <SettingsCard title="Advanced Targets">
+            <div className="advanced-copy">The defaults are tuned for spoken-word YouTube videos. Change these only when you have a specific delivery requirement.</div>
+            <div className="audio-target-grid">
+              <NumberField label="Integrated loudness (LUFS)" value={targetI} min={-24} max={-10} step={0.5} onChange={onTargetIChange} />
+              <NumberField label="True peak ceiling (dBTP)" value={targetTp} min={-3} max={-1} step={0.1} onChange={onTargetTpChange} />
+              <NumberField label="Loudness range (LU)" value={targetLra} min={1} max={20} step={0.5} onChange={onTargetLraChange} />
+            </div>
+          </SettingsCard>
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function formatTime(seconds: number) {
+  const wholeSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(wholeSeconds / 60);
+  const remainingSeconds = wholeSeconds % 60;
+  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+}
+
+function formatPreciseTime(seconds: number) {
+  const safeSeconds = Math.max(0, seconds);
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainingSeconds = safeSeconds - minutes * 60;
+  return `${minutes}:${remainingSeconds.toFixed(1).padStart(4, "0")}`;
+}
+
+function Measurement({ label, value, emphasized = false }: { label: string; value: string; emphasized?: boolean }) {
+  return (
+    <div className={emphasized ? "measurement emphasized" : "measurement"}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 

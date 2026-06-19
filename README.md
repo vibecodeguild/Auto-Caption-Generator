@@ -21,6 +21,7 @@ The app does not require user accounts, cloud uploads, analytics, or API keys.
 - Reusable caption style library
 - Font, color, outline, shadow, glow, position, and grouping controls
 - FFmpeg subtitle burn-in and transcript cut export to MP4
+- Independent audio normalizer with measured YouTube loudness targets and optional voice leveling
 - Experimental transcript edit tab with video transcription, dynamic splice rows, frame nudge controls, project save/open, splice preview, and rough cut export
 
 ## Planned Direction
@@ -101,10 +102,38 @@ Then open:
 http://127.0.0.1:3000
 ```
 
-The web editor currently opens an existing `.vcg.json` editor project by path,
-plays the original source video through the browser video element, supports
-word/dead-space delete and restore decisions, previews dynamic splices by
-seeking through the source video, saves the project, and exports a rough cut.
+This is a local desktop-style application, not a network service. Keep both
+ports bound to `127.0.0.1`; the API has no user authentication and is designed
+to access files selected on the local machine. Do not expose ports `3000` or
+`8731` through a router, tunnel, reverse proxy, container port mapping, or
+firewall rule.
+
+The Content Command Center includes separate workspaces for transcript editing,
+caption generation, and audio normalization. The transcript editor opens
+`.vcg.json` projects, plays the original source video, supports word/dead-space
+edit decisions, previews dynamic splices, and exports a rough cut.
+
+### Audio Normalizer Workflow
+
+1. Open **Audio Normalizer** and choose a video.
+2. Select Normalize Only, Gentle Voice Leveling, or Strong Voice Leveling.
+3. Move the source-video playhead to a representative section and generate a
+   20-second preview.
+4. Switch between Original and Corrected playback to compare the same clip.
+5. Click **Analyze Audio** to measure the complete audio track if you have not
+   already generated a preview.
+6. Review the loudness, true peak, and loudness range. When speech is detected,
+   the app also recommends the loudest speech and quietest speech sections.
+7. Use either recommendation to generate an Original/Corrected A/B preview,
+   or continue using a section selected with the video playhead.
+8. Click **Export Corrected Video** to create a new `_normalized.mp4` file.
+
+The defaults target `-14 LUFS` integrated loudness, `-1.5 dBTP` true peak, and
+`7 LU` loudness range. The original video is never modified. Video is stream
+copied when possible while audio is exported as 48 kHz AAC. Preview clips are
+temporary and are replaced whenever a new section or source video is selected.
+Recommended sections use faster-whisper's voice activity detection so silence
+and steady background noise are not treated as quiet speech.
 
 ### PySide Prototype
 
@@ -166,11 +195,13 @@ model cache. That is expected setup-time network access for local model files.
 ```
 
 The core tests cover caption grouping, ASS subtitle formatting, active-word
-subtitle events, style persistence, and effect rendering flags.
+subtitle events, style persistence, audio analysis, two-pass normalization,
+and API export safeguards.
 
 ## Notes For Public Reuse
 
 - The project is licensed under the MIT License.
+- Security reports and supported-version guidance are in [`SECURITY.md`](SECURITY.md).
 - Do not commit videos, generated exports, temporary audio, model files, FFmpeg binaries, virtual environments, or secret files.
 - Only include font files you are licensed to redistribute.
 - FFmpeg has its own license and redistribution requirements.

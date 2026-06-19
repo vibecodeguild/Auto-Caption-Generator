@@ -11,9 +11,19 @@ from tkinter import Tk, filedialog
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
+from app.core.audio_normalizer import (
+    LoudnessHotspots,
+    LoudnessMeasurement,
+    analyze_audio,
+    analyze_loudness_hotspots,
+    create_audio_preview,
+    normalize_video_audio,
+    preset_options,
+)
 from app.core.pipeline import generate_captioned_video
 from app.core.caption_grouping import group_words
 from app.core.editor_pipeline import generate_editor_transcript
@@ -40,6 +50,14 @@ class ApiState:
     caption_video_path: Path | None = None
     caption_preview_cache_key: tuple[str, str, str] | None = None
     caption_preview_words: list[WordTimestamp] | None = None
+    audio_video_path: Path | None = None
+    audio_analysis_key: tuple[str, str, float, float, float] | None = None
+    audio_analysis: LoudnessMeasurement | None = None
+    audio_hotspots: LoudnessHotspots | None = None
+    audio_hotspots_source: Path | None = None
+    audio_preview_id: str | None = None
+    audio_preview_original: Path | None = None
+    audio_preview_corrected: Path | None = None
     transcription_jobs: dict[str, TranscriptionJob]
 
     def __init__(self) -> None:
@@ -50,6 +68,14 @@ class ApiState:
         self.caption_video_path = None
         self.caption_preview_cache_key = None
         self.caption_preview_words = None
+        self.audio_video_path = None
+        self.audio_analysis_key = None
+        self.audio_analysis = None
+        self.audio_hotspots = None
+        self.audio_hotspots_source = None
+        self.audio_preview_id = None
+        self.audio_preview_original = None
+        self.audio_preview_corrected = None
         self.transcription_jobs = {}
 
 
@@ -92,15 +118,40 @@ class TranscriptionJob:
 
 
 state = ApiState()
-app = FastAPI(title="VCG AutoCaption Local API")
+LOCAL_UI_ORIGINS = {"http://127.0.0.1:3000", "http://localhost:3000"}
+
+app = FastAPI(
+    title="VCG AutoCaption Local API",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
+    allow_origins=sorted(LOCAL_UI_ORIGINS),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["127.0.0.1", "localhost", "testserver"],
+)
+
+
+@app.middleware("http")
+async def enforce_local_browser_origin(request: Request, call_next):
+    origin = request.headers.get("origin")
+    if origin is not None and origin not in LOCAL_UI_ORIGINS:
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Requests are only accepted from the local VCG interface."},
+        )
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 class OpenProjectRequest(BaseModel):
@@ -184,6 +235,23 @@ class CaptionPreviewRequest(BaseModel):
 class CaptionStyleSaveRequest(BaseModel):
     name: str
     style: CaptionStylePayload
+
+
+class AudioAnalyzeRequest(BaseModel):
+    input_video_path: str | None = None
+    preset_id: str = "gentle"
+    target_i: float = -14.0
+    target_lra: float = 7.0
+    target_tp: float = -1.5
+
+
+class AudioNormalizeRequest(AudioAnalyzeRequest):
+    output_folder: str | None = None
+
+
+class AudioPreviewRequest(AudioAnalyzeRequest):
+    start_seconds: float = 0.0
+    duration_seconds: float = 20.0
 
 
 @app.get("/api/health")
@@ -502,6 +570,193 @@ def choose_caption_output_folder() -> dict:
     return {"output_folder": str(path)}
 
 
+@app.get("/api/audio/options")
+def audio_options() -> dict:
+    return {
+        "presets": preset_options(),
+        "source": str(state.audio_video_path) if state.audio_video_path else None,
+        "output_folder": str(exports_dir()),
+        "defaults": {
+            "preset_id": "gentle",
+            "target_i": -14.0,
+            "target_lra": 7.0,
+            "target_tp": -1.5,
+        },
+    }
+
+
+@app.post("/api/audio/choose-video")
+def choose_audio_video() -> dict:
+    path = _choose_video_file()
+    if path is None:
+        raise HTTPException(status_code=400, detail="No video file selected.")
+    state.audio_video_path = path
+    state.audio_analysis_key = None
+    state.audio_analysis = None
+    state.audio_hotspots = None
+    state.audio_hotspots_source = None
+    _clear_audio_preview()
+    return {"source": str(path), "output_folder": str(exports_dir())}
+
+
+@app.post("/api/audio/choose-output-folder")
+def choose_audio_output_folder() -> dict:
+    path = _choose_output_folder()
+    if path is None:
+        raise HTTPException(status_code=400, detail="No output folder selected.")
+    return {"output_folder": str(path)}
+
+
+@app.post("/api/audio/analyze")
+def analyze_video_audio(payload: AudioAnalyzeRequest) -> dict:
+    source = _audio_source_path(payload.input_video_path)
+    _validate_audio_targets(payload)
+    try:
+        measurement = analyze_audio(
+            ffmpeg=find_ffmpeg(),
+            input_video=source,
+            preset_id=payload.preset_id,
+            target_i=payload.target_i,
+            target_lra=payload.target_lra,
+            target_tp=payload.target_tp,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    hotspot_error: str | None = None
+    try:
+        hotspots = analyze_loudness_hotspots(
+            ffmpeg=find_ffmpeg(),
+            input_video=source,
+        )
+    except RuntimeError as exc:
+        hotspots = None
+        hotspot_error = str(exc).split("\n\nFFmpeg details:", 1)[0]
+    state.audio_video_path = source
+    state.audio_analysis_key = _audio_analysis_key(source, payload)
+    state.audio_analysis = measurement
+    state.audio_hotspots = hotspots
+    state.audio_hotspots_source = source if hotspots else None
+    return {
+        "source": str(source),
+        "measurement": measurement.to_dict(),
+        "target": {
+            "integrated_lufs": payload.target_i,
+            "loudness_range_lu": payload.target_lra,
+            "true_peak_dbtp": payload.target_tp,
+        },
+        "hotspots": hotspots.to_dict() if hotspots else None,
+        "hotspot_message": hotspot_error,
+    }
+
+
+@app.post("/api/audio/normalize")
+def normalize_audio(payload: AudioNormalizeRequest) -> dict:
+    source = _audio_source_path(payload.input_video_path)
+    _validate_audio_targets(payload)
+    key = _audio_analysis_key(source, payload)
+    measurement = state.audio_analysis if state.audio_analysis_key == key else None
+    if measurement is None:
+        raise HTTPException(status_code=400, detail="Analyze this video with the selected preset before exporting.")
+    output_root = Path(payload.output_folder).expanduser().resolve() if payload.output_folder else exports_dir()
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_path = output_root / f"{source.stem}_normalized.mp4"
+    try:
+        normalize_video_audio(
+            ffmpeg=find_ffmpeg(),
+            input_video=source,
+            output_video=output_path,
+            preset_id=payload.preset_id,
+            measurement=measurement,
+            target_i=payload.target_i,
+            target_lra=payload.target_lra,
+            target_tp=payload.target_tp,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"output_path": str(output_path)}
+
+
+@app.post("/api/audio/preview")
+def generate_audio_preview(payload: AudioPreviewRequest) -> dict:
+    source = _audio_source_path(payload.input_video_path)
+    _validate_audio_targets(payload)
+    if payload.start_seconds < 0:
+        raise HTTPException(status_code=400, detail="Preview start time must be zero or greater.")
+    if not 5.0 <= payload.duration_seconds <= 30.0:
+        raise HTTPException(status_code=400, detail="Preview duration must be between 5 and 30 seconds.")
+
+    key = _audio_analysis_key(source, payload)
+    measurement = state.audio_analysis if state.audio_analysis_key == key else None
+    if measurement is None:
+        try:
+            measurement = analyze_audio(
+                ffmpeg=find_ffmpeg(),
+                input_video=source,
+                preset_id=payload.preset_id,
+                target_i=payload.target_i,
+                target_lra=payload.target_lra,
+                target_tp=payload.target_tp,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        state.audio_analysis_key = key
+        state.audio_analysis = measurement
+    hotspots = state.audio_hotspots if state.audio_hotspots_source == source else None
+    hotspot_error: str | None = None
+    if hotspots is None:
+        try:
+            hotspots = analyze_loudness_hotspots(
+                ffmpeg=find_ffmpeg(),
+                input_video=source,
+            )
+            state.audio_hotspots = hotspots
+            state.audio_hotspots_source = source
+        except RuntimeError as exc:
+            hotspot_error = str(exc).split("\n\nFFmpeg details:", 1)[0]
+
+    _clear_audio_preview()
+    preview_id = uuid.uuid4().hex
+    preview_root = temp_dir()
+    original_path = preview_root / f"audio_preview_{preview_id}_original.mp4"
+    corrected_path = preview_root / f"audio_preview_{preview_id}_corrected.mp4"
+    try:
+        create_audio_preview(
+            ffmpeg=find_ffmpeg(),
+            input_video=source,
+            original_preview=original_path,
+            corrected_preview=corrected_path,
+            start_seconds=payload.start_seconds,
+            duration_seconds=payload.duration_seconds,
+            preset_id=payload.preset_id,
+            measurement=measurement,
+            target_i=payload.target_i,
+            target_lra=payload.target_lra,
+            target_tp=payload.target_tp,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        message = str(exc).split("\n\nFFmpeg details:", 1)[0]
+        raise HTTPException(status_code=500, detail=message) from exc
+    state.audio_video_path = source
+    state.audio_preview_id = preview_id
+    state.audio_preview_original = original_path
+    state.audio_preview_corrected = corrected_path
+    return {
+        "preview_id": preview_id,
+        "start_seconds": payload.start_seconds,
+        "duration_seconds": payload.duration_seconds,
+        "measurement": measurement.to_dict(),
+        "target": {
+            "integrated_lufs": payload.target_i,
+            "loudness_range_lu": payload.target_lra,
+            "true_peak_dbtp": payload.target_tp,
+        },
+        "hotspots": hotspots.to_dict() if hotspots else None,
+        "hotspot_message": hotspot_error,
+    }
+
+
 @app.post("/api/caption/styles")
 def save_caption_style(payload: CaptionStyleSaveRequest) -> dict:
     try:
@@ -641,6 +896,30 @@ def caption_source_video(request: Request, range_header: str | None = Header(def
     return _range_response(path, range_header)
 
 
+@app.get("/api/audio/source-video")
+def audio_source_video(request: Request, range_header: str | None = Header(default=None, alias="Range")) -> Response:
+    if state.audio_video_path is None:
+        raise HTTPException(status_code=404, detail="No audio normalizer source video is loaded.")
+    if not state.audio_video_path.exists():
+        raise HTTPException(status_code=404, detail=f"Source video not found: {state.audio_video_path}")
+    return _range_response(state.audio_video_path, range_header)
+
+
+@app.get("/api/audio/preview/{preview_id}/{mode}")
+def audio_preview_media(preview_id: str, mode: str, range_header: str | None = Header(default=None, alias="Range")) -> Response:
+    if preview_id != state.audio_preview_id:
+        raise HTTPException(status_code=404, detail="Audio preview not found.")
+    if mode == "original":
+        path = state.audio_preview_original
+    elif mode == "corrected":
+        path = state.audio_preview_corrected
+    else:
+        raise HTTPException(status_code=400, detail="Preview mode must be original or corrected.")
+    if path is None or not path.exists():
+        raise HTTPException(status_code=404, detail="Audio preview file not found.")
+    return _range_response(path, range_header)
+
+
 @app.get("/api/projects/current/source-video")
 def source_video(request: Request, range_header: str | None = Header(default=None, alias="Range")) -> Response:
     path = Path(state.project.source) if state.project is not None else state.transcript_video_path
@@ -701,6 +980,53 @@ def _require_project() -> TranscriptProject:
     if state.project is None:
         raise HTTPException(status_code=404, detail="No project is loaded.")
     return state.project
+
+
+def _audio_source_path(input_video_path: str | None) -> Path:
+    source_text = input_video_path or (str(state.audio_video_path) if state.audio_video_path else None)
+    if source_text is None:
+        raise HTTPException(status_code=400, detail="Choose a video before analyzing its audio.")
+    source = Path(source_text).expanduser().resolve()
+    try:
+        validate_input_video(source)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return source
+
+
+def _audio_analysis_key(source: Path, payload: AudioAnalyzeRequest) -> tuple[str, str, float, float, float]:
+    return (
+        str(source),
+        payload.preset_id,
+        payload.target_i,
+        payload.target_lra,
+        payload.target_tp,
+    )
+
+
+def _validate_audio_targets(payload: AudioAnalyzeRequest) -> None:
+    if not -24.0 <= payload.target_i <= -10.0:
+        raise HTTPException(status_code=400, detail="Integrated loudness must be between -24 and -10 LUFS.")
+    if not 1.0 <= payload.target_lra <= 20.0:
+        raise HTTPException(status_code=400, detail="Loudness range must be between 1 and 20 LU.")
+    if not -3.0 <= payload.target_tp <= -1.0:
+        raise HTTPException(status_code=400, detail="True peak must be between -3 and -1 dBTP.")
+
+
+def _clear_audio_preview() -> None:
+    preview_root = temp_dir().resolve()
+    for path in (state.audio_preview_original, state.audio_preview_corrected):
+        if path is None:
+            continue
+        resolved = path.resolve()
+        if resolved.parent == preview_root:
+            try:
+                resolved.unlink()
+            except OSError:
+                pass
+    state.audio_preview_id = None
+    state.audio_preview_original = None
+    state.audio_preview_corrected = None
 
 
 def _save_current_project_if_loaded(project: TranscriptProject) -> None:

@@ -158,6 +158,65 @@ export type CaptionPreviewRequest = {
   compute_label: string;
 };
 
+export type AudioPresetPayload = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+export type AudioOptionsResponse = {
+  presets: AudioPresetPayload[];
+  source: string | null;
+  output_folder: string;
+  defaults: {
+    preset_id: string;
+    target_i: number;
+    target_lra: number;
+    target_tp: number;
+  };
+};
+
+export type AudioSettingsPayload = {
+  input_video_path?: string | null;
+  preset_id: string;
+  target_i: number;
+  target_lra: number;
+  target_tp: number;
+};
+
+export type AudioAnalysisResponse = {
+  source: string;
+  measurement: {
+    input_i: number;
+    input_tp: number;
+    input_lra: number;
+    input_thresh: number;
+    target_offset: number;
+  };
+  target: {
+    integrated_lufs: number;
+    loudness_range_lu: number;
+    true_peak_dbtp: number;
+  };
+  hotspots: {
+    loudest: AudioHotspot;
+    quietest_speech: AudioHotspot;
+  } | null;
+  hotspot_message: string | null;
+};
+
+export type AudioHotspot = {
+  start_seconds: number;
+  focus_seconds: number;
+  loudness_lufs: number;
+};
+
+export type AudioPreviewResponse = AudioAnalysisResponse & {
+  preview_id: string;
+  start_seconds: number;
+  duration_seconds: number;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -324,4 +383,51 @@ export function prepareCaptionPreview(payload: CaptionPreviewRequest) {
 
 export function captionSourceVideoUrl() {
   return `${API_BASE}/api/caption/source-video`;
+}
+
+export function audioOptions() {
+  return request<AudioOptionsResponse>("/api/audio/options");
+}
+
+export function chooseAudioVideo() {
+  return request<{ source: string; output_folder: string }>("/api/audio/choose-video", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function chooseAudioOutputFolder() {
+  return request<{ output_folder: string }>("/api/audio/choose-output-folder", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function analyzeVideoAudio(payload: AudioSettingsPayload) {
+  return request<AudioAnalysisResponse>("/api/audio/analyze", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function normalizeVideoAudio(payload: AudioSettingsPayload & { output_folder?: string | null }) {
+  return request<{ output_path: string }>("/api/audio/normalize", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function audioSourceVideoUrl() {
+  return `${API_BASE}/api/audio/source-video`;
+}
+
+export function generateAudioPreview(payload: AudioSettingsPayload & { start_seconds: number; duration_seconds: number }) {
+  return request<AudioPreviewResponse>("/api/audio/preview", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function audioPreviewUrl(previewId: string, mode: "original" | "corrected") {
+  return `${API_BASE}/api/audio/preview/${encodeURIComponent(previewId)}/${mode}`;
 }
