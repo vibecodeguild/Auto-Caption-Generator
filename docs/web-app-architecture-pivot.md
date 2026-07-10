@@ -1,5 +1,11 @@
 # Local Web App Architecture Pivot
 
+> Historical decision record, updated with status on July 10, 2026. The pivot
+> described here has happened: the Next.js/FastAPI application is now the main
+> product surface. Use [Current System](current-system.md) for present behavior
+> and [Outstanding Work](outstanding-work.md) for remaining work. Future-tense
+> sections below preserve the reasoning that guided the migration.
+
 This document captures the next architecture direction for VCG AutoCaption after
 the PySide6 prototype. The current desktop app proved the caption pipeline,
 transcription settings, style system, transcript data model, edit decisions, and
@@ -25,9 +31,8 @@ Python local API
   - FFmpeg caption burn-in and cut export
 ```
 
-The app should still run locally and keep videos on the user's machine. The
-first development target should be `npm run dev` for the UI plus a Python API
-process for media/transcription work.
+The app runs locally and keeps videos on the user's machine. `npm run dev`
+starts the UI and Python API together.
 
 ## Why Pivot
 

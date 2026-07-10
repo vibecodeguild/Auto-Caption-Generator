@@ -7,7 +7,6 @@ import threading
 import uuid
 from dataclasses import asdict
 from pathlib import Path
-from tkinter import Tk, filedialog
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,6 +39,12 @@ from app.core.transcriber import transcribe_audio
 from app.core.transcript_model import TranscriptProject
 from app.core.file_utils import validate_input_video
 from app.core.video_cutter import frame_intervals_to_seconds, run_cut
+from app.core.windows_dialog import (
+    choose_output_folder as _windows_choose_output_folder,
+    choose_project_file as _windows_choose_project_file,
+    choose_project_save_file as _windows_choose_project_save_file,
+    choose_video_file as _windows_choose_video_file,
+)
 
 
 class ApiState:
@@ -284,17 +289,7 @@ def _open_project_path(path: Path) -> dict:
 
 
 def _choose_project_file() -> Path | None:
-    root = Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        filename = filedialog.askopenfilename(
-            title="Open VCG project",
-            filetypes=[("VCG project", "*.vcg.json"), ("JSON files", "*.json"), ("All files", "*.*")],
-        )
-    finally:
-        root.destroy()
-    return Path(filename).resolve() if filename else None
+    return _windows_choose_project_file()
 
 
 def _choose_project_save_file(project: TranscriptProject) -> Path | None:
@@ -303,44 +298,15 @@ def _choose_project_save_file(project: TranscriptProject) -> Path | None:
     if source_path.exists():
         default_name = f"{source_path.stem}.vcg.json"
 
-    root = Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        filename = filedialog.asksaveasfilename(
-            title="Save VCG project",
-            initialfile=default_name,
-            defaultextension=".vcg.json",
-            filetypes=[("VCG project", "*.vcg.json"), ("JSON files", "*.json"), ("All files", "*.*")],
-        )
-    finally:
-        root.destroy()
-    return Path(filename).resolve() if filename else None
+    return _windows_choose_project_save_file(default_name)
 
 
 def _choose_video_file() -> Path | None:
-    root = Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        filename = filedialog.askopenfilename(
-            title="Choose video",
-            filetypes=[("Video files", "*.mp4 *.mov *.mkv *.avi *.webm"), ("All files", "*.*")],
-        )
-    finally:
-        root.destroy()
-    return Path(filename).resolve() if filename else None
+    return _windows_choose_video_file()
 
 
 def _choose_output_folder() -> Path | None:
-    root = Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        folder = filedialog.askdirectory(title="Choose output folder")
-    finally:
-        root.destroy()
-    return Path(folder).resolve() if folder else None
+    return _windows_choose_output_folder()
 
 
 @app.get("/api/projects/current")

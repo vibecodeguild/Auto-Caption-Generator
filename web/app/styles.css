@@ -708,24 +708,9 @@ label {
 
 .caption-sample {
   position: absolute;
-  left: 5%;
-  right: 5%;
   text-align: center;
   pointer-events: none;
-  line-height: 1.05;
-}
-
-.caption-sample.bottom {
-  bottom: 12%;
-}
-
-.caption-sample.middle {
-  top: 50%;
-  transform: translateY(-50%);
-}
-
-.caption-sample.top {
-  top: 12%;
+  line-height: 1;
 }
 
 .caption-settings-grid {

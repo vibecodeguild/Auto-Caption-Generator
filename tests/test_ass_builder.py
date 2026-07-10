@@ -64,6 +64,13 @@ def test_build_ass_document_contains_active_word_dialogues():
     assert "0:00:00.10,0:00:00.25" in ass
 
 
+def test_build_ass_document_wraps_large_vertical_captions_inside_safe_margins():
+    ass = build_ass_document([], style(), play_res_x=1080, play_res_y=1920)
+
+    assert "WrapStyle: 0" in ass
+    assert ",2,86,86,220,1" in ass
+
+
 def test_build_ass_document_can_disable_outline_and_enable_shadow():
     custom = CaptionStyle(
         font_family="Montserrat",
@@ -85,7 +92,7 @@ def test_build_ass_document_can_disable_outline_and_enable_shadow():
 
     ass = build_ass_document([], custom, play_res_x=1080, play_res_y=1920)
 
-    assert ",1,0,4,2,50,50,220,1" in ass
+    assert ",1,0,4,2,86,86,220,1" in ass
 
 
 def test_build_ass_document_adds_glow_layer_when_enabled():

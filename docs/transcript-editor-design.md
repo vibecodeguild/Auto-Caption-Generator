@@ -1,5 +1,12 @@
 # Transcript Editor And Frame-Based Cutting Design
 
+> Product design record, status reviewed July 10, 2026. Most of the core editor
+> model and the web splice-review workflow are implemented. The authoritative
+> current inventory is [Current System](current-system.md); remaining gaps are
+> tracked in [Outstanding Work](outstanding-work.md). Proposed project-folder,
+> integrated remap/caption, and packaging sections below are still design
+> direction rather than completed behavior.
+
 This document captures the product model for expanding VCG AutoCaption from a
 caption generator into a local transcript-based video editor. The current app
 generates burned-in captions and includes an early transcript editor foundation.
@@ -26,9 +33,10 @@ Implemented foundation:
 - Clickable word and dead-space controls for creating cut decisions.
 - Rough cut export from the adjusted kept ranges.
 
-Still planned:
+Still planned or incomplete:
 
-- Frame thumbnail extraction for selected splices.
+- Rich frame-strip thumbnail extraction; the current API/UI displays the active
+  OUT and IN frames.
 - Remapping captions/transcripts as part of the integrated export workflow.
 - Full per-video project folder workflow.
 

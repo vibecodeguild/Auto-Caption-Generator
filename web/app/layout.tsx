@@ -5,7 +5,7 @@ import "@fontsource/inter/latin-900.css";
 import "@fontsource/lato/latin-400.css";
 import "@fontsource/lato/latin-900.css";
 import "@fontsource/montserrat/latin-400.css";
-import "@fontsource/montserrat/latin-900.css";
+import "@fontsource/montserrat/latin-700.css";
 import "@fontsource/open-sans/latin-400.css";
 import "@fontsource/open-sans/latin-800.css";
 import "@fontsource/oswald/latin-400.css";

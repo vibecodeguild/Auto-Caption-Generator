@@ -1,61 +1,52 @@
 # VCG AutoCaption
 
-VCG AutoCaption is a local Windows app prototype for generating burned-in,
-CapCut-style captions and experimenting with transcript-based video editing. It
-transcribes speech locally with `faster-whisper`, creates active-word ASS
-subtitles, and renders finished MP4 files with FFmpeg.
+VCG AutoCaption is a local Windows video utility with three working workflows:
 
-The app does not require user accounts, cloud uploads, analytics, or API keys.
+- transcript-based video cutting and splice review;
+- burned-in, active-word caption generation; and
+- audio loudness analysis and normalization.
 
-## Features
+The current product interface is a Next.js web UI backed by a local FastAPI
+process. Media processing stays on the computer and is performed with
+`faster-whisper` and FFmpeg. No account, cloud upload, analytics service, or API
+key is required.
 
-- Dark desktop editor UI built with PySide6
-- First-frame video preview with live caption styling
-- Embedded splice preview playback for transcript edits
-- Local transcription through `faster-whisper`
-- Word-level timestamp captions
-- Active-word highlighting
-- Caption presets for short-form, creator, YouTube, and podcast-style videos
-- CPU mode by default
-- Optional NVIDIA GPU mode
-- Reusable caption style library
-- Font, color, outline, shadow, glow, position, and grouping controls
-- FFmpeg subtitle burn-in and transcript cut export to MP4
-- Independent audio normalizer with measured YouTube loudness targets and optional voice leveling
-- Experimental transcript edit tab with video transcription, dynamic splice rows, frame nudge controls, project save/open, splice preview, and rough cut export
+The repository also retains the earlier PySide6 desktop prototype. It remains a
+useful reference and can still be launched, but new product work should target
+the web application unless a desktop-specific fix is intentional.
 
-## Planned Direction
+## Current Status
 
-The next major direction is a local web app architecture:
+The local web application is functional, but it is still a development build,
+not a packaged end-user release. Its three workspaces are implemented and share
+one local API process.
 
-- Next.js frontend for the transcript editor and caption generator UI.
-- Python local API for Whisper, FFmpeg, project files, and source video serving.
-- Browser-native source video playback for splice preview.
-- No preview MP4 rendering; only final export creates new video files.
+| Workspace | Current capability |
+| --- | --- |
+| Transcript Edit | Choose or open a video/project, transcribe in a background job, delete/restore words and silence, review dynamic splices against the source video, nudge IN/OUT frames, save `.vcg.json`, and export a rough cut. |
+| Caption Generator | Choose a video, reuse a loaded project transcript when possible, prepare a timed browser preview, customize grouping and visual style, save custom styles, and render a captioned MP4. |
+| Audio Normalizer | Analyze loudness, identify loud/quiet speech regions, make Original/Corrected A/B previews, and export a normalized MP4 using one of three processing presets. |
 
-The pivot is documented in
-[`docs/web-app-architecture-pivot.md`](docs/web-app-architecture-pivot.md).
-The transcript editing product model is documented in
-[`docs/transcript-editor-design.md`](docs/transcript-editor-design.md).
-
-The current PySide6 app is a working prototype and reference implementation for
-the core local caption pipeline, style settings, transcription settings,
-transcript models, edit decisions, and rough export logic. New UI development
-should move toward the web app architecture instead of deeper Qt video playback
-work.
+For a detailed implementation inventory, data-flow description, and API list,
+see [Current System](docs/current-system.md). For the known gaps and recommended
+improvement order, see [Outstanding Work](docs/outstanding-work.md).
 
 ## Requirements
 
-- Windows
+- Windows 10 or newer
 - Python 3.10 or newer
-- FFmpeg from the `imageio-ffmpeg` Python dependency, FFmpeg available on
-  `PATH`, or `ffmpeg.exe` placed at `tools/ffmpeg/ffmpeg.exe`
-- For CPU mode: no GPU setup is required
-- For NVIDIA GPU mode: an NVIDIA driver compatible with CUDA 12, plus CUDA/cuDNN runtime DLLs
+- Node.js and npm compatible with Next.js 16
+- FFmpeg supplied by `imageio-ffmpeg`, available on `PATH`, or placed at
+  `tools\ffmpeg\ffmpeg.exe`
+- Optional NVIDIA GPU support requires a compatible NVIDIA driver and the
+  packages in `requirements-gpu.txt`
+
+Whisper model files may be downloaded from Hugging Face on first use. After the
+model is cached, transcription runs locally.
 
 ## Setup
 
-Create a virtual environment and install the base dependencies:
+Create the Python environment and install the base dependencies:
 
 ```powershell
 py -3 -m venv .venv
@@ -63,157 +54,159 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-For optional NVIDIA GPU support, install the GPU dependency set instead:
+Install frontend dependencies:
+
+```powershell
+npm install
+```
+
+For optional NVIDIA support, install the GPU packages in the same environment:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
 ```
 
-The base dependency set includes `imageio-ffmpeg`, which provides an FFmpeg
-binary inside the virtual environment. If you prefer a system FFmpeg install,
-install FFmpeg from a trusted source and make sure `ffmpeg` is available:
-
-```powershell
-ffmpeg -version
-```
-
-You can also place FFmpeg manually here:
-
-```text
-tools\ffmpeg\ffmpeg.exe
-```
-
-FFmpeg binaries are not committed to this repository.
-
-## Run
-
-### Web App Prototype
-
-The current development direction is the local web app. Start the Python API and
-Next.js UI together with:
+## Run the Current Web App
 
 ```powershell
 npm run dev
 ```
 
-Then open:
+This starts both processes:
 
 ```text
-http://127.0.0.1:3000
+Next.js UI:       http://127.0.0.1:3000
+Python local API: http://127.0.0.1:8731
 ```
 
-This is a local desktop-style application, not a network service. Keep both
-ports bound to `127.0.0.1`; the API has no user authentication and is designed
-to access files selected on the local machine. Do not expose ports `3000` or
-`8731` through a router, tunnel, reverse proxy, container port mapping, or
-firewall rule.
+The development launcher reuses either process if its expected URL is already
+responding. Stop it with `Ctrl+C` in the terminal that launched it.
 
-The Content Command Center includes separate workspaces for transcript editing,
-caption generation, and audio normalization. The transcript editor opens
-`.vcg.json` projects, plays the original source video, supports word/dead-space
-edit decisions, previews dynamic splices, and exports a rough cut.
+This application has permission to read and write user-selected local media.
+It has no remote-user authentication because it is deliberately local-only.
+Do not bind it to `0.0.0.0` or expose ports `3000` or `8731` through a tunnel,
+reverse proxy, router, container mapping, or firewall rule.
 
-### Audio Normalizer Workflow
+## Workflows
 
-1. Open **Audio Normalizer** and choose a video.
-2. Select Normalize Only, Gentle Voice Leveling, or Strong Voice Leveling.
-3. Move the source-video playhead to a representative section and generate a
-   20-second preview.
-4. Switch between Original and Corrected playback to compare the same clip.
-5. Click **Analyze Audio** to measure the complete audio track if you have not
-   already generated a preview.
-6. Review the loudness, true peak, and loudness range. When speech is detected,
-   the app also recommends the loudest speech and quietest speech sections.
-7. Use either recommendation to generate an Original/Corrected A/B preview,
-   or continue using a section selected with the video playhead.
-8. Click **Export Corrected Video** to create a new `_normalized.mp4` file.
+### Transcript Edit
 
-The defaults target `-14 LUFS` integrated loudness, `-1.5 dBTP` true peak, and
-`7 LU` loudness range. The original video is never modified. Video is stream
-copied when possible while audio is exported as 48 kHz AAC. Preview clips are
-temporary and are replaced whenever a new section or source video is selected.
-Recommended sections use faster-whisper's voice activity detection so silence
-and steady background noise are not treated as quiet speech.
+1. Choose a source video, or open an existing `.vcg.json` project.
+2. If starting from video, choose the Whisper model and CPU/GPU mode, then
+   generate the transcript.
+3. Select transcript words or silence chips and delete or restore them.
+4. Review the dynamic splice queue. Preview 2, 4, or 6 seconds around each join,
+   adjust the OUT and IN frames, and mark reviewed splices.
+5. Save the edit decisions to `.vcg.json`.
+6. Export a re-encoded rough cut. The current web UI writes
+   `app/exports/<source>_cut.mp4`.
 
-### PySide Prototype
+The source file is never modified. The project stores the source path,
+transcript timing, delete decisions, splice adjustments, and review state.
 
-Double-click:
+### Caption Generator
+
+1. Choose a video and output folder.
+2. Select a Whisper model, compute mode, grouping preset, and caption style.
+3. Prepare the live preview. If the same video is loaded in Transcript Edit,
+   the existing transcript is reused; otherwise the preview transcribes and
+   caches the selected source/model combination.
+4. Adjust font, size, active-word treatment, colors, outline, shadow, glow,
+   placement, and grouping limits.
+5. Optionally save the style for later use.
+6. Generate `<source>_captioned.mp4`.
+
+Caption text itself is not yet manually editable. The current controls affect
+grouping and presentation of the Whisper result.
+
+### Audio Normalizer
+
+1. Choose a video and one of Normalize Only, Gentle Voice Leveling, or Strong
+   Voice Leveling.
+2. Analyze the full track, or generate a preview and allow analysis to run as
+   part of that operation.
+3. Compare Original and Corrected versions of the same 20-second region. The UI
+   can recommend the loudest and quietest speech regions using voice activity
+   detection.
+4. Export `<source>_normalized.mp4`.
+
+Defaults target `-14 LUFS` integrated loudness, `-1.5 dBTP` true peak, and
+`7 LU` loudness range. The export stream-copies video when possible and writes
+48 kHz AAC audio. The original file is not modified.
+
+## Files and Local Data
+
+- Temporary audio, previews, subtitles, frames, and logs: `app/temp/`
+- Default generated exports: `app/exports/`
+- Saved custom caption styles: `%LOCALAPPDATA%\VCG AutoCaption\style_library.json`
+- Whisper models: the normal Hugging Face cache outside this repository
+- Editor projects: user-selected `.vcg.json` files containing transcript text
+  and an absolute path to the source video
+
+Generated media, project data, model files, local environments, secrets, and
+build output are excluded by `.gitignore`.
+
+## Development Commands
+
+```powershell
+# Run API and UI together
+npm run dev
+
+# Run either side separately
+npm run api
+npm run web
+
+# TypeScript validation and production build
+npm run typecheck
+npm run build
+
+# Python test suite (explicit path avoids unrelated temp/cache traversal)
+.\.venv\Scripts\python.exe -m pytest tests
+```
+
+The Python suite currently contains 58 tests covering transcript/edit models,
+splice generation and preview, project persistence, caption grouping/ASS
+generation, FFmpeg command construction, audio normalization, local API
+behavior, host/origin enforcement, and Windows dialog integration. There is not
+yet a browser-level end-to-end test suite.
+
+## Retained PySide6 Prototype
+
+The earlier desktop interface can still be launched with:
 
 ```text
 Start VCG AutoCaption.cmd
 ```
 
-That launcher opens the app without typing terminal commands, as long as the
-virtual environment has been created first.
-
-Manual fallback:
+or:
 
 ```powershell
 .\.venv\Scripts\python.exe run_app.py
 ```
 
-If Python is associated with `.pyw` files on Windows, you can also double-click:
+It contains the original caption generator and transcript-editor prototype.
+The launcher does not start the current web application, and feature parity
+between the two interfaces is not guaranteed.
 
-```text
-VCG AutoCaption.pyw
-```
-
-## Basic Workflow
-
-1. Choose a video file.
-2. Choose an output folder.
-3. Select a caption preset.
-4. Select the Whisper model.
-5. Choose CPU or NVIDIA GPU.
-6. Adjust style settings with the preview panel.
-7. Save the style if you want to reuse it.
-8. Click **Generate Video**.
-
-The exported file is named:
-
-```text
-input-name_captioned.mp4
-```
-
-## Privacy
-
-- Videos stay on the local machine.
-- Audio extraction, transcription, subtitle generation, and rendering happen locally.
-- No API keys are required.
-- No videos are uploaded by this app.
-- Temporary audio, preview, and subtitle files are written under `app/temp/`.
-- Per-run editor logs are written under `app/temp/logs/`.
-- Exported videos are written to the selected output folder.
-
-`faster-whisper` may download model files on first use through the Hugging Face
-model cache. That is expected setup-time network access for local model files.
-
-## Tests
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest
-```
-
-The core tests cover caption grouping, ASS subtitle formatting, active-word
-subtitle events, style persistence, audio analysis, two-pass normalization,
-and API export safeguards.
-
-## Notes For Public Reuse
+## Security and Public Reuse
 
 - The project is licensed under the MIT License.
-- Security reports and supported-version guidance are in [`SECURITY.md`](SECURITY.md).
-- Do not commit videos, generated exports, temporary audio, model files, FFmpeg binaries, virtual environments, or secret files.
-- Only include font files you are licensed to redistribute.
-- FFmpeg has its own license and redistribution requirements.
-- Whisper/faster-whisper model files are downloaded and cached outside this repository by default.
+- Current reporting guidance and the local-only boundary are in
+  [SECURITY.md](SECURITY.md).
+- [security_best_practices_report.md](security_best_practices_report.md) is a
+  dated June 18, 2026 audit record, not a claim about all later changes.
+- Do not commit real videos, transcripts, `.vcg.json` projects, generated
+  exports, model files, FFmpeg binaries, logs, virtual environments, or secrets.
+- Only redistribute fonts and FFmpeg builds under their respective licenses.
 
-## Known Limitations
+## Documentation Map
 
-- First transcription can be slow because the selected model may download.
-- CPU transcription can be slow for long videos.
-- GPU mode depends on the local NVIDIA/CUDA/cuDNN environment.
-- Word timing is only as accurate as Whisper's timestamps.
-- Noisy audio can reduce caption accuracy.
-- Captions are burned permanently into the exported video.
-- Manual caption editing and batch processing are not included yet.
-- Transcript-based cutting has an experimental editor foundation. Embedded media playback, frame thumbnails, and full project-folder workflow are not complete yet.
+- [Current System](docs/current-system.md): source-of-truth implementation map
+- [Outstanding Work](docs/outstanding-work.md): gaps, risks, and proposed order
+- [Web App Implementation Notes](docs/web-app-implementation-notes.md): concise
+  developer runbook and endpoint catalog
+- [Architecture Pivot](docs/web-app-architecture-pivot.md): historical decision
+  record for moving away from a PySide6-first UI
+- [Transcript Editor Design](docs/transcript-editor-design.md): original product
+  model, with current implementation status noted at the top
+- [Security Policy](SECURITY.md): vulnerability reporting and trust boundary

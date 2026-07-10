@@ -1381,7 +1381,15 @@ function CaptionGenerator({
 
   const styleNames = Object.keys(captionOptionsData.styles);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const captionMediaRef = useRef<HTMLDivElement | null>(null);
   const [videoTime, setVideoTime] = useState(0);
+  const [captionGeometry, setCaptionGeometry] = useState({
+    left: 0,
+    top: 0,
+    width: 0,
+    height: 0,
+    scale: 1,
+  });
   const captionVideoKey = captionSource ?? "";
   const livePreviewGroups = useMemo(
     () => captionPreview ? groupCaptionPreviewWords(captionPreview.words, captionPreset) : null,
@@ -1391,6 +1399,34 @@ function CaptionGenerator({
     () => livePreviewGroups?.find((group) => videoTime >= group.start && videoTime <= group.end) ?? null,
     [livePreviewGroups, videoTime],
   );
+  const updateCaptionGeometry = useCallback(() => {
+    const media = captionMediaRef.current;
+    const video = videoRef.current;
+    if (!media || !video || !video.videoWidth || !video.videoHeight) return;
+
+    const containerWidth = media.clientWidth;
+    const containerHeight = media.clientHeight;
+    const videoAspect = video.videoWidth / video.videoHeight;
+    const containerAspect = containerWidth / containerHeight;
+    const width = containerAspect > videoAspect ? containerHeight * videoAspect : containerWidth;
+    const height = containerAspect > videoAspect ? containerHeight : containerWidth / videoAspect;
+
+    setCaptionGeometry({
+      left: (containerWidth - width) / 2,
+      top: (containerHeight - height) / 2,
+      width,
+      height,
+      scale: width / video.videoWidth,
+    });
+  }, []);
+
+  useEffect(() => {
+    const media = captionMediaRef.current;
+    if (!media) return;
+    const observer = new ResizeObserver(updateCaptionGeometry);
+    observer.observe(media);
+    return () => observer.disconnect();
+  }, [updateCaptionGeometry]);
 
   const selectStyle = (name: string) => {
     setCaptionStyleName(name);
@@ -1400,6 +1436,15 @@ function CaptionGenerator({
   const selectPreset = (name: string) => {
     setCaptionPreset(captionOptionsData.presets[name] ?? captionPreset);
   };
+  const previewScale = captionGeometry.scale;
+  const horizontalMargin = Math.max(50, (videoRef.current?.videoWidth ?? 0) * 0.08) * previewScale;
+  const verticalMargin = captionStyle.margin_v * previewScale;
+  const captionPositionStyle = captionPreviewPositionStyle(
+    captionStyle.position,
+    captionGeometry,
+    horizontalMargin,
+    verticalMargin,
+  );
 
   return (
     <section className="caption-workspace">
@@ -1408,7 +1453,7 @@ function CaptionGenerator({
           <span className="eyebrow">Caption Preview</span>
           <span>{captionSource ?? "Choose a video to generate captions"}</span>
         </div>
-        <div className="caption-preview-media">
+        <div className="caption-preview-media" ref={captionMediaRef}>
           {captionSource ? (
             <video
               ref={videoRef}
@@ -1418,7 +1463,10 @@ function CaptionGenerator({
               src={`${captionSourceVideoUrl()}?source=${encodeURIComponent(captionVideoKey)}`}
               onTimeUpdate={(event) => setVideoTime(event.currentTarget.currentTime)}
               onSeeked={(event) => setVideoTime(event.currentTarget.currentTime)}
-              onLoadedMetadata={(event) => setVideoTime(event.currentTarget.currentTime)}
+              onLoadedMetadata={(event) => {
+                setVideoTime(event.currentTarget.currentTime);
+                updateCaptionGeometry();
+              }}
             />
           ) : (
             <div className="empty preview-empty">No video selected</div>
@@ -1432,17 +1480,18 @@ function CaptionGenerator({
               captionStyle.glow_enabled ? "with-glow" : "",
             ].join(" ")}
             style={{
+              ...captionPositionStyle,
               color: captionStyle.main_color,
               fontFamily: previewFontStack(captionStyle.font_family),
-              fontSize: `${Math.max(18, Math.round(captionStyle.main_font_size / 3))}px`,
-              fontWeight: captionStyle.bold ? 900 : 400,
-              textShadow: captionPreviewTextShadow(captionStyle),
+              fontSize: `${captionStyle.main_font_size * previewScale}px`,
+              fontWeight: captionStyle.bold ? 700 : 400,
+              textShadow: captionPreviewTextShadow(captionStyle, previewScale),
             }}
           >
             {activePreviewGroup ? (
-              <LiveCaptionWords group={activePreviewGroup} style={captionStyle} videoTime={videoTime} />
+              <LiveCaptionWords group={activePreviewGroup} previewScale={previewScale} style={captionStyle} videoTime={videoTime} />
             ) : captionPreview ? null : (
-              <SampleCaptionWords preset={captionPreset} style={captionStyle} />
+              <SampleCaptionWords preset={captionPreset} previewScale={previewScale} style={captionStyle} />
             )}
           </div>
         </div>
@@ -1614,7 +1663,7 @@ function EffectRow({
   );
 }
 
-function LiveCaptionWords({ group, style, videoTime }: { group: CaptionPreviewGroup; style: CaptionStylePayload; videoTime: number }) {
+function LiveCaptionWords({ group, previewScale, style, videoTime }: { group: CaptionPreviewGroup; previewScale: number; style: CaptionStylePayload; videoTime: number }) {
   return (
     <>
       {group.words.map((word, wordIndex) => {
@@ -1623,6 +1672,7 @@ function LiveCaptionWords({ group, style, videoTime }: { group: CaptionPreviewGr
           <CaptionWordSpan
             active={active}
             key={`${word.text}-${word.start}-${wordIndex}`}
+            previewScale={previewScale}
             style={style}
             text={word.text}
             trailingSpace={wordIndex < group.words.length - 1}
@@ -1633,7 +1683,7 @@ function LiveCaptionWords({ group, style, videoTime }: { group: CaptionPreviewGr
   );
 }
 
-function SampleCaptionWords({ preset, style }: { preset: CaptionPresetPayload; style: CaptionStylePayload }) {
+function SampleCaptionWords({ preset, previewScale, style }: { preset: CaptionPresetPayload; previewScale: number; style: CaptionStylePayload }) {
   const words = captionPreviewWords(preset);
   return (
     <>
@@ -1641,6 +1691,7 @@ function SampleCaptionWords({ preset, style }: { preset: CaptionPresetPayload; s
         <CaptionWordSpan
           active={wordIndex === Math.min(1, words.length - 1)}
           key={`${word}-${wordIndex}`}
+          previewScale={previewScale}
           style={style}
           text={word}
           trailingSpace={wordIndex < words.length - 1}
@@ -1652,11 +1703,13 @@ function SampleCaptionWords({ preset, style }: { preset: CaptionPresetPayload; s
 
 function CaptionWordSpan({
   active,
+  previewScale,
   style,
   text,
   trailingSpace,
 }: {
   active: boolean;
+  previewScale: number;
   style: CaptionStylePayload;
   text: string;
   trailingSpace: boolean;
@@ -1665,8 +1718,8 @@ function CaptionWordSpan({
     <span
       style={active ? {
         color: style.active_color,
-        fontSize: `${Math.max(20, Math.round(style.active_font_size / 3))}px`,
-        fontWeight: style.active_bold ? 900 : 400,
+        fontSize: `${style.active_font_size * previewScale}px`,
+        fontWeight: style.active_bold ? 700 : 400,
       } : undefined}
     >
       {text}
@@ -1704,15 +1757,51 @@ function ToggleField({ checked, label, onChange }: { checked: boolean; label: st
   );
 }
 
-function captionPreviewTextShadow(style: CaptionStylePayload) {
+function captionPreviewTextShadow(style: CaptionStylePayload, previewScale: number) {
   const shadows = [];
   if (style.outline_enabled) {
-    const width = Math.max(1, Math.round(style.outline_width / 3));
+    const width = Math.max(0.5, style.outline_width * previewScale);
     shadows.push(...outlineTextShadows(width, style.outline_color));
   }
-  if (style.shadow_enabled) shadows.push(`${style.shadow_depth}px ${style.shadow_depth}px 0 ${style.shadow_color}`);
-  if (style.glow_enabled) shadows.push(`0 0 ${Math.max(2, style.glow_strength * 2)}px ${style.glow_color}`);
+  if (style.shadow_enabled) {
+    const depth = style.shadow_depth * previewScale;
+    shadows.push(`${depth}px ${depth}px 0 ${style.shadow_color}`);
+  }
+  if (style.glow_enabled) shadows.push(`0 0 ${Math.max(1, style.glow_strength * 1.8 * previewScale)}px ${style.glow_color}`);
   return shadows.join(", ");
+}
+
+function captionPreviewPositionStyle(
+  position: string,
+  geometry: { left: number; top: number; width: number; height: number },
+  horizontalMargin: number,
+  verticalMargin: number,
+) {
+  const base = {
+    left: `${geometry.left + horizontalMargin}px`,
+    right: "auto",
+    width: `${Math.max(0, geometry.width - (horizontalMargin * 2))}px`,
+    bottom: "auto",
+  };
+  if (position === "Middle") {
+    return {
+      ...base,
+      top: `${geometry.top + (geometry.height / 2)}px`,
+      transform: "translateY(-50%)",
+    };
+  }
+  if (position === "Top") {
+    return {
+      ...base,
+      top: `${geometry.top + verticalMargin}px`,
+      transform: "none",
+    };
+  }
+  return {
+    ...base,
+    top: `${geometry.top + geometry.height - verticalMargin}px`,
+    transform: "translateY(-100%)",
+  };
 }
 
 function captionPreviewWords(preset: CaptionPresetPayload) {
@@ -1771,7 +1860,7 @@ function groupCaptionPreviewWords(words: CaptionPreviewResponse["words"], preset
 
 function outlineTextShadows(width: number, color: string) {
   const shadows: string[] = [];
-  for (let offset = 1; offset <= width; offset += 1) {
+  for (let offset = 0.5; offset <= width; offset += 0.5) {
     shadows.push(
       `${offset}px 0 0 ${color}`,
       `${-offset}px 0 0 ${color}`,

@@ -61,6 +61,18 @@ def burn_subtitles(
         str(input_video_path),
         "-vf",
         filter_value,
+        "-c:v",
+        "libx264",
+        "-crf",
+        "18",
+        "-preset",
+        "medium",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "high",
+        "-movflags",
+        "+faststart",
     ]
 
     try:
@@ -72,12 +84,6 @@ def burn_subtitles(
         _run(
             command_base
             + [
-                "-c:v",
-                "libx264",
-                "-crf",
-                "18",
-                "-preset",
-                "medium",
                 "-c:a",
                 "aac",
                 "-b:a",

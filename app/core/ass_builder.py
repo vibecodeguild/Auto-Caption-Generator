@@ -86,6 +86,7 @@ def build_ass_document(
     outline_width = style.outline_width if style.outline_enabled else 0
     shadow_depth = style.shadow_depth if style.shadow_enabled else 0
     bold = "-1" if style.bold else "0"
+    horizontal_margin = max(50, round(play_res_x * 0.08))
 
     lines = [
         "[Script Info]",
@@ -93,11 +94,11 @@ def build_ass_document(
         f"PlayResX: {play_res_x}",
         f"PlayResY: {play_res_y}",
         "ScaledBorderAndShadow: yes",
-        "WrapStyle: 2",
+        "WrapStyle: 0",
         "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,{style.font_family},{style.main_font_size},{primary},&H000000FF,{outline},{back},{bold},0,0,0,100,100,0,0,1,{outline_width},{shadow_depth},{alignment},50,50,{style.margin_v},1",
+        f"Style: Default,{style.font_family},{style.main_font_size},{primary},&H000000FF,{outline},{back},{bold},0,0,0,100,100,0,0,1,{outline_width},{shadow_depth},{alignment},{horizontal_margin},{horizontal_margin},{style.margin_v},1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",

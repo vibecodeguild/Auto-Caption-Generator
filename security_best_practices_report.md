@@ -1,5 +1,10 @@
 # Public Release Security Review
 
+> Point-in-time audit record. This report covers the repository as reviewed on
+> June 18, 2026 and has not been re-certified for later working-tree changes.
+> Current operating guidance remains in `SECURITY.md`; rerun the verification
+> below before the next public release.
+
 Reviewed: June 18, 2026
 
 ## Result
