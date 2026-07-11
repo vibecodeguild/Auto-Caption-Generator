@@ -14,6 +14,8 @@ def _splice() -> DynamicSplice:
         right_word_id="w2",
         left_out_frame=29,
         right_in_frame=300,
+        left_whisper_out_frame=29,
+        left_suggested_out_frame=29,
         left_out_adjustment=0,
         right_in_adjustment=0,
         left_context="...one",

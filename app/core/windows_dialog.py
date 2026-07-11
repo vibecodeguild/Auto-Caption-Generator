@@ -29,17 +29,22 @@ def _run_dialog(script: str, *, environment: dict[str, str] | None = None) -> Pa
     env = os.environ.copy()
     if environment:
         env.update(environment)
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-STA", "-EncodedCommand", encoded],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=300,
-        check=False,
-        env=env,
-        creationflags=hidden_subprocess_flags(),
-    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-STA", "-EncodedCommand", encoded],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            check=False,
+            env=env,
+            creationflags=hidden_subprocess_flags(),
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("PowerShell could not be found, so the Windows file picker could not start.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("The Windows file picker started but did not return within 300 seconds.") from exc
     if result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(f"Windows file picker failed.{f' {details}' if details else ''}")

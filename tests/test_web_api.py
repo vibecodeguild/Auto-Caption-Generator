@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core.edit_decisions import EditDecisionList
 from app.core.audio_normalizer import LoudnessHotspot, LoudnessHotspots, LoudnessMeasurement
 from app.core.project_store import load_editor_project, save_editor_project
+from app.core.splice_generation import generate_splices
 from app.core.transcript_model import SilenceRange, TranscriptProject, TranscriptWord
 from app import web_api
 from app.web_api import app, state
@@ -91,6 +94,18 @@ def test_open_project_dialog_uses_selected_file(tmp_path: Path, monkeypatch) -> 
     assert response.json()["project_path"] == str(project_path)
 
 
+def test_choose_video_surfaces_windows_picker_error(monkeypatch) -> None:
+    def fail_picker():
+        raise RuntimeError("desktop unavailable")
+
+    monkeypatch.setattr(web_api, "_windows_choose_video_file", fail_picker)
+
+    response = TestClient(app).post("/api/projects/choose-video")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Windows video picker error (RuntimeError): desktop unavailable"
+
+
 def test_choose_transcript_video_and_transcribe_loads_new_project(tmp_path: Path, monkeypatch) -> None:
     video_path = tmp_path / "source.mp4"
     video_path.write_bytes(b"video")
@@ -125,7 +140,7 @@ def test_choose_transcript_video_and_transcribe_loads_new_project(tmp_path: Path
     data = transcribe_response.json()
     assert data["project_path"] is None
     assert data["project"]["source"] == str(video_path)
-    assert [token["id"] for token in data["tokens"]] == ["w1", "s1", "w2"]
+    assert [token["id"] for token in data["tokens"]] == ["w1", "w2"]
 
 
 def test_transcribe_job_reports_progress_and_result(tmp_path: Path, monkeypatch) -> None:
@@ -172,7 +187,7 @@ def test_transcribe_job_reports_progress_and_result(tmp_path: Path, monkeypatch)
     assert any(item["message"] == "Extracting audio..." for item in snapshots)
     assert snapshots[-1]["status"] == "complete"
     assert snapshots[-1]["result"]["project"]["source"] == str(video_path)
-    assert [token["id"] for token in snapshots[-1]["result"]["tokens"]] == ["w1", "s1", "w2"]
+    assert [token["id"] for token in snapshots[-1]["result"]["tokens"]] == ["w1", "w2"]
 
 
 def test_save_new_transcribed_project_prompts_for_project_path(tmp_path: Path, monkeypatch) -> None:
@@ -261,6 +276,169 @@ def test_adjust_splice_updates_preview_segments() -> None:
     assert splice["left_out_adjustment"] == 2
     assert splice["right_in_adjustment"] == -1
     assert splice["preview_segments_4s"] == [[0.0, 0.466667], [1.466667, 3.466667]]
+
+
+def test_adjust_splice_rejects_and_rolls_back_overlapping_ranges() -> None:
+    state.project = _project()
+    state.edits = EditDecisionList()
+    state.edits.delete_word_selection("w3", "w3")
+    state.project_path = None
+
+    client = TestClient(app)
+    splice = client.get("/api/projects/current").json()["splices"][0]
+    response = client.post(
+        "/api/projects/current/splices/adjust",
+        json={"anchor_key": splice["anchor_key"], "left_delta": 30, "right_delta": -10},
+    )
+
+    assert response.status_code == 400
+    assert "overlap" in response.json()["detail"]
+    rolled_back = client.get("/api/projects/current").json()["splices"][0]
+    assert rolled_back["left_out_adjustment"] == 0
+    assert rolled_back["right_in_adjustment"] == 0
+
+
+def test_editor_settings_update_dead_space_candidate_count() -> None:
+    state.project = _project()
+    state.edits = EditDecisionList()
+    state.project_path = None
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/projects/current/settings",
+        json={"dead_space_min_seconds": 0.7},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["settings"] == {"dead_space_min_seconds": 0.7}
+    assert data["dead_space_candidate_count"] == 0
+    assert data["pause_analysis_pending_count"] == 1
+
+
+def test_delete_dead_space_only_removes_gaps_meeting_project_threshold() -> None:
+    project = _project()
+    analyzed_silence = replace(
+        project.silence_ranges[0],
+        measured_start=project.silence_ranges[0].start,
+        measured_end=project.silence_ranges[0].end,
+        measured_start_frame=project.silence_ranges[0].start_frame,
+        measured_end_frame=project.silence_ranges[0].end_frame,
+        audio_analyzed=True,
+    )
+    state.project = replace(project, silence_ranges=[analyzed_silence])
+    state.edits = EditDecisionList()
+    state.edits.settings.dead_space_min_seconds = 1.0
+    state.project_path = None
+
+    client = TestClient(app)
+    skipped = client.post("/api/projects/current/delete-dead-space", json={})
+
+    assert skipped.status_code == 200
+    assert skipped.json()["deleted_silence_ids"] == []
+
+    state.edits.settings.dead_space_min_seconds = 0.7
+    removed = client.post("/api/projects/current/delete-dead-space", json={})
+
+    assert removed.status_code == 200
+    assert removed.json()["deleted_silence_ids"] == ["s1"]
+
+
+def test_delete_dead_space_does_not_remove_unanalyzed_whisper_candidates() -> None:
+    state.project = _project()
+    state.edits = EditDecisionList()
+    state.edits.settings.dead_space_min_seconds = 0.7
+    state.project_path = None
+
+    response = TestClient(app).post("/api/projects/current/delete-dead-space", json={})
+
+    assert response.status_code == 200
+    assert response.json()["deleted_silence_ids"] == []
+
+
+def test_analyze_pauses_restores_and_hides_rejected_candidate(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    original = _project()
+    state.project = TranscriptProject(str(source), original.fps, original.words, original.silence_ranges)
+    state.edits = EditDecisionList()
+    state.edits.settings.dead_space_min_seconds = 0.8
+    state.edits.delete_silence("delete_s1", "s1")
+    state.project_path = None
+    monkeypatch.setattr(web_api, "extract_audio", lambda *_args: tmp_path / "audio.wav")
+
+    def analyzed(project, _audio_path, _minimum):
+        silence = replace(
+            project.silence_ranges[0],
+            measured_start=1.1,
+            measured_end=1.5,
+            measured_start_frame=33,
+            measured_end_frame=44,
+            audio_analyzed=True,
+        )
+        return replace(project, silence_ranges=[silence]), {
+            "candidates_checked": 1,
+            "validated_long_pauses": 0,
+            "rejected_candidates": 1,
+        }
+
+    monkeypatch.setattr(web_api, "analyze_pause_candidates", analyzed)
+    response = TestClient(app).post("/api/projects/current/analyze-pauses", json={})
+
+    assert response.status_code == 200
+    assert response.json()["pause_analysis_summary"]["rejected_candidates"] == 1
+    assert response.json()["deleted_silence_ids"] == []
+    assert "s1" not in [token["id"] for token in response.json()["tokens"]]
+
+
+def test_analyze_boundaries_updates_existing_project(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    original = _project()
+    state.project = TranscriptProject(
+        source=str(source),
+        fps=original.fps,
+        words=original.words,
+        silence_ranges=original.silence_ranges,
+    )
+    state.edits = EditDecisionList()
+    state.edits.delete_word_selection("w3", "w3")
+    state.project_path = None
+    monkeypatch.setattr(web_api, "extract_audio", lambda *_args: tmp_path / "audio.wav")
+
+    def assisted(project, _audio_path, word_ids):
+        return {word_id: project.word_by_id(word_id).end_frame + 3 for word_id in word_ids}
+
+    monkeypatch.setattr(web_api, "suggest_word_end_boundaries", assisted)
+
+    response = TestClient(app).post("/api/projects/current/analyze-boundaries", json={})
+
+    assert response.status_code == 200
+    assert response.json()["fine_tune_summary"] == {
+        "cuts_checked": 1,
+        "cuts_adjusted": 1,
+        "cuts_unchanged": 0,
+    }
+    splice = response.json()["splices"][0]
+    assert state.edits.splice_adjustments[splice["anchor_key"]].assisted_left_out_frame == splice["left_suggested_out_frame"]
+
+
+def test_fine_tune_skips_reviewed_splices(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    original = _project()
+    state.project = TranscriptProject(str(source), original.fps, original.words, original.silence_ranges)
+    state.edits = EditDecisionList()
+    state.edits.delete_word_selection("w3", "w3")
+    splice = generate_splices(state.project, state.edits).splices[0]
+    state.edits.adjust_splice(splice.anchor_key, reviewed=True)
+    state.project_path = None
+
+    monkeypatch.setattr(web_api, "extract_audio", lambda *_args: pytest.fail("reviewed cut should not extract audio"))
+    response = TestClient(app).post("/api/projects/current/analyze-boundaries", json={})
+
+    assert response.status_code == 200
+    assert response.json()["fine_tune_summary"]["cuts_checked"] == 0
 
 
 def test_audio_analysis_is_required_before_normalized_export(tmp_path: Path, monkeypatch) -> None:

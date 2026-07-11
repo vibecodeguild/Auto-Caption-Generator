@@ -22,6 +22,11 @@ Next.js UI: http://127.0.0.1:3000
 The API must remain local-only. It reads and writes user-selected files and has
 no remote-user authentication.
 
+`windows_dialog.py` converts missing-PowerShell and picker-timeout failures into
+actionable errors, and `web_api.py` returns the exception type/message in the
+JSON error detail. The frontend shows actual failures in its existing transcript
+status area and adds no UI while the picker is operating normally.
+
 ## Current UI
 
 The page contains three tabs:
@@ -32,6 +37,11 @@ The page contains three tabs:
   tune grouping/style, save styles, and render a captioned video.
 - **Audio Normalizer** — select source/output, analyze, preview Original versus
   Corrected audio, and export normalized media.
+
+The three workspaces are exposed through a compact Tools hover/focus menu in a
+single-row header. Transcript Edit uses five connected numbered workflow
+stages; the selected stage expands in place while other stages remain
+number-only. Project open/save and settings remain separate compact utilities.
 
 The transcript workspace uses a dedicated splice-review panel. Inline splice
 markers select and navigate; playback, review, and IN/OUT adjustment controls
@@ -62,6 +72,9 @@ GET    /api/projects/transcribe/jobs/{job_id}
 POST   /api/projects/current/delete
 POST   /api/projects/current/restore
 POST   /api/projects/current/delete-dead-space
+POST   /api/projects/current/settings
+POST   /api/projects/current/analyze-pauses
+POST   /api/projects/current/analyze-boundaries
 POST   /api/projects/current/splices/adjust
 POST   /api/projects/current/splices/review
 POST   /api/projects/current/save
@@ -105,3 +118,12 @@ As of this verification, uncommitted changes are refining browser/render caption
 parity, subtitle safe margins/wrapping, H.264 output compatibility, bundled
 Montserrat fonts, and Windows-native dialogs. Recheck `git status` and validate
 those changes before building further work on them.
+
+The active working tree also contains the first cut-safety tranche: cut-plan
+validation with rollback, a version-1-to-version-2 project compatibility path,
+and gear-configured threshold-aware bulk pause removal. Analyze Pauses measures
+only threshold-qualified Whisper gaps and filters false long pauses. Fine Tune
+reuses measured pause boundaries where available and otherwise refines only
+unreviewed splice OUT points. Whisper frames, assisted frames, and manual
+adjustments remain separate; fixed padding and transcript-wide automatic
+analysis are not used.

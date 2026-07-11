@@ -22,6 +22,20 @@ class SilenceRange:
     end: float
     start_frame: int
     end_frame: int
+    measured_start: float | None = None
+    measured_end: float | None = None
+    measured_start_frame: int | None = None
+    measured_end_frame: int | None = None
+    audio_analyzed: bool = False
+
+    def effective_start(self) -> float:
+        return self.measured_start if self.measured_start is not None else self.start
+
+    def effective_end(self) -> float:
+        return self.measured_end if self.measured_end is not None else self.end
+
+    def effective_duration(self) -> float:
+        return max(0.0, self.effective_end() - self.effective_start())
 
 
 @dataclass(frozen=True)

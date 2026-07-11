@@ -6,6 +6,10 @@ from app.core.edit_decisions import EditDecisionList
 from app.core.transcript_model import TranscriptProject, TranscriptWord
 
 
+class InvalidCutPlanError(ValueError):
+    """Raised when adjusted cut boundaries cannot produce ordered video ranges."""
+
+
 @dataclass(frozen=True)
 class KeptRange:
     id: str
@@ -27,6 +31,8 @@ class DynamicSplice:
     right_word_id: str
     left_out_frame: int
     right_in_frame: int
+    left_whisper_out_frame: int
+    left_suggested_out_frame: int
     left_out_adjustment: int
     right_in_adjustment: int
     left_context: str
@@ -50,7 +56,31 @@ def generate_splices(project: TranscriptProject, edits: EditDecisionList) -> Spl
     kept_ranges = _build_kept_ranges(kept_groups)
     splices = _build_splices(project, kept_ranges, boundaries, edits)
     kept_ranges = _apply_splice_adjustments(kept_ranges, splices)
-    return SplicePlan(kept_ranges=kept_ranges, splices=splices)
+    plan = SplicePlan(kept_ranges=kept_ranges, splices=splices)
+    validate_cut_plan(plan)
+    return plan
+
+
+def validate_cut_plan(plan: SplicePlan) -> None:
+    """Reject collapsed, reversed, or overlapping adjusted source ranges."""
+
+    previous: KeptRange | None = None
+    for kept_range in plan.kept_ranges:
+        if kept_range.adjusted_start_frame < 0:
+            raise InvalidCutPlanError(
+                f"{kept_range.id} starts before frame 0. Move its IN point later."
+            )
+        if kept_range.adjusted_end_frame < kept_range.adjusted_start_frame:
+            raise InvalidCutPlanError(
+                f"{kept_range.id} is collapsed because its IN point is after its OUT point. "
+                "Move the nearby cut points farther apart."
+            )
+        if previous is not None and previous.adjusted_end_frame >= kept_range.adjusted_start_frame:
+            raise InvalidCutPlanError(
+                f"{previous.id} and {kept_range.id} overlap at the current cut points. "
+                "Move the previous OUT earlier or the next IN later."
+            )
+        previous = kept_range
 
 
 def _deleted_word_indexes(project: TranscriptProject, edits: EditDecisionList) -> set[int]:
@@ -147,6 +177,8 @@ def _build_splices(
                 right_word_id=right_word.id,
                 left_out_frame=0,
                 right_in_frame=right_word.start_frame + right_delta,
+                left_whisper_out_frame=0,
+                left_suggested_out_frame=0,
                 left_out_adjustment=0,
                 right_in_adjustment=right_delta,
                 left_context="Start of source",
@@ -164,6 +196,11 @@ def _build_splices(
         right_delta = adjustment.right_in_delta if adjustment else 0
         left_word = project.word_by_id(left_range.end_word_id)
         right_word = project.word_by_id(right_range.start_word_id)
+        suggested_out_frame = (
+            adjustment.assisted_left_out_frame
+            if adjustment and adjustment.assisted_left_out_frame is not None
+            else left_word.end_frame
+        )
         splices.append(
             DynamicSplice(
                 id=f"splice_{index:03d}",
@@ -172,8 +209,10 @@ def _build_splices(
                 right_keep_range_id=right_range.id,
                 left_word_id=left_word.id,
                 right_word_id=right_word.id,
-                left_out_frame=left_word.end_frame + left_delta,
+                left_out_frame=suggested_out_frame + left_delta,
                 right_in_frame=right_word.start_frame + right_delta,
+                left_whisper_out_frame=left_word.end_frame,
+                left_suggested_out_frame=suggested_out_frame,
                 left_out_adjustment=left_delta,
                 right_in_adjustment=right_delta,
                 left_context=_context_before(project.words, left_word.id),
