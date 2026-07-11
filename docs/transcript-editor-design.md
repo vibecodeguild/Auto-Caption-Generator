@@ -1,11 +1,15 @@
 # Transcript Editor And Frame-Based Cutting Design
 
-> Product design record, status reviewed July 10, 2026. Most of the core editor
+> Product design record, status reviewed July 11, 2026. Most of the core editor
 > model and the web splice-review workflow are implemented. The authoritative
 > current inventory is [Current System](current-system.md); remaining gaps are
 > tracked in [Outstanding Work](outstanding-work.md). Proposed project-folder,
 > integrated remap/caption, and packaging sections below are still design
 > direction rather than completed behavior.
+>
+> The source-seeking-only preview statement retained below is historical. The
+> approved workflow now uses source seeking in Stage 3 and a complete temporary
+> rendered-cut draft in Stage 4, with embedded splice adjustment and refresh.
 
 This document captures the product model for expanding VCG AutoCaption from a
 caption generator into a local transcript-based video editor. The current app
@@ -32,6 +36,9 @@ Implemented foundation:
 - Project save/open for editor project JSON.
 - Clickable word and dead-space controls for creating cut decisions.
 - Rough cut export from the adjusted kept ranges.
+- Complete rendered-cut review with splice timeline navigation, embedded frame
+  adjustment, stale-state reporting, and full refresh.
+- Optional audio normalization during final cut export.
 
 Still planned or incomplete:
 
@@ -47,8 +54,9 @@ Architecture pivot:
 - The next editor should use browser-native source video playback inside a
   Next.js frontend.
 - The Python backend should serve source video ranges and run Whisper/FFmpeg.
-- Preview should seek/jump through the source video; only export should create a
-  new MP4.
+- Superseded preview rule: the original design used only source-video seek/jump
+  preview and reserved MP4 creation for export. Current Stage 3 keeps the fast
+  source preview, while Stage 4 deliberately creates a complete temporary draft.
 
 ## Goals
 

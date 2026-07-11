@@ -23,7 +23,7 @@ one local API process.
 
 | Workspace | Current capability |
 | --- | --- |
-| Transcript Edit | Choose or open a video/project, transcribe in a background job, delete/restore words and silence, review dynamic splices against the source video, nudge IN/OUT frames, save `.vcg.json`, and export a rough cut. |
+| Transcript Edit | Run the five-stage workflow: choose/transcribe source media, validate and remove long pauses, fine-tune and manually review splices, review the complete rendered cut, then export with optional audio normalization. |
 | Caption Generator | Choose a video, reuse a loaded project transcript when possible, prepare a timed browser preview, customize grouping and visual style, save custom styles, and render a captioned MP4. |
 | Audio Normalizer | Analyze loudness, identify loud/quiet speech regions, make Original/Corrected A/B previews, and export a normalized MP4 using one of three processing presets. |
 
@@ -104,9 +104,15 @@ reverse proxy, router, container mapping, or firewall rule.
    The utility reports how many cuts were checked, adjusted, or unchanged.
 6. Review the dynamic splice queue. Preview 2, 4, or 6 seconds around each join,
    adjust the OUT and IN frames, and mark reviewed splices.
-7. Save the edit decisions to `.vcg.json`.
-8. Export a re-encoded rough cut. The current web UI writes
-   `app/exports/<source>_cut.mp4`.
+7. In Stage 4, render the complete edited video as a fast review draft. Use the
+   full-duration splice timeline and compact splice list to navigate joins,
+   adjust OUT/IN frames in the preview workspace, and refresh the complete
+   draft when pending changes make it stale.
+8. Save the edit decisions to `.vcg.json`.
+9. In Stage 5, export a re-encoded cut to
+   `app/exports/<source>_cut.mp4`. Optionally enable **Normalize audio** and
+   choose an existing normalization preset; the app preserves the cut and
+   writes `app/exports/<source>_cut_normalized.mp4` as the final result.
 
 The source file is never modified. The project stores the source path,
 transcript timing, delete decisions, splice adjustments, and review state.
@@ -171,7 +177,7 @@ npm run build
 .\.venv\Scripts\python.exe -m pytest tests
 ```
 
-The Python suite currently contains 79 tests covering transcript/edit models,
+The Python suite currently contains 84 tests covering transcript/edit models,
 splice generation and preview, project persistence, caption grouping/ASS
 generation, FFmpeg command construction, audio normalization, local API
 behavior, host/origin enforcement, and Windows dialog integration. There is not

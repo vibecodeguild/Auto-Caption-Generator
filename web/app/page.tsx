@@ -39,6 +39,7 @@ import {
   type DynamicSplice,
   type EditorProjectResponse,
   type ProjectDocumentResponse,
+  type RenderedCutPreviewResponse,
   type TranscriptionJobStatus,
   adjustSplice,
   analyzeBoundaries,
@@ -67,6 +68,8 @@ import {
   openProjectDialog,
   prepareCaptionPreview,
   restoreTokens,
+  renderedCutPreviewUrl,
+  renderCutPreview,
   reviewSplice,
   saveCaptionStyle,
   sourceVideoUrl,
@@ -122,6 +125,7 @@ export default function Home() {
   const [previewBox, setPreviewBox] = useState({ width: 400, height: 225 });
   const previewPanelRef = useRef<HTMLElement | null>(null);
   const previewRef = useRef<HTMLVideoElement | null>(null);
+  const renderedCutVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewState = useRef<PreviewState>({ segments: [], index: 0, loop: false });
   const previewFrameRef = useRef<number | null>(null);
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
@@ -139,10 +143,13 @@ export default function Home() {
   const [transcriptSource, setTranscriptSource] = useState<string | null>(null);
   const [transcriptionProgress, setTranscriptionProgress] = useState<TranscriptionJobStatus | null>(null);
   const [exportProgress, setExportProgress] = useState<ExportProgressState | null>(null);
+  const [previewRenderProgress, setPreviewRenderProgress] = useState<ExportProgressState | null>(null);
+  const [renderedCutPreview, setRenderedCutPreview] = useState<RenderedCutPreviewResponse | null>(null);
   const [audioOptionsData, setAudioOptionsData] = useState<AudioOptionsResponse | null>(null);
   const [audioSource, setAudioSource] = useState<string | null>(null);
   const [audioOutputFolder, setAudioOutputFolder] = useState("");
   const [audioPresetId, setAudioPresetId] = useState("gentle");
+  const [normalizeCutAudio, setNormalizeCutAudio] = useState(false);
   const [audioTargetI, setAudioTargetI] = useState(-14);
   const [audioTargetLra, setAudioTargetLra] = useState(7);
   const [audioTargetTp, setAudioTargetTp] = useState(-1.5);
@@ -160,6 +167,17 @@ export default function Home() {
   const selectedSplice = project?.splices.find((splice) => splice.anchor_key === activeSplice) ?? project?.splices[0];
   const selectedSpliceIndex = project?.splices.findIndex((splice) => splice.anchor_key === selectedSplice?.anchor_key) ?? -1;
   const transcriptVideoKey = project?.project.source ?? transcriptSource ?? "";
+  const renderedBoundaryByAnchor = useMemo(
+    () => new Map(renderedCutPreview?.splices.map((splice) => [splice.anchor_key, splice]) ?? []),
+    [renderedCutPreview],
+  );
+  const pendingPreviewFrames = project?.splices.reduce((total, splice) => {
+    const rendered = renderedBoundaryByAnchor.get(splice.anchor_key);
+    if (!rendered) return total + 1;
+    return total + Math.abs(splice.left_out_frame - rendered.left_out_frame) + Math.abs(splice.right_in_frame - rendered.right_in_frame);
+  }, 0) ?? 0;
+  const renderedPreviewStale = !!renderedCutPreview
+    && (renderedCutPreview.splices.length !== (project?.splices.length ?? 0) || pendingPreviewFrames > 0);
 
   const applyProject = useCallback((data: EditorProjectResponse) => {
     setProject(data);
@@ -328,14 +346,24 @@ export default function Home() {
     setBusy(true);
     setExportProgress({
       status: "running",
-      message: "Exporting edited video with FFmpeg...",
+      message: normalizeCutAudio
+        ? "Exporting the cut, then analyzing and normalizing its audio..."
+        : "Exporting edited video with FFmpeg...",
     });
-    exportCut()
+    exportCut({
+      normalize_audio: normalizeCutAudio,
+      normalization_preset_id: audioPresetId,
+      target_i: audioTargetI,
+      target_lra: audioTargetLra,
+      target_tp: audioTargetTp,
+    })
       .then((result) => {
         setStatus(`Exported ${result.output_path}`);
         setExportProgress({
           status: "complete",
-          message: "Export finished.",
+          message: result.normalized
+            ? `Cut and normalized export finished. The original cut remains at ${result.cut_output_path}`
+            : "Export finished.",
           outputPath: result.output_path,
         });
       })
@@ -655,6 +683,32 @@ export default function Home() {
       .catch((error) => setStatus(`Preview failed: ${error.message}`));
   };
 
+  const handleRenderCutPreview = () => {
+    if (!project) return;
+    setBusy(true);
+    setPreviewRenderProgress({ status: "running", message: "Rendering the complete edited video as a fast review draft..." });
+    renderCutPreview()
+      .then((result) => {
+        setRenderedCutPreview(result);
+        setStatus(`Rendered complete ${formatTime(result.duration_seconds)} cut preview with ${result.splices.length} splice markers`);
+        setPreviewRenderProgress({ status: "complete", message: "The complete rendered cut is ready for final review." });
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(message);
+        setPreviewRenderProgress({ status: "failed", message });
+      })
+      .finally(() => setBusy(false));
+  };
+
+  const seekRenderedJoin = (splice: DynamicSplice, autoplay = true) => {
+    const video = renderedCutVideoRef.current;
+    const marker = renderedBoundaryByAnchor.get(splice.anchor_key);
+    if (!video || !marker) return;
+    video.currentTime = Math.max(0, marker.preview_time_seconds - 2);
+    if (autoplay) void video.play().catch((error) => setStatus(`Preview failed: ${error.message}`));
+  };
+
   const updateSplice = (operation: () => Promise<EditorProjectResponse>) => {
     void run(operation, applyProject);
   };
@@ -728,6 +782,9 @@ export default function Home() {
           progress={exportProgress}
           onClose={() => setExportProgress(null)}
         />
+      )}
+      {previewRenderProgress && (
+        <PreviewRenderModal progress={previewRenderProgress} onClose={() => setPreviewRenderProgress(null)} />
       )}
       {showTranscriptSettings && project && (
         <TranscriptSettingsModal
@@ -813,12 +870,40 @@ export default function Home() {
             </WorkflowStage>
             <WorkflowStage stage={4} activeStage={activeWorkflowStage} setActiveStage={setActiveWorkflowStage}>
               <span className="workflow-stage-label">Preview</span>
-              <button className="workflow-action" disabled><Play size={15} /> Preview Cut</button>
+              <button
+                className="workflow-action teal"
+                onClick={handleRenderCutPreview}
+                disabled={busy || !project}
+              >
+                <Play size={15} /> {renderedCutPreview ? "Refresh Preview" : "Render Cut Preview"}
+              </button>
             </WorkflowStage>
             <WorkflowStage stage={5} activeStage={activeWorkflowStage} setActiveStage={setActiveWorkflowStage}>
               <span className="workflow-stage-label">Output</span>
+              <label className="workflow-toggle" title="Normalize the completed cut with the existing two-pass audio normalizer">
+                <input
+                  type="checkbox"
+                  checked={normalizeCutAudio}
+                  onChange={(event) => setNormalizeCutAudio(event.target.checked)}
+                  disabled={busy}
+                />
+                Normalize audio
+              </label>
+              {normalizeCutAudio && (
+                <select
+                  className="workflow-select"
+                  aria-label="Audio normalization preset"
+                  value={audioPresetId}
+                  onChange={(event) => setAudioPresetId(event.target.value)}
+                  disabled={busy}
+                >
+                  {(audioOptionsData?.presets ?? []).map((preset) => (
+                    <option key={preset.id} value={preset.id}>{preset.name}</option>
+                  ))}
+                </select>
+              )}
               <button className="workflow-action emphasized" onClick={handleExportCut} disabled={busy || !project}>
-                <Upload size={15} /> Export Cut
+                <Upload size={15} /> {normalizeCutAudio ? "Export Final" : "Export Cut"}
               </button>
             </WorkflowStage>
           </nav>
@@ -852,7 +937,26 @@ export default function Home() {
         </div>
       </header>
 
-      {activeTab === "transcript" ? (
+      {activeTab === "transcript" && activeWorkflowStage === 4 && renderedCutPreview && project ? (
+        <RenderedCutPreviewWorkspace
+          busy={busy}
+          onRefresh={handleRenderCutPreview}
+          pendingFrames={pendingPreviewFrames}
+          preview={renderedCutPreview}
+          project={project}
+          reviewSpliceAndAdvance={reviewSpliceAndAdvance}
+          seekRenderedJoin={seekRenderedJoin}
+          selectSplice={(splice) => {
+            setActiveSplice(splice.anchor_key);
+            seekRenderedJoin(splice);
+          }}
+          selectedSplice={selectedSplice}
+          selectedSpliceIndex={selectedSpliceIndex}
+          stale={renderedPreviewStale}
+          updateSplice={updateSplice}
+          videoRef={renderedCutVideoRef}
+        />
+      ) : activeTab === "transcript" ? (
         <section className="workspace">
         <div className="left-stack">
           <section className="preview-panel" ref={previewPanelRef}>
@@ -2072,6 +2176,30 @@ function ExportProgressModal({
   );
 }
 
+function PreviewRenderModal({
+  onClose,
+  progress,
+}: {
+  onClose: () => void;
+  progress: ExportProgressState;
+}) {
+  const running = progress.status === "running";
+  const failed = progress.status === "failed";
+  return (
+    <div className="modal-backdrop" role="status" aria-live="polite">
+      <div className={failed ? "progress-modal failed" : "progress-modal"}>
+        <span className="eyebrow">Stage 4 Preview</span>
+        <h2>{running ? "Rendering complete cut" : failed ? "Preview render failed" : "Preview ready"}</h2>
+        <p>{progress.message}</p>
+        <div className={running ? "progress-track indeterminate" : "progress-track"}>
+          <div className="progress-bar" style={running ? undefined : { width: "100%" }} />
+        </div>
+        {running ? <strong>Working...</strong> : <button className="modal-action" onClick={onClose}>{failed ? "Close" : "Open Preview"}</button>}
+      </div>
+    </div>
+  );
+}
+
 function TranscriptSettingsModal({
   busy,
   close,
@@ -2137,6 +2265,165 @@ function WorkflowStage({
       </button>
       {active && <div className="workflow-stage-content">{children}</div>}
     </div>
+  );
+}
+
+function RenderedCutPreviewWorkspace({
+  busy,
+  onRefresh,
+  pendingFrames,
+  preview,
+  project,
+  reviewSpliceAndAdvance,
+  seekRenderedJoin,
+  selectSplice,
+  selectedSplice,
+  selectedSpliceIndex,
+  stale,
+  updateSplice,
+  videoRef,
+}: {
+  busy: boolean;
+  onRefresh: () => void;
+  pendingFrames: number;
+  preview: RenderedCutPreviewResponse;
+  project: EditorProjectResponse;
+  reviewSpliceAndAdvance: (splice: DynamicSplice) => void;
+  seekRenderedJoin: (splice: DynamicSplice, autoplay?: boolean) => void;
+  selectSplice: (splice: DynamicSplice) => void;
+  selectedSplice: DynamicSplice | undefined;
+  selectedSpliceIndex: number;
+  stale: boolean;
+  updateSplice: (operation: () => Promise<EditorProjectResponse>) => void;
+  videoRef: RefObject<HTMLVideoElement | null>;
+}) {
+  const previewMarkerByAnchor = new Map(preview.splices.map((splice) => [splice.anchor_key, splice]));
+  const move = (direction: -1 | 1) => {
+    const next = project.splices[selectedSpliceIndex + direction];
+    if (next) selectSplice(next);
+  };
+  const isFrontTrim = selectedSplice?.left_word_id === "";
+  return (
+    <section className="rendered-cut-workspace">
+      <aside className="rendered-cut-sidebar">
+        <div className="rendered-sidebar-heading">
+          <div>
+            <span className="eyebrow">Final Review</span>
+            <h2>Splices</h2>
+          </div>
+          <strong>{project.splices.length}</strong>
+        </div>
+        <div className="rendered-splice-list">
+          {project.splices.map((splice, index) => {
+            const marker = previewMarkerByAnchor.get(splice.anchor_key);
+            return (
+              <button
+                key={splice.anchor_key}
+                className={["rendered-splice-entry", selectedSplice?.anchor_key === splice.anchor_key ? "active" : "", splice.reviewed ? "reviewed" : ""].join(" ")}
+                onClick={() => selectSplice(splice)}
+              >
+                <span>{index + 1}</span>
+                <div>
+                  <strong>{formatTime(marker?.preview_time_seconds ?? 0)}</strong>
+                  <p><small>Before</small>{marker?.left_section || "Start of source"}</p>
+                  <p><small>After</small>{marker?.right_section || splice.right_context}</p>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        <div className="rendered-sidebar-footer">
+          <span>{project.splices.filter((splice) => splice.reviewed).length} reviewed</span>
+          <span>{formatTime(preview.duration_seconds)}</span>
+        </div>
+      </aside>
+
+      <section className="rendered-cut-main">
+        <div className="rendered-cut-heading">
+          <div>
+            <span className="eyebrow">Stage 4</span>
+            <h2>Rendered Cut Preview</h2>
+          </div>
+          {stale ? (
+            <span className="preview-stale"><Gauge size={15} /> Preview stale · {pendingFrames} frame adjustment{pendingFrames === 1 ? "" : "s"} pending</span>
+          ) : (
+            <span className="preview-current"><Check size={15} /> Preview current</span>
+          )}
+        </div>
+        <div className="rendered-cut-video">
+          <video
+            key={preview.preview_id}
+            ref={videoRef}
+            controls
+            preload="metadata"
+            src={renderedCutPreviewUrl(preview.preview_id)}
+            onLoadedMetadata={() => selectedSplice && seekRenderedJoin(selectedSplice, false)}
+          />
+        </div>
+        <div className="rendered-timeline" aria-label="Rendered cut splice timeline">
+          <div className="rendered-timeline-track" />
+          {preview.splices.map((marker, index) => (
+            <button
+              key={marker.anchor_key}
+              className={selectedSplice?.anchor_key === marker.anchor_key ? "active" : ""}
+              style={{ left: `${Math.min(100, Math.max(0, marker.preview_time_seconds / Math.max(preview.duration_seconds, 0.001) * 100))}%` }}
+              title={`Splice ${index + 1} at ${formatTime(marker.preview_time_seconds)}`}
+              onClick={() => {
+                const splice = project.splices.find((item) => item.anchor_key === marker.anchor_key);
+                if (splice) selectSplice(splice);
+              }}
+            >
+              <Scissors size={16} />
+              <span>{index + 1}</span>
+            </button>
+          ))}
+          <div className="rendered-timeline-labels"><span>00:00</span><span>{formatTime(preview.duration_seconds)}</span></div>
+        </div>
+
+        <section className="rendered-splice-controls">
+          <div className="rendered-control-heading">
+            <h3>{selectedSplice ? `Splice ${selectedSpliceIndex + 1} of ${project.splices.length}` : "No splice selected"}</h3>
+            <div className="rendered-control-actions">
+              <button onClick={() => selectedSplice && seekRenderedJoin(selectedSplice)} disabled={!selectedSplice}><RotateCcw size={15} /> Replay Join</button>
+              <button className={selectedSplice?.reviewed ? "reviewed" : ""} onClick={() => selectedSplice && reviewSpliceAndAdvance(selectedSplice)} disabled={!selectedSplice}>
+                <Check size={15} /> {selectedSplice?.reviewed ? "Reviewed" : "Mark Reviewed"}
+              </button>
+              <button onClick={() => move(-1)} disabled={selectedSpliceIndex <= 0}><ChevronLeft size={15} /> Previous</button>
+              <button onClick={() => move(1)} disabled={selectedSpliceIndex < 0 || selectedSpliceIndex >= project.splices.length - 1}>Next <ChevronRight size={15} /></button>
+            </div>
+          </div>
+          {selectedSplice && (
+            <div className={isFrontTrim ? "rendered-frame-grid single" : "rendered-frame-grid"}>
+              {!isFrontTrim && (
+                <CutFrameCard
+                  title="OUT frame"
+                  frame={selectedSplice.left_out_frame}
+                  fps={project.project.fps}
+                  adjustment={selectedSplice.left_out_adjustment}
+                  whisperFrame={selectedSplice.left_whisper_out_frame}
+                  suggestedFrame={selectedSplice.left_suggested_out_frame}
+                  maxFrame={selectedSplice.right_in_frame - 1}
+                  onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, delta, 0))}
+                />
+              )}
+              <CutFrameCard
+                title={isFrontTrim ? "START frame" : "IN frame"}
+                frame={selectedSplice.right_in_frame}
+                fps={project.project.fps}
+                adjustment={selectedSplice.right_in_adjustment}
+                whisperFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
+                suggestedFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
+                minFrame={isFrontTrim ? 0 : selectedSplice.left_out_frame + 1}
+                onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, 0, delta))}
+              />
+            </div>
+          )}
+          <button className="refresh-rendered-preview" onClick={onRefresh} disabled={busy || !stale}>
+            <RotateCcw size={18} /> Apply Changes & Refresh Preview
+          </button>
+        </section>
+      </section>
+    </section>
   );
 }
 
@@ -2210,6 +2497,7 @@ function SpliceReviewPanel({
               adjustment={selectedSplice.left_out_adjustment}
               whisperFrame={selectedSplice.left_whisper_out_frame}
               suggestedFrame={selectedSplice.left_suggested_out_frame}
+              maxFrame={selectedSplice.right_in_frame - 1}
               onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, delta, 0))}
             />
           )}
@@ -2220,6 +2508,7 @@ function SpliceReviewPanel({
             adjustment={selectedSplice.right_in_adjustment}
             whisperFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
             suggestedFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
+            minFrame={isFrontTrim ? 0 : selectedSplice.left_out_frame + 1}
             onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, 0, delta))}
           />
         </div>
@@ -2237,6 +2526,8 @@ function CutFrameCard({
   adjustment,
   whisperFrame,
   suggestedFrame,
+  minFrame,
+  maxFrame,
   onNudge,
 }: {
   title: string;
@@ -2245,8 +2536,25 @@ function CutFrameCard({
   adjustment: number;
   whisperFrame: number;
   suggestedFrame: number;
+  minFrame?: number;
+  maxFrame?: number;
   onNudge: (delta: number) => void;
 }) {
+  const allowedDelta = (requested: number) => {
+    const requestedFrame = frame + requested;
+    const boundedFrame = Math.min(maxFrame ?? Number.POSITIVE_INFINITY, Math.max(minFrame ?? 0, requestedFrame));
+    return boundedFrame - frame;
+  };
+  const nudge = (requested: number) => {
+    const delta = allowedDelta(requested);
+    if (delta !== 0) onNudge(delta);
+  };
+  const buttonTitle = (requested: number) => {
+    const delta = allowedDelta(requested);
+    if (delta === 0) return requested > 0 ? "At the next IN-frame safety limit" : "At the earliest legal frame";
+    if (delta !== requested) return `Move ${Math.abs(delta)} frame${Math.abs(delta) === 1 ? "" : "s"} to the safety limit`;
+    return `Move ${Math.abs(delta)} frame${Math.abs(delta) === 1 ? "" : "s"}`;
+  };
   return (
     <div className="cut-frame-card">
       <div className="cut-frame-header">
@@ -2256,13 +2564,16 @@ function CutFrameCard({
       {suggestedFrame !== whisperFrame && (
         <div className="assisted-boundary-label">Assisted suggestion: {formatFrameTimecode(suggestedFrame, fps)} · frame {suggestedFrame.toLocaleString()} · +{suggestedFrame - whisperFrame}</div>
       )}
+      {(frame === minFrame || frame === maxFrame) && (
+        <div className="cut-boundary-limit">Safety boundary reached at frame {frame.toLocaleString()}</div>
+      )}
       <div className="nudge-buttons" aria-label={`${title} nudges`}>
-        <button onClick={() => onNudge(-10)}><ArrowLeft size={13} /> 10</button>
-        <button onClick={() => onNudge(-5)}><ArrowLeft size={13} /> 5</button>
-        <button onClick={() => onNudge(-1)}><ArrowLeft size={13} /> 1</button>
-        <button onClick={() => onNudge(1)}>1 <ArrowRight size={13} /></button>
-        <button onClick={() => onNudge(5)}>5 <ArrowRight size={13} /></button>
-        <button onClick={() => onNudge(10)}>10 <ArrowRight size={13} /></button>
+        <button disabled={allowedDelta(-10) === 0} title={buttonTitle(-10)} onClick={() => nudge(-10)}><ArrowLeft size={13} /> 10</button>
+        <button disabled={allowedDelta(-5) === 0} title={buttonTitle(-5)} onClick={() => nudge(-5)}><ArrowLeft size={13} /> 5</button>
+        <button disabled={allowedDelta(-1) === 0} title={buttonTitle(-1)} onClick={() => nudge(-1)}><ArrowLeft size={13} /> 1</button>
+        <button disabled={allowedDelta(1) === 0} title={buttonTitle(1)} onClick={() => nudge(1)}>1 <ArrowRight size={13} /></button>
+        <button disabled={allowedDelta(5) === 0} title={buttonTitle(5)} onClick={() => nudge(5)}>5 <ArrowRight size={13} /></button>
+        <button disabled={allowedDelta(10) === 0} title={buttonTitle(10)} onClick={() => nudge(10)}>10 <ArrowRight size={13} /></button>
       </div>
     </div>
   );
