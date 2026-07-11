@@ -23,6 +23,12 @@ class SpliceAdjustment:
     left_out_delta: int = 0
     right_in_delta: int = 0
     reviewed: bool = False
+    assisted_left_out_frame: int | None = None
+
+
+@dataclass
+class EditorSettings:
+    dead_space_min_seconds: float = 0.8
 
 
 @dataclass
@@ -30,6 +36,7 @@ class EditDecisionList:
     deleted_word_ranges: list[DeletedWordRange] = field(default_factory=list)
     deleted_silence_ranges: list[DeletedSilenceRange] = field(default_factory=list)
     splice_adjustments: dict[str, SpliceAdjustment] = field(default_factory=dict)
+    settings: EditorSettings = field(default_factory=EditorSettings)
 
     def delete_words(self, decision_id: str, start_word_id: str, end_word_id: str, reason: str) -> None:
         self.deleted_word_ranges.append(DeletedWordRange(decision_id, start_word_id, end_word_id, reason))
@@ -92,6 +99,13 @@ class EditDecisionList:
         adjustment.right_in_delta += right_in_delta
         if reviewed is not None:
             adjustment.reviewed = reviewed
+
+    def set_assisted_out_frame(self, anchor_key: str, frame: int | None) -> None:
+        adjustment = self.splice_adjustments.get(anchor_key)
+        if adjustment is None:
+            adjustment = SpliceAdjustment(anchor_key)
+            self.splice_adjustments[anchor_key] = adjustment
+        adjustment.assisted_left_out_frame = frame
 
 
 def _word_number(word_id: str) -> int:

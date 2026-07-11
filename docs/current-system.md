@@ -56,6 +56,13 @@ remain on disk.
 
 ## Transcript Edit Workflow
 
+The application uses a single-row command header. A Tools hover/focus menu
+switches between Transcript Edit, Caption Generator, and Audio Normalizer.
+Project open/save and settings are compact utilities. Transcript actions use a
+five-stage numbered chevron rail; only the selected stage expands to show its
+controls. Stage 4 is a disabled preview placeholder until rendered preview is
+implemented.
+
 ### Creating or opening a project
 
 The user can select a source video and start a background transcription job, or
@@ -82,7 +89,30 @@ Current kept ranges generate the splice queue dynamically. A splice records:
 
 The browser previews a splice by playing the outgoing source segment, seeking
 to the incoming segment, and continuing playback. It does not render a preview
-MP4. Individual frames are available from the API for the IN/OUT review cards.
+MP4. The compact splice controls show exact timecode, absolute frame, the
+Whisper-suggested frame, and the user's manual adjustment without duplicating
+the source preview as separate frame images.
+
+The cut plan is validated after every frame adjustment and again before export.
+Collapsed, reversed, negative, or overlapping kept ranges are rejected, and a
+rejected adjustment is rolled back rather than saved. Whisper word timestamps
+remain the immutable baseline. The primary **Fine Tune** action extracts a mono
+WAV and examines only OUT points for current unreviewed splices. It can extend a
+suggestion to the first sustained local silence, up to `0.35s` and never beyond
+the next word. The Whisper frame, splice-level assisted suggestion, and manual
+adjustment remain separate. For a deleted validated pause, Fine Tune reuses its
+measured outgoing acoustic boundary. Reviewed splices are not analyzed or
+changed.
+
+Whisper still records candidate gaps from `0.35s`, but those raw gaps are not
+all shown as dead space. The primary **Analyze Pauses** action measures only raw
+candidates meeting the project threshold (default `0.8s`) against the source
+audio. It stores measured boundaries alongside the Whisper gap, hides measured
+pauses below the threshold, and restores any rejected candidate that had been
+deleted. Displayed chips, the toolbar count, and bulk removal all use the same
+frame-based measured duration. Raw candidates are labeled separately, and bulk
+removal remains disabled until all current threshold-qualified candidates have
+been analyzed.
 
 ### Save and export
 
@@ -154,7 +184,10 @@ the source video stream when possible.
 | GET | `/api/projects/transcribe/jobs/{job_id}` | Poll transcription status/result |
 | POST | `/api/projects/current/delete` | Delete selected word/silence tokens |
 | POST | `/api/projects/current/restore` | Restore selected word/silence tokens |
-| POST | `/api/projects/current/delete-dead-space` | Delete all current silence ranges |
+| POST | `/api/projects/current/delete-dead-space` | Delete undeleted silence ranges meeting the project threshold |
+| POST | `/api/projects/current/settings` | Update the bulk-pause threshold setting |
+| POST | `/api/projects/current/analyze-pauses` | Measure threshold-qualified Whisper gap candidates and reject false long pauses |
+| POST | `/api/projects/current/analyze-boundaries` | Analyze and persist assisted word-end suggestions for the current project |
 | POST | `/api/projects/current/splices/adjust` | Nudge splice OUT/IN frames |
 | POST | `/api/projects/current/splices/review` | Set reviewed state |
 | POST | `/api/projects/current/save` | Save active project, prompting if necessary |
@@ -194,7 +227,7 @@ the source video stream when possible.
 | Data | Location/lifetime |
 | --- | --- |
 | Active sources, analysis, preview cache, jobs | FastAPI process memory |
-| Editor project and decisions | User-selected `.vcg.json` |
+| Editor project, decisions, and pause-removal setting | User-selected version-2 `.vcg.json`; version 1 remains readable |
 | Custom caption styles | `%LOCALAPPDATA%\VCG AutoCaption\style_library.json` |
 | Temporary media and logs | `app/temp/` |
 | Default exports | `app/exports/` or a selected folder |
@@ -213,7 +246,9 @@ hostable multi-user service.
 
 ## Validation Baseline
 
-- All 58 Python tests pass.
+- All 79 Python tests pass.
+- File-picker failures expose the exact backend exception in the existing
+  transcript status area; normal picker operation adds no diagnostic overlay.
 - TypeScript typecheck and the Next.js production build pass.
 - Test coverage is strongest around pure core logic and API handlers.
 - There is no automated browser workflow test and no real-media golden-output

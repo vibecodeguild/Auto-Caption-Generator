@@ -32,6 +32,12 @@ def test_transcript_tokens_merge_words_and_silence_in_frame_order() -> None:
     ]
 
 
+def test_transcript_tokens_hide_silence_below_configured_threshold() -> None:
+    tokens = transcript_tokens(_project(), min_silence_seconds=1.1)
+
+    assert [token.id for token in tokens] == ["w1", "w2", "w3", "w4"]
+
+
 def test_token_ids_between_selects_words_and_silence_as_one_stream() -> None:
     tokens = transcript_tokens(_project())
 

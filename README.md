@@ -30,6 +30,8 @@ one local API process.
 For a detailed implementation inventory, data-flow description, and API list,
 see [Current System](docs/current-system.md). For the known gaps and recommended
 improvement order, see [Outstanding Work](docs/outstanding-work.md).
+The currently approved production sequence and rendered-preview design are in
+[Active Build Plan](docs/active-build-plan.md).
 
 ## Requirements
 
@@ -94,11 +96,16 @@ reverse proxy, router, container mapping, or firewall rule.
 1. Choose a source video, or open an existing `.vcg.json` project.
 2. If starting from video, choose the Whisper model and CPU/GPU mode, then
    generate the transcript.
-3. Select transcript words or silence chips and delete or restore them.
-4. Review the dynamic splice queue. Preview 2, 4, or 6 seconds around each join,
+3. Click **Analyze Pauses** to measure only Whisper gaps that meet the configured
+   long-pause threshold. Candidates measured below the threshold disappear.
+4. Select transcript words or validated long-pause chips and delete or restore
+   them. Bulk removal shows how many measured pauses currently qualify.
+5. Click **Fine Tune** to analyze only the current unreviewed splice OUT points.
+   The utility reports how many cuts were checked, adjusted, or unchanged.
+6. Review the dynamic splice queue. Preview 2, 4, or 6 seconds around each join,
    adjust the OUT and IN frames, and mark reviewed splices.
-5. Save the edit decisions to `.vcg.json`.
-6. Export a re-encoded rough cut. The current web UI writes
+7. Save the edit decisions to `.vcg.json`.
+8. Export a re-encoded rough cut. The current web UI writes
    `app/exports/<source>_cut.mp4`.
 
 The source file is never modified. The project stores the source path,
@@ -164,11 +171,14 @@ npm run build
 .\.venv\Scripts\python.exe -m pytest tests
 ```
 
-The Python suite currently contains 58 tests covering transcript/edit models,
+The Python suite currently contains 79 tests covering transcript/edit models,
 splice generation and preview, project persistence, caption grouping/ASS
 generation, FFmpeg command construction, audio normalization, local API
 behavior, host/origin enforcement, and Windows dialog integration. There is not
 yet a browser-level end-to-end test suite.
+
+If Open Video or Open Project fails, the existing transcript status area shows
+the exact backend picker exception. Normal picker operation adds no extra UI.
 
 ## Retained PySide6 Prototype
 
@@ -203,6 +213,8 @@ between the two interfaces is not guaranteed.
 
 - [Current System](docs/current-system.md): source-of-truth implementation map
 - [Outstanding Work](docs/outstanding-work.md): gaps, risks, and proposed order
+- [Active Build Plan](docs/active-build-plan.md): approved implementation order,
+  safety gates, and rendered-preview mockup
 - [Web App Implementation Notes](docs/web-app-implementation-notes.md): concise
   developer runbook and endpoint catalog
 - [Architecture Pivot](docs/web-app-architecture-pivot.md): historical decision

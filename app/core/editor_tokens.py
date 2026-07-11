@@ -13,7 +13,7 @@ class EditorToken:
     end_frame: int
 
 
-def transcript_tokens(project: TranscriptProject) -> list[EditorToken]:
+def transcript_tokens(project: TranscriptProject, min_silence_seconds: float = 0.0) -> list[EditorToken]:
     tokens: list[EditorToken] = []
     tokens.extend(
         EditorToken(
@@ -32,6 +32,7 @@ def transcript_tokens(project: TranscriptProject) -> list[EditorToken]:
             end_frame=silence.end_frame,
         )
         for silence in project.silence_ranges
+        if silence.effective_duration() >= min_silence_seconds
     )
     return sorted(tokens, key=lambda token: (token.start_frame, token.end_frame))
 

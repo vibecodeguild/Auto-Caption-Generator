@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import copy
 import json
 import mimetypes
 import subprocess
 import threading
 import uuid
+import wave
 from dataclasses import asdict
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from app.core.audio_normalizer import (
     normalize_video_audio,
     preset_options,
 )
+from app.core.audio_boundary import analyze_pause_candidates, suggest_word_end_boundaries
 from app.core.pipeline import generate_captioned_video
 from app.core.caption_grouping import group_words
 from app.core.editor_pipeline import generate_editor_transcript
@@ -32,7 +35,7 @@ from app.core.ffmpeg_locator import find_ffmpeg
 from app.core.ffmpeg_runner import extract_audio
 from app.core.project_store import editor_project_document, load_editor_project, save_editor_project
 from app.core.settings import COMPUTE_OPTIONS, MODEL_OPTIONS, PRESETS, CaptionPreset, CaptionStyle, WordTimestamp, default_style, exports_dir, temp_dir
-from app.core.splice_generation import DynamicSplice, SplicePlan, generate_splices
+from app.core.splice_generation import DynamicSplice, InvalidCutPlanError, SplicePlan, generate_splices
 from app.core.splice_preview import source_splice_preview_segments
 from app.core.style_library import delete_user_style, is_built_in_style, load_style_library, save_user_style
 from app.core.transcriber import transcribe_audio
@@ -178,6 +181,10 @@ class ReviewSpliceRequest(BaseModel):
     reviewed: bool
 
 
+class EditorSettingsRequest(BaseModel):
+    dead_space_min_seconds: float
+
+
 class ExportCutRequest(BaseModel):
     output_path: str | None = None
 
@@ -289,7 +296,13 @@ def _open_project_path(path: Path) -> dict:
 
 
 def _choose_project_file() -> Path | None:
-    return _windows_choose_project_file()
+    try:
+        return _windows_choose_project_file()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Windows project picker error ({type(exc).__name__}): {exc}",
+        ) from exc
 
 
 def _choose_project_save_file(project: TranscriptProject) -> Path | None:
@@ -298,15 +311,33 @@ def _choose_project_save_file(project: TranscriptProject) -> Path | None:
     if source_path.exists():
         default_name = f"{source_path.stem}.vcg.json"
 
-    return _windows_choose_project_save_file(default_name)
+    try:
+        return _windows_choose_project_save_file(default_name)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Windows project save picker error ({type(exc).__name__}): {exc}",
+        ) from exc
 
 
 def _choose_video_file() -> Path | None:
-    return _windows_choose_video_file()
+    try:
+        return _windows_choose_video_file()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Windows video picker error ({type(exc).__name__}): {exc}",
+        ) from exc
 
 
 def _choose_output_folder() -> Path | None:
-    return _windows_choose_output_folder()
+    try:
+        return _windows_choose_output_folder()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Windows folder picker error ({type(exc).__name__}): {exc}",
+        ) from exc
 
 
 @app.get("/api/projects/current")
@@ -432,20 +463,119 @@ def delete_dead_space() -> dict:
     project = _require_project()
     deleted = _deleted_silence_ids()
     for silence in project.silence_ranges:
-        if silence.id not in deleted:
+        duration = _silence_duration_seconds(silence, project.fps)
+        if (
+            silence.audio_analyzed
+            and silence.id not in deleted
+            and duration >= state.edits.settings.dead_space_min_seconds
+        ):
             state.edits.delete_silence(f"delete_{silence.id}", silence.id)
     _save_current_project_if_loaded(project)
     return _project_response()
 
 
+@app.post("/api/projects/current/settings")
+def update_editor_settings(payload: EditorSettingsRequest) -> dict:
+    project = _require_project()
+    if not 0.35 <= payload.dead_space_min_seconds <= 10.0:
+        raise HTTPException(status_code=400, detail="Dead-space threshold must be between 0.35 and 10 seconds.")
+
+    state.edits.settings.dead_space_min_seconds = payload.dead_space_min_seconds
+    _save_current_project_if_loaded(project)
+    return _project_response()
+
+
+@app.post("/api/projects/current/analyze-pauses")
+def analyze_current_pauses() -> dict:
+    project = _require_project()
+    source = Path(project.source).expanduser().resolve()
+    if not source.exists():
+        raise HTTPException(status_code=400, detail=f"Source video not found: {source}")
+    try:
+        audio_path = extract_audio(source, temp_dir() / "editor_boundary_audio.wav")
+        state.project, summary = analyze_pause_candidates(
+            project,
+            audio_path,
+            state.edits.settings.dead_space_min_seconds,
+        )
+    except (OSError, RuntimeError, ValueError, wave.Error) as exc:
+        raise HTTPException(status_code=400, detail=f"Pause analysis failed: {exc}") from exc
+
+    for silence in state.project.silence_ranges:
+        if (
+            silence.audio_analyzed
+            and _silence_duration_seconds(silence, state.project.fps)
+            < state.edits.settings.dead_space_min_seconds
+        ):
+            state.edits.restore_silence(silence.id)
+    _save_current_project_if_loaded(state.project)
+    return _project_response(pause_analysis_summary=summary)
+
+
+@app.post("/api/projects/current/analyze-boundaries")
+def analyze_current_boundaries() -> dict:
+    project = _require_project()
+    plan = generate_splices(project, state.edits)
+    targets = [splice for splice in plan.splices if not splice.reviewed and splice.left_word_id]
+    if not targets:
+        return _project_response(
+            fine_tune_summary={"cuts_checked": 0, "cuts_adjusted": 0, "cuts_unchanged": 0}
+        )
+
+    source = Path(project.source).expanduser().resolve()
+    if not source.exists():
+        raise HTTPException(status_code=400, detail=f"Source video not found: {source}")
+    try:
+        audio_path = extract_audio(source, temp_dir() / "editor_boundary_audio.wav")
+        suggestions = suggest_word_end_boundaries(
+            project,
+            audio_path,
+            {splice.left_word_id for splice in targets},
+        )
+    except (OSError, RuntimeError, ValueError, wave.Error) as exc:
+        raise HTTPException(status_code=400, detail=f"Audio boundary analysis failed: {exc}") from exc
+
+    previous_edits = copy.deepcopy(state.edits)
+    adjusted = 0
+    for splice in targets:
+        suggestion = suggestions.get(splice.left_word_id)
+        measured_suggestion = _measured_pause_out_frame(project, splice.left_word_id, splice.right_word_id)
+        if measured_suggestion is not None:
+            suggestion = measured_suggestion
+        state.edits.set_assisted_out_frame(splice.anchor_key, suggestion)
+        if suggestion is not None and suggestion != splice.left_whisper_out_frame:
+            adjusted += 1
+    try:
+        generate_splices(project, state.edits)
+    except InvalidCutPlanError as exc:
+        state.edits = previous_edits
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _save_current_project_if_loaded(project)
+    checked = len(targets)
+    return _project_response(
+        fine_tune_summary={
+            "cuts_checked": checked,
+            "cuts_adjusted": adjusted,
+            "cuts_unchanged": checked - adjusted,
+        }
+    )
+
+
 @app.post("/api/projects/current/splices/adjust")
 def adjust_splice(payload: AdjustSpliceRequest) -> dict:
     project = _require_project()
+    previous_edits = copy.deepcopy(state.edits)
     state.edits.adjust_splice(
         payload.anchor_key,
         left_out_delta=payload.left_delta,
         right_in_delta=payload.right_delta,
     )
+    try:
+        generate_splices(project, state.edits)
+    except InvalidCutPlanError as exc:
+        state.edits = previous_edits
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     _save_current_project_if_loaded(project)
     return _project_response()
 
@@ -487,7 +617,10 @@ def export_cut(payload: ExportCutRequest) -> dict:
     source = Path(project.source)
     if not source.exists():
         raise HTTPException(status_code=400, detail=f"Source video not found: {source}")
-    plan = generate_splices(project, state.edits)
+    try:
+        plan = generate_splices(project, state.edits)
+    except InvalidCutPlanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     intervals = plan.export_intervals()
     if not intervals:
         raise HTTPException(status_code=400, detail="No kept intervals to export.")
@@ -1000,15 +1133,42 @@ def _save_current_project_if_loaded(project: TranscriptProject) -> None:
         save_editor_project(state.project_path, project, state.edits)
 
 
-def _project_response() -> dict:
+def _project_response(
+    *,
+    fine_tune_summary: dict[str, int] | None = None,
+    pause_analysis_summary: dict[str, int] | None = None,
+) -> dict:
     project = _require_project()
     plan = generate_splices(project, state.edits)
+    deleted_silence_ids = _deleted_silence_ids()
+    dead_space_candidate_count = sum(
+        1
+        for silence in project.silence_ranges
+        if silence.id not in deleted_silence_ids
+        and silence.audio_analyzed
+        and _silence_duration_seconds(silence, project.fps) >= state.edits.settings.dead_space_min_seconds
+    )
+    pause_analysis_pending_count = sum(
+        1
+        for silence in project.silence_ranges
+        if not silence.audio_analyzed
+        and (silence.end_frame - silence.start_frame + 1) / project.fps
+        >= state.edits.settings.dead_space_min_seconds
+    )
     return {
         "project_path": str(state.project_path) if state.project_path else None,
         "project": _project_dict(project),
-        "tokens": [asdict(token) for token in transcript_tokens(project)],
+        "tokens": [
+            asdict(token)
+            for token in transcript_tokens(project, state.edits.settings.dead_space_min_seconds)
+        ],
         "deleted_word_ids": sorted(_deleted_word_ids(project)),
-        "deleted_silence_ids": sorted(_deleted_silence_ids()),
+        "deleted_silence_ids": sorted(deleted_silence_ids),
+        "settings": asdict(state.edits.settings),
+        "dead_space_candidate_count": dead_space_candidate_count,
+        "pause_analysis_pending_count": pause_analysis_pending_count,
+        "fine_tune_summary": fine_tune_summary,
+        "pause_analysis_summary": pause_analysis_summary,
         "splices": [_splice_dict(splice, project.fps) for splice in plan.splices],
         "kept_ranges": [asdict(item) for item in plan.kept_ranges],
     }
@@ -1021,6 +1181,25 @@ def _project_dict(project: TranscriptProject) -> dict:
         "words": [asdict(word) for word in project.words],
         "silence_ranges": [asdict(silence) for silence in project.silence_ranges],
     }
+
+
+def _measured_pause_out_frame(project: TranscriptProject, left_word_id: str, right_word_id: str) -> int | None:
+    left_word = project.word_by_id(left_word_id)
+    right_word = project.word_by_id(right_word_id)
+    for silence in project.silence_ranges:
+        if (
+            silence.audio_analyzed
+            and silence.start_frame == left_word.end_frame + 1
+            and silence.end_frame == right_word.start_frame - 1
+        ):
+            return silence.measured_start_frame
+    return None
+
+
+def _silence_duration_seconds(silence, fps: float) -> float:
+    if silence.measured_start_frame is not None and silence.measured_end_frame is not None:
+        return max(0, silence.measured_end_frame - silence.measured_start_frame + 1) / fps
+    return max(0, silence.end_frame - silence.start_frame + 1) / fps
 
 
 def _splice_dict(splice: DynamicSplice, fps: float) -> dict:

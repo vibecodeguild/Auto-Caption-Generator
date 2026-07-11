@@ -45,3 +45,17 @@ def test_choose_output_folder_uses_modern_explorer_dialog(monkeypatch) -> None:
     assert "FOS_PICKFOLDERS" in script
     assert "IFileOpenDialog" in script
     assert "FolderBrowserDialog" not in script
+
+
+def test_picker_timeout_is_reported_as_actionable_error(monkeypatch) -> None:
+    def fake_run(*args, **kwargs):
+        raise windows_dialog.subprocess.TimeoutExpired(args[0], timeout=300)
+
+    monkeypatch.setattr(windows_dialog.subprocess, "run", fake_run)
+
+    try:
+        windows_dialog.choose_video_file()
+    except RuntimeError as exc:
+        assert "started but did not return within 300 seconds" in str(exc)
+    else:
+        raise AssertionError("Expected the picker timeout to be reported")

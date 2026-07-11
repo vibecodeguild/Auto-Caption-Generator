@@ -2,6 +2,10 @@
 
 Last assessed: July 10, 2026.
 
+The user-approved implementation sequence now lives in
+[Active Build Plan](active-build-plan.md). This document remains the broader
+assessment and backlog.
+
 This is a repository-backed assessment of unfinished work. It distinguishes
 confirmed gaps in the current implementation from optional product expansion.
 
@@ -32,6 +36,14 @@ landscape, portrait, and square media; compare browser preview with rendered
 output; run the full suite outside the restricted temp-directory environment;
 then either commit the set together or split it into coherent commits.
 
+The working tree additionally contains the first cut-safety tranche: validated
+non-overlapping cut ranges, version-2 editor settings, threshold-aware bulk
+pause removal, and Audio Boundary Assist with separate Whisper, assisted, and
+manual frames on each splice. Analyze Pauses validates only threshold-qualified
+Whisper gaps and hides false long pauses; Fine Tune targets only unreviewed cuts
+after the transcript edit. Representative production footage remains the
+release gate for tuning the shared detector's conservative thresholds.
+
 ## Priority 1: Restore a Reproducible Quality Gate
 
 Confirmed gaps:
@@ -48,7 +60,7 @@ Confirmed gaps:
 
 Recommended completion criteria:
 
-1. All 58 Python tests pass from a clean checkout.
+1. All 79 Python tests pass from a clean checkout.
 2. `npm run typecheck` and `npm run build` pass.
 3. One small checked-out or generated fixture validates real FFmpeg output for
    caption, cut, and normalization workflows without committing private media.

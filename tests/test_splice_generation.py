@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from app.core.edit_decisions import EditDecisionList
-from app.core.splice_generation import generate_splices
+from app.core.splice_generation import InvalidCutPlanError, generate_splices
 from app.core.transcript_model import SilenceRange, TranscriptProject, TranscriptWord
 
 
@@ -73,6 +75,24 @@ def test_frame_adjustments_are_preserved_by_source_anchors() -> None:
     assert second_plan.kept_ranges[1].adjusted_start_frame == 64
 
 
+def test_assisted_word_end_is_suggestion_and_manual_adjustment_stays_separate() -> None:
+    project = _project()
+    edits = EditDecisionList()
+    edits.delete_words("delete_sentence_2", "w4", "w5", reason="sentence")
+    edits.set_assisted_out_frame("w3->w6", 33)
+
+    splice = generate_splices(project, edits).splices[0]
+    assert splice.left_whisper_out_frame == 28
+    assert splice.left_suggested_out_frame == 33
+    assert splice.left_out_frame == 33
+
+    edits.adjust_splice(splice.anchor_key, left_out_delta=2)
+    adjusted = generate_splices(project, edits).splices[0]
+    assert adjusted.left_suggested_out_frame == 33
+    assert adjusted.left_out_frame == 35
+    assert adjusted.left_out_adjustment == 2
+
+
 def test_deleted_silence_creates_splice_between_adjacent_words() -> None:
     edits = EditDecisionList()
     edits.delete_silence("delete_dead_space", "s1")
@@ -109,3 +129,27 @@ def test_deleting_from_start_creates_adjustable_front_trim_splice() -> None:
 
     assert adjusted.splices[0].right_in_frame == 27
     assert adjusted.kept_ranges[0].adjusted_start_frame == 27
+
+
+def test_rejects_adjustments_that_collapse_a_short_kept_range() -> None:
+    edits = EditDecisionList()
+    edits.delete_words("delete_left", "w2", "w2", reason="word")
+    edits.delete_words("delete_right", "w4", "w5", reason="selection")
+    plan = generate_splices(_project(), edits)
+
+    left_splice, right_splice = plan.splices
+    edits.adjust_splice(left_splice.anchor_key, right_in_delta=8)
+    edits.adjust_splice(right_splice.anchor_key, left_out_delta=-8)
+
+    with pytest.raises(InvalidCutPlanError, match="collapsed"):
+        generate_splices(_project(), edits)
+
+
+def test_rejects_neighboring_ranges_that_overlap_across_a_cut() -> None:
+    edits = EditDecisionList()
+    edits.delete_words("delete_sentence_2", "w4", "w5", reason="sentence")
+    splice = generate_splices(_project(), edits).splices[0]
+    edits.adjust_splice(splice.anchor_key, left_out_delta=40, right_in_delta=-5)
+
+    with pytest.raises(InvalidCutPlanError, match="overlap"):
+        generate_splices(_project(), edits)

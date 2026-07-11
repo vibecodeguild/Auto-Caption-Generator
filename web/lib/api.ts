@@ -25,6 +25,11 @@ export type SilenceRange = {
   end: number;
   start_frame: number;
   end_frame: number;
+  measured_start: number | null;
+  measured_end: number | null;
+  measured_start_frame: number | null;
+  measured_end_frame: number | null;
+  audio_analyzed: boolean;
 };
 
 export type DynamicSplice = {
@@ -36,6 +41,8 @@ export type DynamicSplice = {
   right_word_id: string;
   left_out_frame: number;
   right_in_frame: number;
+  left_whisper_out_frame: number;
+  left_suggested_out_frame: number;
   left_out_adjustment: number;
   right_in_adjustment: number;
   left_context: string;
@@ -59,6 +66,21 @@ export type EditorProjectResponse = {
   deleted_silence_ids: string[];
   splices: DynamicSplice[];
   kept_ranges: unknown[];
+  settings: {
+    dead_space_min_seconds: number;
+  };
+  dead_space_candidate_count: number;
+  pause_analysis_pending_count: number;
+  fine_tune_summary: {
+    cuts_checked: number;
+    cuts_adjusted: number;
+    cuts_unchanged: number;
+  } | null;
+  pause_analysis_summary: {
+    candidates_checked: number;
+    validated_long_pauses: number;
+    rejected_candidates: number;
+  } | null;
 };
 
 export type CaptionPresetPayload = {
@@ -297,6 +319,29 @@ export function restoreTokens(tokenIds: string[]) {
 
 export function deleteDeadSpace() {
   return request<EditorProjectResponse>("/api/projects/current/delete-dead-space", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function updateEditorSettings(deadSpaceMinSeconds: number) {
+  return request<EditorProjectResponse>("/api/projects/current/settings", {
+    method: "POST",
+    body: JSON.stringify({
+      dead_space_min_seconds: deadSpaceMinSeconds,
+    }),
+  });
+}
+
+export function analyzeBoundaries() {
+  return request<EditorProjectResponse>("/api/projects/current/analyze-boundaries", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function analyzePauses() {
+  return request<EditorProjectResponse>("/api/projects/current/analyze-pauses", {
     method: "POST",
     body: "{}",
   });

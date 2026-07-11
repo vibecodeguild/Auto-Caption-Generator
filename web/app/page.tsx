@@ -4,20 +4,24 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   FolderOpen,
   Gauge,
+  Grid3X3,
   Headphones,
   Pause,
   Play,
   RotateCcw,
   Save,
   Scissors,
+  Settings,
   Upload,
   Volume2,
   VolumeX,
   WandSparkles,
+  X,
 } from "lucide-react";
 import type { Dispatch, MutableRefObject, ReactNode, RefObject, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -37,6 +41,8 @@ import {
   type ProjectDocumentResponse,
   type TranscriptionJobStatus,
   adjustSplice,
+  analyzeBoundaries,
+  analyzePauses,
   analyzeVideoAudio,
   audioOptions,
   audioPreviewUrl,
@@ -52,7 +58,6 @@ import {
   deleteCaptionStyle,
   deleteTokens,
   exportCut,
-  frameImageUrl,
   generateAudioPreview,
   generateCaptionVideo,
   getProjectDocument,
@@ -66,6 +71,7 @@ import {
   saveCaptionStyle,
   sourceVideoUrl,
   startTranscription,
+  updateEditorSettings,
 } from "../lib/api";
 
 type PreviewState = {
@@ -110,6 +116,8 @@ export default function Home() {
   const [status, setStatus] = useState(`API: ${API_BASE}`);
   const [captionStatus, setCaptionStatus] = useState("Caption generator ready");
   const [busy, setBusy] = useState(false);
+  const [showTranscriptSettings, setShowTranscriptSettings] = useState(false);
+  const [activeWorkflowStage, setActiveWorkflowStage] = useState(1);
   const [previewAspect, setPreviewAspect] = useState(16 / 9);
   const [previewBox, setPreviewBox] = useState({ width: 400, height: 225 });
   const previewPanelRef = useRef<HTMLElement | null>(null);
@@ -267,6 +275,7 @@ export default function Home() {
         projectFileHandleRef.current = null;
         applyProject(data);
         setTranscriptSource(data.project.source);
+        setActiveWorkflowStage(data.pause_analysis_pending_count > 0 ? 2 : data.splices.length > 0 ? 3 : 1);
       },
     );
   };
@@ -280,6 +289,7 @@ export default function Home() {
         projectFileHandleRef.current = null;
         setSelected([]);
         setActiveSplice(null);
+        setActiveWorkflowStage(1);
         setStatus(`Selected ${data.source}`);
       },
     );
@@ -307,6 +317,7 @@ export default function Home() {
         projectFileHandleRef.current = null;
         applyProject(data);
         setTranscriptSource(data.project.source);
+        setActiveWorkflowStage(2);
         setTranscriptionProgress(null);
         setStatus(`Transcript ready: ${data.project.words.length} words`);
       },
@@ -718,70 +729,126 @@ export default function Home() {
           onClose={() => setExportProgress(null)}
         />
       )}
-      <header className="topbar">
-        <div>
+      {showTranscriptSettings && project && (
+        <TranscriptSettingsModal
+          busy={busy}
+          project={project}
+          close={() => setShowTranscriptSettings(false)}
+          update={(threshold) => void run(
+            () => updateEditorSettings(threshold),
+            applyProject,
+          )}
+        />
+      )}
+      <header className="topbar modern-topbar">
+        <div className="brand-block">
           <h1>VCG Content Command Center</h1>
           <p>Local web editor for transcript cuts and source-video splice review</p>
         </div>
-        <nav>
-          <button className={activeTab === "transcript" ? "tab active" : "tab"} onClick={() => setActiveTab("transcript")}>
-            Transcript Edit
+        <div className="header-menu tools-menu">
+          <button className="header-menu-trigger" aria-haspopup="menu">
+            <Grid3X3 size={17} /> Tools <ChevronDown size={14} />
           </button>
-          <button className={activeTab === "caption" ? "tab active" : "tab"} onClick={() => setActiveTab("caption")}>
-            Caption Generator
-          </button>
-          <button className={activeTab === "audio" ? "tab active" : "tab"} onClick={() => setActiveTab("audio")}>
-            Audio Normalizer
-          </button>
-        </nav>
-        <div className="top-actions">
-          {activeTab === "transcript" ? (
-            <>
-              <button onClick={handleChooseTranscriptVideo} disabled={busy}>
-                <FolderOpen size={16} /> Open Video
+          <div className="header-dropdown" role="menu">
+            <button className={activeTab === "transcript" ? "active" : ""} onClick={() => setActiveTab("transcript")}>
+              Transcript Edit
+            </button>
+            <button className={activeTab === "caption" ? "active" : ""} onClick={() => setActiveTab("caption")}>
+              Caption Generator
+            </button>
+            <button className={activeTab === "audio" ? "active" : ""} onClick={() => setActiveTab("audio")}>
+              Audio Normalizer
+            </button>
+          </div>
+        </div>
+
+        {activeTab === "transcript" ? (
+          <nav className="workflow-rail" aria-label="Transcript workflow">
+            <WorkflowStage stage={1} activeStage={activeWorkflowStage} setActiveStage={setActiveWorkflowStage}>
+              <span className="workflow-stage-label">Source</span>
+              <button className="workflow-action" onClick={handleChooseTranscriptVideo} disabled={busy}>
+                <FolderOpen size={15} /> Open Video
               </button>
-              <button className="primary" onClick={handleGenerateTranscript} disabled={busy || !transcriptSource}>
-                <Upload size={16} /> Generate Transcript
+              <button className="workflow-action emphasized" onClick={handleGenerateTranscript} disabled={busy || !transcriptSource}>
+                <Upload size={15} /> Generate Transcript
               </button>
-              <button onClick={handleOpen} disabled={busy}>
-                <FolderOpen size={16} /> Open Project
-              </button>
-              <button onClick={handleSaveProject} disabled={busy || !project}>
-                <Save size={16} /> Save Project
-              </button>
-              <button onClick={() => void run(deleteDeadSpace, applyProject)} disabled={busy || !project}>
-                <Scissors size={16} /> Delete Dead Space
+            </WorkflowStage>
+            <WorkflowStage stage={2} activeStage={activeWorkflowStage} setActiveStage={setActiveWorkflowStage}>
+              <span className="workflow-stage-label">Pauses</span>
+              <button
+                className="workflow-action teal"
+                onClick={() => void run(analyzePauses, (data) => {
+                  applyProject(data);
+                  const summary = data.pause_analysis_summary;
+                  if (summary) setStatus(`Analyze Pauses: ${summary.candidates_checked} checked, ${summary.validated_long_pauses} validated, ${summary.rejected_candidates} rejected`);
+                })}
+                disabled={busy || !project || project.pause_analysis_pending_count === 0}
+              >
+                <Gauge size={15} /> Analyze Pauses
               </button>
               <button
-                className="primary"
-                onClick={handleExportCut}
-                disabled={busy || !project}
+                className="workflow-action"
+                onClick={() => void run(deleteDeadSpace, applyProject)}
+                disabled={busy || !project || project.dead_space_candidate_count === 0 || project.pause_analysis_pending_count > 0}
               >
-                <Upload size={16} /> Export Cut
+                <Scissors size={15} /> Remove {project?.dead_space_candidate_count ?? 0} Long Pauses
               </button>
-            </>
-          ) : activeTab === "caption" ? (
-            <>
-              <button onClick={handleChooseCaptionVideo} disabled={busy}>
-                <FolderOpen size={16} /> Choose Video
+            </WorkflowStage>
+            <WorkflowStage stage={3} activeStage={activeWorkflowStage} setActiveStage={setActiveWorkflowStage}>
+              <span className="workflow-stage-label">Cuts</span>
+              <button
+                className="workflow-action emphasized"
+                onClick={() => void run(analyzeBoundaries, (data) => {
+                  applyProject(data);
+                  const summary = data.fine_tune_summary;
+                  if (summary) setStatus(`Fine Tune: ${summary.cuts_checked} cuts checked, ${summary.cuts_adjusted} adjusted, ${summary.cuts_unchanged} unchanged`);
+                })}
+                disabled={busy || !project || !project.splices.some((splice) => !splice.reviewed && splice.left_word_id)}
+              >
+                <WandSparkles size={15} /> Fine Tune
               </button>
-              <button className="primary" onClick={handleGenerateCaptions} disabled={busy || !captionStyle || !captionPreset || !captionSource}>
-                <Upload size={16} /> Generate Captioned Video
+              <span className="workflow-status">
+                {project?.splices.filter((splice) => splice.reviewed).length ?? 0} / {project?.splices.length ?? 0} Reviewed
+              </span>
+            </WorkflowStage>
+            <WorkflowStage stage={4} activeStage={activeWorkflowStage} setActiveStage={setActiveWorkflowStage}>
+              <span className="workflow-stage-label">Preview</span>
+              <button className="workflow-action" disabled><Play size={15} /> Preview Cut</button>
+            </WorkflowStage>
+            <WorkflowStage stage={5} activeStage={activeWorkflowStage} setActiveStage={setActiveWorkflowStage}>
+              <span className="workflow-stage-label">Output</span>
+              <button className="workflow-action emphasized" onClick={handleExportCut} disabled={busy || !project}>
+                <Upload size={15} /> Export Cut
               </button>
-            </>
-          ) : (
-            <>
-              <button onClick={handleChooseAudioVideo} disabled={busy}>
-                <FolderOpen size={16} /> Choose Video
-              </button>
-              <button onClick={handleAnalyzeAudio} disabled={busy || !audioSource}>
-                <Gauge size={16} /> Analyze Audio
-              </button>
-              <button className="primary" onClick={handleNormalizeAudio} disabled={busy || !audioAnalysis}>
-                <WandSparkles size={16} /> Export Corrected Video
-              </button>
-            </>
-          )}
+            </WorkflowStage>
+          </nav>
+        ) : (
+          <div className="contextual-tool-actions">
+            {activeTab === "caption" ? (
+              <>
+                <button onClick={handleChooseCaptionVideo} disabled={busy}><FolderOpen size={16} /> Choose Video</button>
+                <button className="outline-primary" onClick={handleGenerateCaptions} disabled={busy || !captionStyle || !captionPreset || !captionSource}><Upload size={16} /> Generate Captioned Video</button>
+              </>
+            ) : (
+              <>
+                <button onClick={handleChooseAudioVideo} disabled={busy}><FolderOpen size={16} /> Choose Video</button>
+                <button onClick={handleAnalyzeAudio} disabled={busy || !audioSource}><Gauge size={16} /> Analyze Audio</button>
+                <button className="outline-primary" onClick={handleNormalizeAudio} disabled={busy || !audioAnalysis}><WandSparkles size={16} /> Export Corrected Video</button>
+              </>
+            )}
+          </div>
+        )}
+
+        <div className="header-utilities">
+          <div className="header-menu project-menu">
+            <button className="header-menu-trigger" aria-haspopup="menu"><FolderOpen size={17} /> Project <ChevronDown size={14} /></button>
+            <div className="header-dropdown project-dropdown" role="menu">
+              <button onClick={handleOpen} disabled={busy}><FolderOpen size={15} /> Open Project</button>
+              <button onClick={handleSaveProject} disabled={busy || !project}><Save size={15} /> Save Project</button>
+            </div>
+          </div>
+          <button className="header-icon-button" aria-label="Save project" title="Save project" onClick={handleSaveProject} disabled={busy || !project}><Save size={18} /></button>
+          <button className="header-icon-button" aria-label="Transcript settings" title="Transcript settings" onClick={() => setShowTranscriptSettings(true)} disabled={busy || !project || activeTab !== "transcript"}><Settings size={18} /></button>
         </div>
       </header>
 
@@ -1298,7 +1365,13 @@ function TranscriptContext({
                     {word.text}
                   </button>
                   {(project?.project.silence_ranges ?? [])
-                    .filter((silence) => silence.start_frame === word.end_frame + 1)
+                    .filter((silence) => {
+                      const effectiveStartFrame = silence.measured_start_frame ?? silence.start_frame;
+                      const effectiveEndFrame = silence.measured_end_frame ?? silence.end_frame;
+                      return silence.start_frame === word.end_frame + 1
+                        && (effectiveEndFrame - effectiveStartFrame + 1) / (project?.project.fps ?? 1)
+                          >= (project?.settings.dead_space_min_seconds ?? Number.POSITIVE_INFINITY);
+                    })
                     .map((silence) => (
                       <button
                         key={silence.id}
@@ -1309,7 +1382,7 @@ function TranscriptContext({
                         ].join(" ")}
                         onClick={(event) => selectToken(silence.id, event.shiftKey)}
                       >
-                        DEAD SPACE {(silence.end - silence.start).toFixed(1)}s
+                        {silence.audio_analyzed ? "DEAD SPACE" : "PAUSE CANDIDATE"} {((silence.measured_end ?? silence.end) - (silence.measured_start ?? silence.start)).toFixed(2)}s
                       </button>
                     ))}
                 </span>
@@ -1999,6 +2072,74 @@ function ExportProgressModal({
   );
 }
 
+function TranscriptSettingsModal({
+  busy,
+  close,
+  project,
+  update,
+}: {
+  busy: boolean;
+  close: () => void;
+  project: EditorProjectResponse;
+  update: (threshold: number) => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="transcript-settings-title">
+      <section className="transcript-settings-modal">
+        <div className="settings-modal-header">
+          <div>
+            <span className="eyebrow">Transcript Settings</span>
+            <h2 id="transcript-settings-title">Transcript editing</h2>
+          </div>
+          <button className="icon-button" aria-label="Close settings" onClick={close}><X size={17} /></button>
+        </div>
+        <h3>Long pause removal</h3>
+        <p>Only detected pauses at or above this duration are removed by the toolbar action. Shorter cadence pauses remain untouched.</p>
+        <label>
+          <span>Minimum long-pause duration</span>
+          <select
+            disabled={busy}
+            value={project.settings.dead_space_min_seconds}
+            onChange={(event) => update(Number(event.target.value))}
+          >
+            {[0.5, 0.7, 0.8, 1, 1.5, 2].map((seconds) => (
+              <option key={seconds} value={seconds}>{seconds.toFixed(1)} seconds</option>
+            ))}
+          </select>
+        </label>
+        <strong>{project.dead_space_candidate_count} pauses currently qualify</strong>
+      </section>
+    </div>
+  );
+}
+
+function WorkflowStage({
+  activeStage,
+  children,
+  setActiveStage,
+  stage,
+}: {
+  activeStage: number;
+  children: ReactNode;
+  setActiveStage: Dispatch<SetStateAction<number>>;
+  stage: number;
+}) {
+  const active = activeStage === stage;
+  return (
+    <div className={["workflow-stage", active ? "active" : "", activeStage > stage ? "complete" : ""].join(" ")}>
+      <button
+        className="workflow-stage-number"
+        aria-label={`Open workflow stage ${stage}`}
+        aria-expanded={active}
+        onClick={() => setActiveStage(stage)}
+      >
+        {stage}
+      </button>
+      {active && <div className="workflow-stage-content">{children}</div>}
+    </div>
+  );
+}
+
 function SpliceReviewPanel({
   loop,
   moveSpliceSelection,
@@ -2065,12 +2206,20 @@ function SpliceReviewPanel({
             <CutFrameCard
               title="OUT frame"
               frame={selectedSplice.left_out_frame}
+              fps={project?.project.fps ?? 30}
+              adjustment={selectedSplice.left_out_adjustment}
+              whisperFrame={selectedSplice.left_whisper_out_frame}
+              suggestedFrame={selectedSplice.left_suggested_out_frame}
               onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, delta, 0))}
             />
           )}
           <CutFrameCard
             title={isFrontTrim ? "START frame" : "IN frame"}
             frame={selectedSplice.right_in_frame}
+            fps={project?.project.fps ?? 30}
+            adjustment={selectedSplice.right_in_adjustment}
+            whisperFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
+            suggestedFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
             onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, 0, delta))}
           />
         </div>
@@ -2084,19 +2233,29 @@ function SpliceReviewPanel({
 function CutFrameCard({
   title,
   frame,
+  fps,
+  adjustment,
+  whisperFrame,
+  suggestedFrame,
   onNudge,
 }: {
   title: string;
   frame: number;
+  fps: number;
+  adjustment: number;
+  whisperFrame: number;
+  suggestedFrame: number;
   onNudge: (delta: number) => void;
 }) {
   return (
     <div className="cut-frame-card">
       <div className="cut-frame-header">
-        <span>{title}</span>
-        <strong>{frame}</strong>
+        <span>{title}<small>Whisper {formatFrameTimecode(whisperFrame, fps)} · frame {whisperFrame.toLocaleString()}</small></span>
+        <strong>{formatFrameTimecode(frame, fps)}<small>Frame {frame.toLocaleString()} · {formatSignedFrames(adjustment)}</small></strong>
       </div>
-      <img src={frameImageUrl(frame)} alt={`${title} ${frame}`} />
+      {suggestedFrame !== whisperFrame && (
+        <div className="assisted-boundary-label">Assisted suggestion: {formatFrameTimecode(suggestedFrame, fps)} · frame {suggestedFrame.toLocaleString()} · +{suggestedFrame - whisperFrame}</div>
+      )}
       <div className="nudge-buttons" aria-label={`${title} nudges`}>
         <button onClick={() => onNudge(-10)}><ArrowLeft size={13} /> 10</button>
         <button onClick={() => onNudge(-5)}><ArrowLeft size={13} /> 5</button>
@@ -2107,6 +2266,22 @@ function CutFrameCard({
       </div>
     </div>
   );
+}
+
+function formatFrameTimecode(frame: number, fps: number) {
+  const roundedFps = Math.max(1, Math.round(fps));
+  const safeFrame = Math.max(0, frame);
+  const frames = safeFrame % roundedFps;
+  const totalSeconds = Math.floor(safeFrame / roundedFps);
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
+  return [hours, minutes, seconds, frames].map((value) => String(value).padStart(2, "0")).join(":");
+}
+
+function formatSignedFrames(value: number) {
+  if (value === 0) return "0 frames";
+  return `${value > 0 ? "+" : ""}${value} frames`;
 }
 
 function SpliceMarker({
