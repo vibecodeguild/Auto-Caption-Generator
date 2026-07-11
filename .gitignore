@@ -17,6 +17,7 @@ dist-*/
 *.spec~
 *.log
 screenshots/
+internal/
 
 app/temp/*
 !app/temp/.gitkeep

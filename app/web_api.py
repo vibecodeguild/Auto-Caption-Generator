@@ -66,6 +66,8 @@ class ApiState:
     audio_preview_id: str | None = None
     audio_preview_original: Path | None = None
     audio_preview_corrected: Path | None = None
+    rendered_cut_preview_id: str | None = None
+    rendered_cut_preview_path: Path | None = None
     transcription_jobs: dict[str, TranscriptionJob]
 
     def __init__(self) -> None:
@@ -84,6 +86,8 @@ class ApiState:
         self.audio_preview_id = None
         self.audio_preview_original = None
         self.audio_preview_corrected = None
+        self.rendered_cut_preview_id = None
+        self.rendered_cut_preview_path = None
         self.transcription_jobs = {}
 
 
@@ -187,6 +191,11 @@ class EditorSettingsRequest(BaseModel):
 
 class ExportCutRequest(BaseModel):
     output_path: str | None = None
+    normalize_audio: bool = False
+    normalization_preset_id: str = "gentle"
+    target_i: float = -14.0
+    target_lra: float = 7.0
+    target_tp: float = -1.5
 
 
 class TranscribeProjectRequest(BaseModel):
@@ -588,6 +597,50 @@ def review_splice(payload: ReviewSpliceRequest) -> dict:
     return _project_response()
 
 
+@app.post("/api/projects/current/render-preview")
+def render_cut_preview() -> dict:
+    project = _require_project()
+    source = Path(project.source).expanduser().resolve()
+    if not source.exists():
+        raise HTTPException(status_code=400, detail=f"Source video not found: {source}")
+    try:
+        plan = generate_splices(project, state.edits)
+    except InvalidCutPlanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    frame_intervals = plan.export_intervals()
+    if not frame_intervals:
+        raise HTTPException(status_code=400, detail="No kept intervals to preview.")
+    intervals = frame_intervals_to_seconds(frame_intervals, project.fps)
+
+    preview_id = uuid.uuid4().hex
+    output_path = temp_dir() / f"rendered-cut-{preview_id}.mp4"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        run_cut(
+            ffmpeg=find_ffmpeg(),
+            input_video=source,
+            output_video=output_path,
+            intervals=intervals,
+            crf=28,
+            preset="ultrafast",
+        )
+    except (RuntimeError, ValueError) as exc:
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise HTTPException(status_code=500, detail=f"Rendered cut preview failed: {exc}") from exc
+
+    _clear_rendered_cut_preview()
+    state.rendered_cut_preview_id = preview_id
+    state.rendered_cut_preview_path = output_path
+    return {
+        "preview_id": preview_id,
+        "duration_seconds": round(sum(end - start for start, end in intervals), 3),
+        "splices": _rendered_preview_splices(plan, project),
+    }
+
+
 @app.post("/api/projects/current/save")
 def save_project() -> dict:
     project = _require_project()
@@ -624,6 +677,11 @@ def export_cut(payload: ExportCutRequest) -> dict:
     intervals = plan.export_intervals()
     if not intervals:
         raise HTTPException(status_code=400, detail="No kept intervals to export.")
+    if payload.normalize_audio:
+        _validate_audio_targets(payload)
+        valid_preset_ids = {preset["id"] for preset in preset_options()}
+        if payload.normalization_preset_id not in valid_preset_ids:
+            raise HTTPException(status_code=400, detail=f"Unknown audio preset: {payload.normalization_preset_id}")
     output_path = Path(payload.output_path).expanduser().resolve() if payload.output_path else exports_dir() / f"{source.stem}_cut.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     run_cut(
@@ -632,7 +690,43 @@ def export_cut(payload: ExportCutRequest) -> dict:
         output_video=output_path,
         intervals=frame_intervals_to_seconds(intervals, project.fps),
     )
-    return {"output_path": str(output_path)}
+    if not payload.normalize_audio:
+        return {
+            "output_path": str(output_path),
+            "cut_output_path": str(output_path),
+            "normalized": False,
+        }
+
+    normalized_output_path = output_path.with_name(f"{output_path.stem}_normalized{output_path.suffix}")
+    try:
+        measurement = analyze_audio(
+            ffmpeg=find_ffmpeg(),
+            input_video=output_path,
+            preset_id=payload.normalization_preset_id,
+            target_i=payload.target_i,
+            target_lra=payload.target_lra,
+            target_tp=payload.target_tp,
+        )
+        normalize_video_audio(
+            ffmpeg=find_ffmpeg(),
+            input_video=output_path,
+            output_video=normalized_output_path,
+            preset_id=payload.normalization_preset_id,
+            measurement=measurement,
+            target_i=payload.target_i,
+            target_lra=payload.target_lra,
+            target_tp=payload.target_tp,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"The cut was exported successfully to {output_path}, but audio normalization failed: {exc}",
+        ) from exc
+    return {
+        "output_path": str(normalized_output_path),
+        "cut_output_path": str(output_path),
+        "normalized": True,
+    }
 
 
 @app.get("/api/caption/options")
@@ -1029,6 +1123,20 @@ def source_video(request: Request, range_header: str | None = Header(default=Non
     return _range_response(path, range_header)
 
 
+@app.get("/api/projects/current/render-preview/{preview_id}")
+def rendered_cut_preview(
+    preview_id: str,
+    request: Request,
+    range_header: str | None = Header(default=None, alias="Range"),
+) -> Response:
+    if preview_id != state.rendered_cut_preview_id:
+        raise HTTPException(status_code=404, detail="Rendered cut preview not found.")
+    path = state.rendered_cut_preview_path
+    if path is None or not path.exists():
+        raise HTTPException(status_code=404, detail="Rendered cut preview file not found.")
+    return _range_response(path, range_header)
+
+
 @app.get("/api/projects/current/frame")
 def frame_image(frame: int) -> Response:
     project = _require_project()
@@ -1126,6 +1234,43 @@ def _clear_audio_preview() -> None:
     state.audio_preview_id = None
     state.audio_preview_original = None
     state.audio_preview_corrected = None
+
+
+def _clear_rendered_cut_preview() -> None:
+    path = state.rendered_cut_preview_path
+    if path is not None:
+        try:
+            resolved = path.resolve()
+            if resolved.parent == temp_dir().resolve():
+                resolved.unlink(missing_ok=True)
+        except OSError:
+            pass
+    state.rendered_cut_preview_id = None
+    state.rendered_cut_preview_path = None
+
+
+def _rendered_preview_splices(plan: SplicePlan, project: TranscriptProject) -> list[dict]:
+    range_end_times: dict[str, float] = {}
+    section_text: dict[str, str] = {}
+    elapsed = 0.0
+    for kept_range in plan.kept_ranges:
+        elapsed += (kept_range.adjusted_end_frame - kept_range.adjusted_start_frame + 1) / project.fps
+        range_end_times[kept_range.id] = elapsed
+        start_index = project.word_index(kept_range.start_word_id)
+        end_index = project.word_index(kept_range.end_word_id)
+        section_text[kept_range.id] = " ".join(word.text for word in project.words[start_index : end_index + 1])
+    return [
+        {
+            "id": splice.id,
+            "anchor_key": splice.anchor_key,
+            "preview_time_seconds": round(range_end_times.get(splice.left_keep_range_id, 0.0), 6),
+            "left_out_frame": splice.left_out_frame,
+            "right_in_frame": splice.right_in_frame,
+            "left_section": section_text.get(splice.left_keep_range_id, "Start of source"),
+            "right_section": section_text.get(splice.right_keep_range_id, ""),
+        }
+        for splice in plan.splices
+    ]
 
 
 def _save_current_project_if_loaded(project: TranscriptProject) -> None:

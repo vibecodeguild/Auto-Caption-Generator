@@ -1,10 +1,15 @@
 # Local Web App Architecture Pivot
 
-> Historical decision record, updated with status on July 10, 2026. The pivot
+> Historical decision record, updated with status on July 11, 2026. The pivot
 > described here has happened: the Next.js/FastAPI application is now the main
 > product surface. Use [Current System](current-system.md) for present behavior
 > and [Outstanding Work](outstanding-work.md) for remaining work. Future-tense
 > sections below preserve the reasoning that guided the migration.
+>
+> The original source-seeking-only preview decision below was superseded on
+> July 11, 2026. Stage 3 still seeks across the source for fast splice review;
+> Stage 4 intentionally renders the complete edited cut as a temporary draft so
+> the user can review the full result before final export.
 
 This document captures the next architecture direction for VCG AutoCaption after
 the PySide6 prototype. The current desktop app proved the caption pipeline,
@@ -48,10 +53,11 @@ The transcript editor is now a browser-shaped product:
 - Python remains the right place for Whisper, FFmpeg, local file access, and GPU
   configuration.
 
-The prototype also showed what not to do: preview playback should not render
-temporary preview MP4 files. Preview should use the original source video and
-seek/jump across the selected splice. Export is the only workflow that should
-create a new MP4.
+The original prototype decision avoided temporary preview MP4 files: preview
+used the source video and seeked across the selected splice, while export alone
+created a new MP4. That rule is now deliberately split. Stage 3 retains fast
+source-video seeking, while Stage 4 creates one complete temporary cut draft so
+the user can review the actual edited video before final export.
 
 ## Local Development Shape
 

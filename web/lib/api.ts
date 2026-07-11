@@ -361,6 +361,33 @@ export function reviewSplice(anchorKey: string, reviewed: boolean) {
   });
 }
 
+export type RenderedCutPreviewSplice = {
+  id: string;
+  anchor_key: string;
+  preview_time_seconds: number;
+  left_out_frame: number;
+  right_in_frame: number;
+  left_section: string;
+  right_section: string;
+};
+
+export type RenderedCutPreviewResponse = {
+  preview_id: string;
+  duration_seconds: number;
+  splices: RenderedCutPreviewSplice[];
+};
+
+export function renderCutPreview() {
+  return request<RenderedCutPreviewResponse>("/api/projects/current/render-preview", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function renderedCutPreviewUrl(previewId: string) {
+  return `${API_BASE}/api/projects/current/render-preview/${encodeURIComponent(previewId)}`;
+}
+
 export function saveProject() {
   return request<{ saved: string }>("/api/projects/current/save", { method: "POST" });
 }
@@ -369,8 +396,25 @@ export function getProjectDocument() {
   return request<ProjectDocumentResponse>("/api/projects/current/document");
 }
 
-export function exportCut() {
-  return request<{ output_path: string }>("/api/projects/current/export", { method: "POST", body: "{}" });
+export type ExportCutRequest = {
+  normalize_audio?: boolean;
+  normalization_preset_id?: string;
+  target_i?: number;
+  target_lra?: number;
+  target_tp?: number;
+};
+
+export type ExportCutResponse = {
+  output_path: string;
+  cut_output_path: string;
+  normalized: boolean;
+};
+
+export function exportCut(payload: ExportCutRequest = {}) {
+  return request<ExportCutResponse>("/api/projects/current/export", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function sourceVideoUrl() {

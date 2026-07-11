@@ -13,6 +13,8 @@ by regression tests, and independently reversible.
    - Prevent neighboring IN/OUT adjustments from crossing or collapsing a
      range.
    - Validate at adjustment time and again immediately before export.
+   - Clamp oversized UI nudges to the nearest legal frame and disable controls
+     that cannot move farther without crossing the neighboring boundary.
    - Preserve behavior for every currently valid saved project.
 2. **Threshold-aware dead-space removal**
    - Treat Whisper gaps as candidate timing data, not verified silence.
@@ -45,14 +47,34 @@ by regression tests, and independently reversible.
      timing.
 4. **Normalization during cut export**
    - Retain the standalone Audio Normalizer.
-   - Add an optional processing choice to cut export.
-   - Initially compose the proven cut and normalization pipelines sequentially.
+   - Add an optional **Normalize audio** choice to Stage 5; it defaults off so
+     the existing cut-only export remains unchanged.
+   - When enabled, expose the existing normalization presets and default to the
+     established Gentle Voice Leveling preset.
+   - Compose the proven pipelines sequentially: export the cut first, analyze
+     that cut, then normalize its audio.
+   - Keep the successful cut as a separate file and write normalization to a
+     sibling `_normalized.mp4` file. Never overwrite the source or the cut.
+   - If normalization fails, report that the cut succeeded and preserve its
+     exact path so the user can recover or use it.
 5. **Rendered cut preview**
-   - First add fast, rendered previews around an individual splice.
-   - Then add a full rendered draft with splice markers.
+   - Render the complete current cut as a fast draft after Stage 3 review and
+     manual adjustment.
+   - Present that complete draft in the approved dedicated Stage 4 workspace
+     with a large player, compact splice navigation, and a full-duration
+     timeline containing every splice marker.
+   - Show the complete kept transcript section on both sides of each splice in
+     the sidebar rather than the two-word context used by the compact Stage 3
+     review panel.
+   - Seek the rendered draft when a transcript/splice entry or timeline marker
+     is selected.
    - Embed OUT/IN adjustment, replay, review, and previous/next controls directly
      in the rendered-preview workspace.
-   - After applying adjustments, return playback to the relevant join.
+   - Keep the existing draft playable after adjustments, clearly mark it stale,
+     and provide **Apply Changes & Refresh Preview** to rerender the complete cut.
+   - After refreshing, return playback to the relevant join.
+   - Write only to the ignored temporary directory and retain only the active
+     rendered draft.
 6. **Repeated-phrase transcription investigation — deferred**
    - Do not change Whisper/VAD defaults without representative failure clips.
    - Use examples from a future production recording to determine whether VAD,
@@ -92,8 +114,8 @@ selected stage expands horizontally:
 5. Export
 
 Collapsed stages show only their number. The expanded stage uses outlined teal
-and magenta accents rather than large solid action blocks. Stage 4 remains a
-disabled placeholder until the rendered-preview milestone is implemented.
+and magenta accents rather than large solid action blocks. All five stages now
+have an initial implementation; production-media validation remains required.
 
 ## Production Safety Rules
 
@@ -109,6 +131,23 @@ disabled placeholder until the rendered-preview milestone is implemented.
 - Test representative landscape and portrait footage before changing defaults.
 
 ## Current Milestone
+
+Milestone 4 now has an initial implementation and automated validation. Stage 5
+provides an optional normalization control while preserving cut-only export as
+the default. The integrated path reuses the standalone normalizer's existing
+two-pass loudness analysis and normalization implementation against the
+completed cut. Its final result is `<source>_cut_normalized.mp4`; the
+intermediate `<source>_cut.mp4` remains available even when normalization
+succeeds. A normalization failure reports the successful cut path rather than
+discarding the usable export.
+
+The initial selected-splice-only preview was rejected because it did not satisfy
+the approved full-video review workflow shown in the mockup, and it has been
+replaced rather than retained as a competing workflow. Stage 4 now renders the
+complete cut and exposes every splice through its sidebar and full-duration
+timeline. Embedded adjustments mark the draft stale, and the refresh action
+rerenders the complete cut using the current plan. Production-footage runtime
+and visual validation remain outstanding.
 
 Milestones 1–3 have an initial implementation and automated validation:
 

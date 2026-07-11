@@ -1,6 +1,6 @@
 # Outstanding Work and Improvement Assessment
 
-Last assessed: July 10, 2026.
+Last assessed: July 11, 2026.
 
 The user-approved implementation sequence now lives in
 [Active Build Plan](active-build-plan.md). This document remains the broader
@@ -16,33 +16,32 @@ and testable. The biggest issue is that they grew as three useful tools inside a
 development shell without a fully unified project model, durable job system, or
 release/packaging path.
 
-The best next move is stabilization before major new features: settle and test
-the current caption-rendering changes, establish a reproducible verification
-baseline, make projects/outputs predictable, and then connect cut editing to
-caption generation.
+The approved five-stage transcript workflow now has an initial implementation,
+including measured pause analysis, Audio Boundary Assist, complete rendered-cut
+review, and optional normalization during final export. The best next move is
+live production testing and stabilization before major new features: validate
+real recordings, capture repeatable failure clips, establish real-media and
+browser quality gates, and then address project durability and cut-to-caption
+integration.
 
-## Priority 0: Settle the Current Working Tree
+## Priority 0: Live-Test and Settle the Current Working Tree
 
-The checkout currently contains uncommitted work affecting:
+The checkout contains the complete current feature tranche as uncommitted work:
 
-- caption wrapping and horizontal safe margins;
-- browser preview scaling and placement;
-- forced H.264/yuv420p/fast-start caption output;
-- bundled Montserrat font files and licensing notes; and
-- replacement of Tk dialogs with Windows-native dialog helpers.
+- cut-plan validation and safe frame clamping;
+- measured, threshold-aware pause analysis and removal;
+- Audio Boundary Assist with separate Whisper, assisted, and manual frames;
+- the single-row five-stage header;
+- complete rendered-cut review with splice navigation and stale refresh;
+- optional normalization during Stage 5 export; and
+- the earlier caption parity, H.264, bundled-font, and Windows-dialog changes.
 
-Before broader improvement work, verify these changes with representative
-landscape, portrait, and square media; compare browser preview with rendered
-output; run the full suite outside the restricted temp-directory environment;
-then either commit the set together or split it into coherent commits.
-
-The working tree additionally contains the first cut-safety tranche: validated
-non-overlapping cut ranges, version-2 editor settings, threshold-aware bulk
-pause removal, and Audio Boundary Assist with separate Whisper, assisted, and
-manual frames on each splice. Analyze Pauses validates only threshold-qualified
-Whisper gaps and hides false long pauses; Fine Tune targets only unreviewed cuts
-after the transcript edit. Representative production footage remains the
-release gate for tuning the shared detector's conservative thresholds.
+Use the next real production videos to verify complete workflow behavior,
+render time, audiovisual joins, pause classification, assisted word endings,
+landscape/portrait layout, rendered-preview navigation, refresh behavior, and
+normalized final output. Preserve representative failure clips before tuning
+detectors or transcription settings. After live validation, review the diff and
+commit the feature set in coherent units.
 
 ## Priority 1: Restore a Reproducible Quality Gate
 
@@ -60,7 +59,8 @@ Confirmed gaps:
 
 Recommended completion criteria:
 
-1. All 79 Python tests pass from a clean checkout.
+1. All 84 Python tests pass from a clean checkout using the explicit `tests`
+   path.
 2. `npm run typecheck` and `npm run build` pass.
 3. One small checked-out or generated fixture validates real FFmpeg output for
    caption, cut, and normalization workflows without committing private media.
@@ -89,7 +89,7 @@ Recommended direction:
 - Decide whether media is copied into the project or referenced with a
   repairable relative/absolute path.
 - Preserve the existing versioned project format and add migrations before
-  changing the current version-1 shape.
+  changing the current version-2 shape; version-1 files remain readable.
 - Persist app-level defaults such as Whisper model, compute choice, and output
   conventions.
 - Keep single-user/local-only scope, but use project IDs in API routes so tabs
@@ -121,9 +121,10 @@ timing/identity unless the user deliberately requests a timing adjustment.
 ## Priority 4: Move All Long Operations to Jobs
 
 Only transcript generation currently has a background job/status endpoint.
-Caption rendering, rough-cut export, audio analysis, preview creation, and audio
-normalization are synchronous API calls. The UI can show a modal, but the HTTP
-request remains blocked and cannot be cancelled or resumed.
+Caption rendering, final cut export, audio analysis, complete rendered-cut
+preview creation, and audio normalization are synchronous API calls. The UI can
+show a modal, but the HTTP request remains blocked and cannot be cancelled or
+resumed.
 
 Recommended job contract:
 
@@ -194,15 +195,16 @@ single-process state object further.
 
 ### Milestone A: Known-good baseline
 
-- Finish and commit the current caption/dialog changes.
+- Live-test and commit the current five-stage workflow and caption/dialog
+  changes.
 - Make all automated checks reproducible.
 - Add a tiny legal test-media fixture or deterministic generator.
 - Verify preview/render parity across common aspect ratios.
 
 ### Milestone B: Durable project model
 
-- Define migration and compatibility rules for the existing version-1
-  `.vcg.json` schema.
+- Define migration and compatibility rules for the existing version-2
+  `.vcg.json` schema while preserving version-1 loading.
 - Add project-root and source-relink behavior.
 - Persist app defaults and output conventions.
 - Replace implicit global project routes with explicit project identity.

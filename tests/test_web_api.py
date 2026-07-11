@@ -441,6 +441,178 @@ def test_fine_tune_skips_reviewed_splices(tmp_path: Path, monkeypatch) -> None:
     assert response.json()["fine_tune_summary"]["cuts_checked"] == 0
 
 
+def test_render_cut_preview_uses_complete_plan_and_returns_splice_timeline(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    original = _project()
+    state.project = TranscriptProject(str(source), original.fps, original.words, original.silence_ranges)
+    state.edits = EditDecisionList()
+    state.edits.delete_word_selection("w3", "w3")
+    state.project_path = None
+    state.rendered_cut_preview_id = None
+    state.rendered_cut_preview_path = None
+    splice = generate_splices(state.project, state.edits).splices[0]
+    rendered: dict[str, object] = {}
+
+    def fake_cut(**kwargs) -> None:
+        rendered.update(kwargs)
+        kwargs["output_video"].write_bytes(b"rendered preview")
+
+    monkeypatch.setattr(web_api, "temp_dir", lambda: tmp_path)
+    monkeypatch.setattr(web_api, "run_cut", fake_cut)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/projects/current/render-preview",
+        json={},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["duration_seconds"] == 1.0
+    assert data["splices"] == [{
+        "id": splice.id,
+        "anchor_key": splice.anchor_key,
+        "preview_time_seconds": 0.4,
+        "left_out_frame": splice.left_out_frame,
+        "right_in_frame": splice.right_in_frame,
+        "left_section": "When you",
+        "right_section": "fast ship",
+    }]
+    assert rendered["input_video"] == source
+    assert rendered["intervals"] == [(0.0, 0.4), (1.5, 2.1)]
+    assert rendered["crf"] == 28
+    assert rendered["preset"] == "ultrafast"
+
+    media_response = client.get(f"/api/projects/current/render-preview/{data['preview_id']}")
+    assert media_response.status_code == 200
+    assert media_response.content == b"rendered preview"
+
+
+def test_render_cut_preview_rejects_unknown_preview_id(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    original = _project()
+    state.project = TranscriptProject(str(source), original.fps, original.words, original.silence_ranges)
+    state.edits = EditDecisionList()
+    state.project_path = None
+
+    state.rendered_cut_preview_id = None
+    state.rendered_cut_preview_path = None
+    response = TestClient(app).get("/api/projects/current/render-preview/missing")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Rendered cut preview not found."
+
+
+def test_cut_export_remains_cut_only_by_default(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    original = _project()
+    state.project = TranscriptProject(str(source), original.fps, original.words, original.silence_ranges)
+    state.edits = EditDecisionList()
+    state.project_path = None
+    exported: dict[str, object] = {}
+
+    def fake_cut(**kwargs) -> Path:
+        exported.update(kwargs)
+        kwargs["output_video"].write_bytes(b"cut")
+        return kwargs["output_video"]
+
+    monkeypatch.setattr(web_api, "run_cut", fake_cut)
+    monkeypatch.setattr(web_api, "analyze_audio", lambda **kwargs: pytest.fail("normalization must stay opt-in"))
+
+    response = TestClient(app).post(
+        "/api/projects/current/export",
+        json={"output_path": str(tmp_path / "daily_cut.mp4")},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "output_path": str(tmp_path / "daily_cut.mp4"),
+        "cut_output_path": str(tmp_path / "daily_cut.mp4"),
+        "normalized": False,
+    }
+    assert exported["input_video"] == source
+
+
+def test_cut_export_can_normalize_completed_cut_without_overwriting_it(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    original = _project()
+    state.project = TranscriptProject(str(source), original.fps, original.words, original.silence_ranges)
+    state.edits = EditDecisionList()
+    state.project_path = None
+    measurement = LoudnessMeasurement(-20.0, -3.0, 8.0, -30.0, 0.1)
+    calls: dict[str, object] = {}
+
+    def fake_cut(**kwargs) -> Path:
+        kwargs["output_video"].write_bytes(b"cut")
+        return kwargs["output_video"]
+
+    def fake_analyze(**kwargs) -> LoudnessMeasurement:
+        calls["analyze"] = kwargs
+        return measurement
+
+    def fake_normalize(**kwargs) -> Path:
+        calls["normalize"] = kwargs
+        kwargs["output_video"].write_bytes(b"normalized")
+        return kwargs["output_video"]
+
+    monkeypatch.setattr(web_api, "run_cut", fake_cut)
+    monkeypatch.setattr(web_api, "analyze_audio", fake_analyze)
+    monkeypatch.setattr(web_api, "normalize_video_audio", fake_normalize)
+    cut_path = tmp_path / "daily_cut.mp4"
+
+    response = TestClient(app).post(
+        "/api/projects/current/export",
+        json={
+            "output_path": str(cut_path),
+            "normalize_audio": True,
+            "normalization_preset_id": "gentle",
+        },
+    )
+
+    normalized_path = tmp_path / "daily_cut_normalized.mp4"
+    assert response.status_code == 200
+    assert response.json() == {
+        "output_path": str(normalized_path),
+        "cut_output_path": str(cut_path),
+        "normalized": True,
+    }
+    assert calls["analyze"]["input_video"] == cut_path
+    assert calls["normalize"]["input_video"] == cut_path
+    assert calls["normalize"]["output_video"] == normalized_path
+    assert cut_path.read_bytes() == b"cut"
+
+
+def test_cut_export_preserves_cut_path_when_normalization_fails(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    original = _project()
+    state.project = TranscriptProject(str(source), original.fps, original.words, original.silence_ranges)
+    state.edits = EditDecisionList()
+    state.project_path = None
+    cut_path = tmp_path / "daily_cut.mp4"
+
+    def fake_cut(**kwargs) -> Path:
+        kwargs["output_video"].write_bytes(b"cut")
+        return kwargs["output_video"]
+
+    monkeypatch.setattr(web_api, "run_cut", fake_cut)
+    monkeypatch.setattr(web_api, "analyze_audio", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("bad audio")))
+
+    response = TestClient(app).post(
+        "/api/projects/current/export",
+        json={"output_path": str(cut_path), "normalize_audio": True},
+    )
+
+    assert response.status_code == 500
+    assert str(cut_path) in response.json()["detail"]
+    assert "normalization failed" in response.json()["detail"]
+    assert cut_path.read_bytes() == b"cut"
+
+
 def test_audio_analysis_is_required_before_normalized_export(tmp_path: Path, monkeypatch) -> None:
     video_path = tmp_path / "source.mp4"
     video_path.write_bytes(b"video")

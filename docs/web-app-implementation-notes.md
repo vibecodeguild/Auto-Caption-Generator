@@ -1,6 +1,6 @@
 # Web App Implementation Notes
 
-Last verified: July 10, 2026.
+Last verified: July 11, 2026.
 
 This is the concise developer runbook. See [Current System](current-system.md)
 for the full implementation inventory and [Outstanding Work](outstanding-work.md)
@@ -31,8 +31,9 @@ status area and adds no UI while the picker is operating normally.
 
 The page contains three tabs:
 
-- **Transcript Edit** — select/transcribe video or open project, edit tokens,
-  review/nudge splices, save, and export a rough cut.
+- **Transcript Edit** — use the five-stage source, pause analysis, cut review,
+  complete rendered-preview, and final-export workflow. Final export can
+  optionally normalize audio while preserving the unnormalized cut.
 - **Caption Generator** — select source/output, prepare live timed captions,
   tune grouping/style, save styles, and render a captioned video.
 - **Audio Normalizer** — select source/output, analyze, preview Original versus
@@ -77,6 +78,8 @@ POST   /api/projects/current/analyze-pauses
 POST   /api/projects/current/analyze-boundaries
 POST   /api/projects/current/splices/adjust
 POST   /api/projects/current/splices/review
+POST   /api/projects/current/render-preview
+GET    /api/projects/current/render-preview/{preview_id}
 POST   /api/projects/current/save
 GET    /api/projects/current/document
 POST   /api/projects/current/export
@@ -102,8 +105,10 @@ GET    /api/audio/source-video
 GET    /api/audio/preview/{preview_id}/{mode}
 ```
 
-All source and preview media routes support HTTP byte ranges. Splice preview
-seeks through the source file; it does not render temporary splice videos.
+All source and preview media routes support HTTP byte ranges. Stage 3 splice
+review seeks through the source file. Stage 4 renders one complete temporary
+review draft, returns every splice's rendered-timeline position, and replaces
+the prior draft when refreshed.
 
 ## Process-State Caveat
 
@@ -114,16 +119,11 @@ architectural constraint to address before multi-project work.
 
 ## Current Working-Tree Note
 
-As of this verification, uncommitted changes are refining browser/render caption
-parity, subtitle safe margins/wrapping, H.264 output compatibility, bundled
-Montserrat fonts, and Windows-native dialogs. Recheck `git status` and validate
-those changes before building further work on them.
-
-The active working tree also contains the first cut-safety tranche: cut-plan
-validation with rollback, a version-1-to-version-2 project compatibility path,
-and gear-configured threshold-aware bulk pause removal. Analyze Pauses measures
-only threshold-qualified Whisper gaps and filters false long pauses. Fine Tune
-reuses measured pause boundaries where available and otherwise refines only
-unreviewed splice OUT points. Whisper frames, assisted frames, and manual
-adjustments remain separate; fixed padding and transcript-wide automatic
-analysis are not used.
+The current working tree contains the five-stage transcript workflow, cut-plan
+validation, version-1-to-version-2 project compatibility, measured pause
+analysis, Audio Boundary Assist, complete rendered-cut review, and optional
+normalization during export. It also contains the earlier caption parity,
+H.264, bundled-font, and Windows-native-dialog work. Recheck `git status`, run
+the documented verification commands, and validate representative production
+media before committing. Fixed word padding and transcript-wide automatic
+boundary analysis are not part of the product.

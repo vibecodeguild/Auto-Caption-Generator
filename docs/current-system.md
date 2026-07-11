@@ -1,6 +1,6 @@
 # Current System
 
-Last verified against the working tree: July 10, 2026.
+Last verified against the working tree: July 11, 2026.
 
 This document is the implementation-oriented source of truth for what exists in
 VCG AutoCaption today. It describes the current working tree, including
@@ -60,8 +60,9 @@ The application uses a single-row command header. A Tools hover/focus menu
 switches between Transcript Edit, Caption Generator, and Audio Normalizer.
 Project open/save and settings are compact utilities. Transcript actions use a
 five-stage numbered chevron rail; only the selected stage expands to show its
-controls. Stage 4 is a disabled preview placeholder until rendered preview is
-implemented.
+controls. Stage 4 renders and reviews the complete edited draft with splice
+navigation and embedded adjustments; Stage 5 exports the final cut with
+optional normalization.
 
 ### Creating or opening a project
 
@@ -104,6 +105,23 @@ adjustment remain separate. For a deleted validated pause, Fine Tune reuses its
 measured outgoing acoustic boundary. Reviewed splices are not analyzed or
 changed.
 
+The splice nudge controls clamp oversized moves to the nearest legal frame. An
+OUT point can move no farther than `IN - 1`, and an IN point can move no earlier
+than `OUT + 1`. Buttons disable at those limits while the backend retains its
+independent overlap/collapse validation.
+
+Stage 4 renders the complete current cut as a fast review draft using the same
+interval conversion and cutter as final export. Its dedicated workspace has a
+large rendered-video player, compact splice list, full-duration splice-marker
+timeline, and embedded replay, review, navigation, and OUT/IN nudge controls.
+Each sidebar entry shows every word in the complete kept transcript section on
+both sides of its join; the two-word Stage 3 context remains unchanged.
+Selecting an entry or timeline marker seeks to two seconds before that join.
+Boundary changes leave the existing draft playable but mark it stale;
+**Apply Changes & Refresh Preview** rerenders the complete cut and returns to
+the relevant join. Only one rendered-cut draft is retained beneath the ignored
+temporary directory.
+
 Whisper still records candidate gaps from `0.35s`, but those raw gaps are not
 all shown as dead space. The primary **Analyze Pauses** action measures only raw
 candidates meeting the project threshold (default `0.8s`) against the source
@@ -145,9 +163,9 @@ limits. User styles persist under the local application-data directory.
 Generation independently runs the caption pipeline: validate source, derive
 video dimensions, extract audio, transcribe, group words, write ASS, and burn
 subtitles into `<source>_captioned.mp4`. The render uses H.264/AAC-compatible
-output settings. In the current uncommitted working tree, caption wrapping,
-safe horizontal margins, preview scaling, bundled Montserrat handling, and
-Windows-compatible H.264 output are being refined.
+output settings. Caption wrapping, safe horizontal margins, preview scaling,
+bundled Montserrat handling, and Windows-compatible H.264 output are present in
+the current working tree and still require representative-media validation.
 
 ## Audio Normalizer Workflow
 
@@ -167,6 +185,12 @@ Preview generation creates temporary Original and Corrected clips of the same
 active; choosing a new source or preview replaces the old pair. Export performs
 the measured second pass and writes `<source>_normalized.mp4` while preserving
 the source video stream when possible.
+
+Transcript Edit Stage 5 can also apply the same proven two-pass process to a
+completed cut. Normalization is opt-in and defaults to Gentle Voice Leveling.
+The cut is always written first as `<source>_cut.mp4`; enabled normalization
+writes `<source>_cut_normalized.mp4` without overwriting either the source or
+the successful cut. The standalone Audio Normalizer remains available.
 
 ## API Inventory
 
@@ -190,9 +214,11 @@ the source video stream when possible.
 | POST | `/api/projects/current/analyze-boundaries` | Analyze and persist assisted word-end suggestions for the current project |
 | POST | `/api/projects/current/splices/adjust` | Nudge splice OUT/IN frames |
 | POST | `/api/projects/current/splices/review` | Set reviewed state |
+| POST | `/api/projects/current/render-preview` | Render the complete current cut and return its splice timeline |
+| GET | `/api/projects/current/render-preview/{preview_id}` | Stream the active complete-cut review draft |
 | POST | `/api/projects/current/save` | Save active project, prompting if necessary |
 | GET | `/api/projects/current/document` | Return the serializable project document |
-| POST | `/api/projects/current/export` | Export adjusted kept ranges |
+| POST | `/api/projects/current/export` | Export adjusted kept ranges, with optional sequential audio normalization |
 | GET | `/api/projects/current/source-video` | Stream active source with byte-range support |
 | GET | `/api/projects/current/frame` | Extract and return one source frame |
 
@@ -246,14 +272,15 @@ hostable multi-user service.
 
 ## Validation Baseline
 
-- All 79 Python tests pass.
+- All 84 Python tests pass when pytest is run explicitly against `tests/`.
 - File-picker failures expose the exact backend exception in the existing
   transcript status area; normal picker operation adds no diagnostic overlay.
 - TypeScript typecheck and the Next.js production build pass.
 - Test coverage is strongest around pure core logic and API handlers.
 - There is no automated browser workflow test and no real-media golden-output
   suite.
-- Pytest currently reports a Starlette `TestClient`/`httpx` deprecation warning
-  and a local cache-directory permission warning; neither fails the suite.
+- Pytest currently reports a Starlette `TestClient`/`httpx` deprecation warning;
+  it does not fail the suite. Explicitly targeting `tests/` avoids unrelated
+  ignored cache directories.
 - Dependency/security audits should be rerun after the current uncommitted
   changes are settled.
