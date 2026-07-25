@@ -15,12 +15,13 @@ def generate_editor_transcript(
     working_dir: Path,
     model_size: str,
     compute_mode: str,
+    fps_override: float | None = None,
     logger: ActionLogger | None = None,
     progress_callback=None,
 ) -> TranscriptProject:
     _log(logger, f"Starting transcript generation for {input_video_path}")
     _progress(progress_callback, 5, "Reading video timing...")
-    fps = probe_video_fps(input_video_path)
+    fps = fps_override if fps_override is not None else probe_video_fps(input_video_path)
     _log(logger, f"Detected FPS: {fps}")
 
     _progress(progress_callback, 15, "Extracting audio...")

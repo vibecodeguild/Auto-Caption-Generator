@@ -35,7 +35,7 @@ from app.core.editor_tokens import token_ids_between, transcript_tokens
 from app.core.edit_decisions import EditDecisionList
 from app.core.ffmpeg_locator import find_ffmpeg
 from app.core.project_store import load_editor_project, save_editor_project
-from app.core.settings import COMPUTE_OPTIONS, MODEL_OPTIONS, exports_dir, temp_dir
+from app.core.settings import COMPUTE_OPTIONS, DEFAULT_COMPUTE_LABEL, DEFAULT_MODEL_LABEL, MODEL_OPTIONS, exports_dir, temp_dir
 from app.core.splice_preview import source_splice_preview_segments
 from app.core.splice_generation import DynamicSplice, SplicePlan, generate_splices
 from app.core.process_utils import hidden_subprocess_flags
@@ -315,10 +315,10 @@ class TranscriptEditor(QWidget):
         self.export_cut_button.clicked.connect(self.export_cut)
         self.model_combo = QComboBox()
         self.model_combo.addItems(MODEL_OPTIONS.keys())
-        self.model_combo.setCurrentText("Base - balanced")
+        self.model_combo.setCurrentText(DEFAULT_MODEL_LABEL)
         self.compute_combo = QComboBox()
         self.compute_combo.addItems(COMPUTE_OPTIONS.keys())
-        self.compute_combo.setCurrentText("CPU")
+        self.compute_combo.setCurrentText(DEFAULT_COMPUTE_LABEL)
         for widget in (
             self.choose_video_button,
             self.transcribe_button,

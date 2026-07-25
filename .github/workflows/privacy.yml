@@ -1,0 +1,18 @@
+name: Repository privacy guard
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  privacy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Reject private creator material
+        run: python scripts/check_repo_privacy.py --history

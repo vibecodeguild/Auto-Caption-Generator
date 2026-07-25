@@ -93,6 +93,24 @@ def test_assisted_word_end_is_suggestion_and_manual_adjustment_stays_separate() 
     assert adjusted.left_out_adjustment == 2
 
 
+def test_assisted_word_start_is_suggestion_and_manual_adjustment_stays_separate() -> None:
+    project = _project()
+    edits = EditDecisionList()
+    edits.delete_words("delete_sentence_2", "w4", "w5", reason="sentence")
+    edits.set_assisted_in_frame("w3->w6", 70)
+
+    splice = generate_splices(project, edits).splices[0]
+    assert splice.right_whisper_in_frame == 66
+    assert splice.right_suggested_in_frame == 70
+    assert splice.right_in_frame == 70
+
+    edits.adjust_splice(splice.anchor_key, right_in_delta=2)
+    adjusted = generate_splices(project, edits).splices[0]
+    assert adjusted.right_suggested_in_frame == 70
+    assert adjusted.right_in_frame == 72
+    assert adjusted.right_in_adjustment == 2
+
+
 def test_deleted_silence_creates_splice_between_adjacent_words() -> None:
     edits = EditDecisionList()
     edits.delete_silence("delete_dead_space", "s1")
@@ -152,4 +170,64 @@ def test_rejects_neighboring_ranges_that_overlap_across_a_cut() -> None:
     edits.adjust_splice(splice.anchor_key, left_out_delta=40, right_in_delta=-5)
 
     with pytest.raises(InvalidCutPlanError, match="overlap"):
+        generate_splices(_project(), edits)
+
+
+def test_manual_cut_splits_a_kept_range_without_transcript_deletion() -> None:
+    edits = EditDecisionList()
+    edits.add_manual_cut("manual_1", 20, 30)
+
+    plan = generate_splices(_project(), edits)
+
+    assert plan.export_intervals() == [(0, 20), (30, 90)]
+    assert len(plan.splices) == 1
+    splice = plan.splices[0]
+    assert splice.kind == "manual"
+    assert splice.manual_cut_id == "manual_1"
+    assert splice.anchor_key == "MANUAL:manual_1"
+    assert splice.left_out_frame == 20
+    assert splice.right_in_frame == 30
+
+
+def test_manual_cut_boundaries_can_be_fine_tuned_and_remain_separate_from_initial_frames() -> None:
+    edits = EditDecisionList()
+    edits.add_manual_cut("manual_1", 20, 30)
+    edits.adjust_manual_cut("manual_1", out_delta=-2, in_delta=3)
+
+    splice = generate_splices(_project(), edits).splices[0]
+
+    assert splice.left_out_frame == 18
+    assert splice.right_in_frame == 33
+    assert splice.left_suggested_out_frame == 20
+    assert splice.right_suggested_in_frame == 30
+    assert splice.left_out_adjustment == -2
+    assert splice.right_in_adjustment == 3
+
+
+def test_final_out_frame_extends_the_last_rendered_interval() -> None:
+    edits = EditDecisionList()
+    edits.set_final_out_frame(98)
+
+    plan = generate_splices(_project(), edits)
+
+    assert plan.export_intervals() == [(0, 98)]
+    assert plan.kept_ranges[-1].suggested_end_frame == 90
+    assert plan.kept_ranges[-1].adjusted_end_frame == 98
+
+
+def test_final_out_frame_cannot_reinclude_deleted_trailing_words() -> None:
+    edits = EditDecisionList()
+    edits.delete_words("delete_outro", "w7", "w7", reason="selection")
+    edits.set_final_out_frame(85)
+
+    with pytest.raises(InvalidCutPlanError, match="deleted trailing content"):
+        generate_splices(_project(), edits)
+
+
+def test_manual_cut_cannot_overlap_an_existing_cut() -> None:
+    edits = EditDecisionList()
+    edits.add_manual_cut("manual_1", 20, 30)
+    edits.add_manual_cut("manual_2", 25, 40)
+
+    with pytest.raises(InvalidCutPlanError, match="cannot overlap"):
         generate_splices(_project(), edits)

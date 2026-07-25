@@ -39,14 +39,16 @@ The page contains three tabs:
 - **Audio Normalizer** — select source/output, analyze, preview Original versus
   Corrected audio, and export normalized media.
 
-The three workspaces are exposed through a compact Tools hover/focus menu in a
+The four workspaces are exposed through a compact Tools hover/focus menu in a
 single-row header. Transcript Edit uses five connected numbered workflow
 stages; the selected stage expands in place while other stages remain
 number-only. Project open/save and settings remain separate compact utilities.
 
 The transcript workspace uses a dedicated splice-review panel. Inline splice
 markers select and navigate; playback, review, and IN/OUT adjustment controls
-are not embedded in the transcript row.
+are not embedded in the transcript row. Likely earlier takes are returned by
+the project API and shown as yellow transcript words; ordinary short phrase
+reuse is excluded, and the signal updates after delete and restore actions.
 
 ## Development Commands
 
@@ -78,6 +80,7 @@ POST   /api/projects/current/analyze-pauses
 POST   /api/projects/current/analyze-boundaries
 POST   /api/projects/current/splices/adjust
 POST   /api/projects/current/splices/review
+POST   /api/projects/current/final-out-frame
 POST   /api/projects/current/render-preview
 GET    /api/projects/current/render-preview/{preview_id}
 POST   /api/projects/current/save
@@ -106,9 +109,10 @@ GET    /api/audio/preview/{preview_id}/{mode}
 ```
 
 All source and preview media routes support HTTP byte ranges. Stage 3 splice
-review seeks through the source file. Stage 4 renders one complete temporary
-review draft, returns every splice's rendered-timeline position, and replaces
-the prior draft when refreshed.
+review seeks through the source file and can persist the final source OUT frame
+from that playhead or an exact frame value. Stage 4 renders one complete
+temporary review draft, returns every splice's rendered-timeline position, and
+replaces the prior draft when refreshed.
 
 ## Process-State Caveat
 

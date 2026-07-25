@@ -11,6 +11,8 @@ def find_executable(name: str) -> Path | None:
         runtime_root() / "tools" / "ffmpeg" / f"{name}.exe",
         resource_root() / "tools" / "ffmpeg" / f"{name}.exe",
     ]
+    package = "@ffmpeg-installer" if name == "ffmpeg" else "@ffprobe-installer"
+    candidates.append(resource_root() / "node_modules" / package / "win32-x64" / f"{name}.exe")
     for candidate in candidates:
         if candidate.exists():
             return candidate

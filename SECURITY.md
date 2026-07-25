@@ -37,3 +37,9 @@ Videos, transcripts, generated projects, exports, temporary files, model
 weights, local environments, and common secret-file formats are excluded by
 `.gitignore`. Before publishing a change, review `git status` and confirm that
 only intended source and documentation files are staged.
+
+For visual-production work, keep creator projects outside the Git checkout by
+using `scripts/new_visual_project.py`. Run `npm run privacy:check` before every
+public push. The privacy guard scans tracked files and historical paths for
+private workspaces, creator-media formats, transcript artifacts, personal
+absolute paths, and oversized binaries.

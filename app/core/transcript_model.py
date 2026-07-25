@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,7 @@ class TranscriptProject:
     fps: float
     words: list[TranscriptWord]
     silence_ranges: list[SilenceRange]
+    generation: dict = field(default_factory=dict)
 
     def word_index(self, word_id: str) -> int:
         for index, word in enumerate(self.words):

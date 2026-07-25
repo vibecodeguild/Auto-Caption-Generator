@@ -5,16 +5,19 @@ import json
 import mimetypes
 import subprocess
 import threading
+import time
+import urllib.error
 import uuid
 import wave
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, field_validator
 
 from app.core.audio_normalizer import (
     LoudnessHotspots,
@@ -25,7 +28,11 @@ from app.core.audio_normalizer import (
     normalize_video_audio,
     preset_options,
 )
-from app.core.audio_boundary import analyze_pause_candidates, suggest_word_end_boundaries
+from app.core.audio_boundary import (
+    MAX_EXTENSION_SECONDS,
+    analyze_pause_candidates,
+    suggest_word_end_boundaries,
+)
 from app.core.pipeline import generate_captioned_video
 from app.core.caption_grouping import group_words
 from app.core.editor_pipeline import generate_editor_transcript
@@ -34,23 +41,94 @@ from app.core.editor_tokens import transcript_tokens
 from app.core.ffmpeg_locator import find_ffmpeg
 from app.core.ffmpeg_runner import extract_audio
 from app.core.project_store import editor_project_document, load_editor_project, save_editor_project
+from app.core.repetition_detection import detect_repeated_word_ids
 from app.core.settings import COMPUTE_OPTIONS, MODEL_OPTIONS, PRESETS, CaptionPreset, CaptionStyle, WordTimestamp, default_style, exports_dir, temp_dir
 from app.core.splice_generation import DynamicSplice, InvalidCutPlanError, SplicePlan, generate_splices
 from app.core.splice_preview import source_splice_preview_segments
 from app.core.style_library import delete_user_style, is_built_in_style, load_style_library, save_user_style
+from app.core.story_assets import (
+    build_review_prompt,
+    build_nonmedia_suggestion,
+    create_recipe_suggestion,
+    credits_text,
+    creator_asset_path,
+    default_creator_library,
+    decide_suggestion,
+    freeze_creator_asset,
+    import_creator_asset,
+    load_creator_library,
+    load_visual_catalog,
+    load_visual_suggestions,
+    pexels_settings,
+    prepare_suggestion_approval_evidence,
+    recipe_preview_path,
+    suggestion_approval_frame_path,
+    treatment_motion_preview_path,
+    save_pexels_key,
+    search_creator_library,
+    search_pexels_videos,
+    select_pexels_candidate,
+    update_creator_asset,
+    update_suggestion,
+    update_treatment_metadata,
+)
 from app.core.transcriber import transcribe_audio
+from app.core.transcript_history import build_edit_analysis, build_generation_metadata, with_initial_repeat_suggestions
+from app.core.transcript_remap import remap_transcript
 from app.core.transcript_model import TranscriptProject
 from app.core.file_utils import validate_input_video
 from app.core.video_cutter import frame_intervals_to_seconds, run_cut
+from app.core.visual_production import (
+    active_visual_master,
+    active_visual_revision,
+    active_visual_runtime,
+    approve_full_review,
+    approve_representative_scene,
+    build_hyperframes_composition,
+    create_visual_plan_in_video_project,
+    create_visual_project,
+    find_visual_root,
+    import_visual_asset,
+    load_visual_plan,
+    render_visual_plan,
+    resolve_project_path,
+    save_visual_plan,
+    scene_frame_preview,
+    verify_delivered_revision_reopened,
+    visual_production_gate_report,
+    visual_plan_response,
+)
+from app.core.video_project import (
+    DEFAULT_PROJECT_PATHS,
+    VIDEO_PROJECT_SUFFIX,
+    add_source_clips,
+    artifact_current,
+    build_visual_plan_prompt,
+    create_video_project_from_sources,
+    load_video_project,
+    mark_artifact_current,
+    preferred_stage_source,
+    remove_source_clip,
+    reorder_source_clips,
+    resolve_video_project_path,
+    save_video_project,
+    video_project_response,
+    video_project_root,
+)
 from app.core.windows_dialog import (
     choose_output_folder as _windows_choose_output_folder,
     choose_project_file as _windows_choose_project_file,
     choose_project_save_file as _windows_choose_project_save_file,
     choose_video_file as _windows_choose_video_file,
+    choose_video_files as _windows_choose_video_files,
+    choose_visual_asset_file as _windows_choose_visual_asset_file,
+    choose_visual_plan_file as _windows_choose_visual_plan_file,
 )
 
 
 class ApiState:
+    video_project_path: Path | None = None
+    video_project: dict | None = None
     project: TranscriptProject | None = None
     edits: EditDecisionList = EditDecisionList()
     project_path: Path | None = None
@@ -69,8 +147,14 @@ class ApiState:
     rendered_cut_preview_id: str | None = None
     rendered_cut_preview_path: Path | None = None
     transcription_jobs: dict[str, TranscriptionJob]
+    visual_plan_path: Path | None = None
+    visual_plan: dict | None = None
+    visual_render_jobs: dict[str, VisualRenderJob]
+    visual_render_start_lock: threading.Lock
 
     def __init__(self) -> None:
+        self.video_project_path = None
+        self.video_project = None
         self.project = None
         self.edits = EditDecisionList()
         self.project_path = None
@@ -89,6 +173,10 @@ class ApiState:
         self.rendered_cut_preview_id = None
         self.rendered_cut_preview_path = None
         self.transcription_jobs = {}
+        self.visual_plan_path = None
+        self.visual_plan = None
+        self.visual_render_jobs = {}
+        self.visual_render_start_lock = threading.Lock()
 
 
 class TranscriptionJob:
@@ -127,6 +215,107 @@ class TranscriptionJob:
                 "result": self.result,
                 "error": self.error,
             }
+
+
+class VisualRenderJob:
+    def __init__(self, job_id: str, plan_path: Path, purpose: str) -> None:
+        self.job_id = job_id
+        self.plan_path = plan_path.resolve()
+        self.purpose = purpose
+        self.status = "running"
+        self.value = 0
+        self.stage = "queued"
+        self.message = "Final export queued..." if purpose == "final" else "Visual render queued..."
+        self.output_path: str | None = None
+        self.error: str | None = None
+        self.started_at = datetime.now(timezone.utc).isoformat()
+        self.updated_at = self.started_at
+        self.started_monotonic = time.monotonic()
+        self.lock = threading.Lock()
+        self._persist()
+
+    @property
+    def state_path(self) -> Path:
+        return self.plan_path.parent / "render-job.json"
+
+    def _stage_for(self, value: int, message: str) -> str:
+        lowered = message.lower()
+        if value >= 100:
+            return "complete"
+        if "verif" in lowered:
+            return "verifying"
+        if "audio" in lowered:
+            return "audio"
+        if "render" in lowered and value >= 40:
+            return "rendering"
+        if "lint" in lowered or "layout" in lowered or "gate" in lowered:
+            return "validating"
+        return "preparing"
+
+    def _snapshot_unlocked(self) -> dict:
+        elapsed = max(0.0, time.monotonic() - self.started_monotonic)
+        eta = None
+        if self.status == "running" and 0 < self.value < 100:
+            eta = max(0.0, elapsed * (100 - self.value) / self.value)
+        return {
+            "job_id": self.job_id,
+            "plan_path": str(self.plan_path),
+            "purpose": self.purpose,
+            "status": self.status,
+            "stage": self.stage,
+            "value": self.value,
+            "message": self.message,
+            "output_path": self.output_path,
+            "error": self.error,
+            "started_at": self.started_at,
+            "updated_at": self.updated_at,
+            "elapsed_seconds": round(elapsed, 1),
+            "eta_seconds": round(eta, 1) if eta is not None else None,
+        }
+
+    def _persist(self) -> None:
+        try:
+            snapshot = self._snapshot_unlocked()
+            temporary = self.state_path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+            temporary.replace(self.state_path)
+        except OSError:
+            # The in-memory job remains authoritative while the API is running.
+            pass
+
+    def update(self, value: int, message: str) -> None:
+        with self.lock:
+            bounded_value = max(0, min(100, value))
+            if bounded_value == self.value and message == self.message:
+                return
+            self.value = bounded_value
+            self.message = message
+            self.stage = self._stage_for(self.value, message)
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist()
+
+    def complete(self, output_path: Path) -> None:
+        with self.lock:
+            self.status = "complete"
+            self.value = 100
+            self.stage = "complete"
+            self.message = "Final video verified and ready." if self.purpose == "final" else "Visual render complete."
+            self.output_path = str(output_path)
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist()
+
+    def fail(self, error: str) -> None:
+        with self.lock:
+            self.status = "failed"
+            self.stage = "failed"
+            self.error = error
+            self.message = error
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist()
+
+    def snapshot(self, job_id: str) -> dict:
+        with self.lock:
+            return self._snapshot_unlocked()
 
 
 state = ApiState()
@@ -185,6 +374,21 @@ class ReviewSpliceRequest(BaseModel):
     reviewed: bool
 
 
+class ManualCutRequest(BaseModel):
+    out_frame: int
+    in_frame: int
+
+
+class AdjustManualCutRequest(BaseModel):
+    cut_id: str
+    out_delta: int = 0
+    in_delta: int = 0
+
+
+class FinalOutFrameRequest(BaseModel):
+    frame: int | None
+
+
 class EditorSettingsRequest(BaseModel):
     dead_space_min_seconds: float
 
@@ -222,6 +426,18 @@ class CaptionStylePayload(BaseModel):
     glow_enabled: bool = False
     glow_color: str = "#FF00CE"
     glow_strength: int = 5
+
+    @field_validator("main_color", "active_color", "outline_color", "shadow_color", "glow_color")
+    @classmethod
+    def normalize_hex_color(cls, value: str) -> str:
+        clean = value.strip()
+        if clean.startswith("#"):
+            clean = clean[1:]
+        if len(clean) == 3 and all(character in "0123456789abcdefABCDEF" for character in clean):
+            clean = "".join(character * 2 for character in clean)
+        if len(clean) != 6 or any(character not in "0123456789abcdefABCDEF" for character in clean):
+            raise ValueError("Colors must use #RRGGBB format.")
+        return f"#{clean.upper()}"
 
     def to_style(self) -> CaptionStyle:
         return CaptionStyle(**self.model_dump())
@@ -275,6 +491,150 @@ class AudioPreviewRequest(AudioAnalyzeRequest):
     duration_seconds: float = 20.0
 
 
+class VisualPlanSaveRequest(BaseModel):
+    plan: dict
+
+
+class VisualRenderRequest(BaseModel):
+    start_sec: float | None = None
+    end_sec: float | None = None
+    quality: str = "standard"
+    purpose: str | None = None
+
+
+class VisualRepresentativeApprovalRequest(BaseModel):
+    cue_id: str
+
+
+class VisualReopenVerificationRequest(BaseModel):
+    revision_number: int
+    plan_hash: str
+
+
+class SourceClipOrderRequest(BaseModel):
+    clip_ids: list[str]
+
+
+class CreatorAssetUpdateRequest(BaseModel):
+    updates: dict
+
+
+class CreatorAssetUseRequest(BaseModel):
+    start_sec: float
+    end_sec: float
+
+
+class SuggestionUpdateRequest(BaseModel):
+    updates: dict
+
+
+class SuggestionDecisionRequest(BaseModel):
+    action: str
+    notes: str = ""
+
+
+class TreatmentUpdateRequest(BaseModel):
+    updates: dict
+
+
+class RecipeSuggestionRequest(BaseModel):
+    recipe_id: str
+    start_sec: float
+    end_sec: float
+
+
+class ReviewPromptRequest(BaseModel):
+    review_ids: list[str] | None = None
+
+
+class PexelsKeyRequest(BaseModel):
+    api_key: str
+
+
+class StockSelectRequest(BaseModel):
+    candidate: dict
+
+
+def _active_video_project() -> tuple[Path, dict] | None:
+    if state.video_project_path is None or state.video_project is None:
+        return None
+    return state.video_project_path, state.video_project
+
+
+def _video_project_stage_path(key: str) -> Path | None:
+    active = _active_video_project()
+    if active is None:
+        return None
+    active[1].setdefault("paths", {}).setdefault(key, DEFAULT_PROJECT_PATHS[key])
+    return resolve_video_project_path(active[0], active[1], key)
+
+
+def _video_project_output_folder() -> Path:
+    path = _video_project_stage_path("finalVideo")
+    return path.parent if path is not None else exports_dir()
+
+
+def _active_sequence_fps() -> float | None:
+    active = _active_video_project()
+    if active is None:
+        return None
+    clips = sorted(active[1].get("sourceSequence", []), key=lambda clip: int(clip.get("order", 0)))
+    if not clips:
+        return None
+    value = str((clips[0].get("metadata") or {}).get("frameRate") or "")
+    try:
+        if "/" in value:
+            numerator, denominator = value.split("/", 1)
+            return round(float(numerator) / float(denominator), 3)
+        return round(float(value), 3)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _activate_video_project(manifest_path: Path, manifest: dict) -> dict:
+    state.video_project_path = manifest_path.resolve()
+    state.video_project = manifest
+    source = resolve_video_project_path(manifest_path, manifest, "sourceVideo")
+    state.transcript_video_path = source
+    state.caption_video_path = preferred_stage_source(manifest_path, manifest)
+    state.audio_video_path = preferred_stage_source(manifest_path, manifest)
+    editor_path = resolve_video_project_path(manifest_path, manifest, "editorProject")
+    editor_response = None
+    if editor_path.is_file():
+        project, edits = load_editor_project(editor_path)
+        state.project = project
+        state.edits = edits
+        state.project_path = editor_path
+        editor_response = _project_response()
+    else:
+        state.project = None
+        state.edits = EditDecisionList()
+        state.project_path = editor_path
+    visual_path = resolve_video_project_path(manifest_path, manifest, "visualPlan")
+    if visual_path.is_file():
+        state.visual_plan_path = visual_path
+        state.visual_plan = load_visual_plan(visual_path)
+    else:
+        state.visual_plan_path = None
+        state.visual_plan = None
+    return {"videoProject": video_project_response(manifest_path, manifest), "editorProject": editor_response}
+
+
+def _activate_rebuilt_sequence(manifest_path: Path, manifest: dict) -> dict:
+    state.video_project_path = manifest_path
+    state.video_project = manifest
+    source = resolve_video_project_path(manifest_path, manifest, "sourceVideo")
+    state.transcript_video_path = source
+    state.caption_video_path = source
+    state.audio_video_path = source
+    state.project = None
+    state.edits = EditDecisionList()
+    state.project_path = resolve_video_project_path(manifest_path, manifest, "editorProject")
+    state.visual_plan_path = None
+    state.visual_plan = None
+    return {"videoProject": video_project_response(manifest_path, manifest), "editorProject": None}
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -291,7 +651,89 @@ def open_project_dialog() -> dict:
     path = _choose_project_file()
     if path is None:
         raise HTTPException(status_code=400, detail="No project file selected.")
+    if path.name.endswith(VIDEO_PROJECT_SUFFIX):
+        raise HTTPException(status_code=400, detail="Use Open Video Project for a .vcg-project.json parent project.")
     return _open_project_path(path)
+
+
+@app.get("/api/video-project/current")
+def current_video_project() -> dict:
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    return video_project_response(active[0], active[1])
+
+
+@app.post("/api/video-project/create-dialog")
+def create_video_project_dialog() -> dict:
+    sources = _choose_video_files()
+    if not sources:
+        raise HTTPException(status_code=400, detail="No source clips selected.")
+    try:
+        manifest_path, manifest = create_video_project_from_sources(sources)
+        return _activate_video_project(manifest_path, manifest)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not create the private video project: {exc}") from exc
+
+
+@app.post("/api/video-project/open-dialog")
+def open_video_project_dialog() -> dict:
+    path = _choose_project_file()
+    if path is None:
+        raise HTTPException(status_code=400, detail="No project selected.")
+    if not path.name.endswith(VIDEO_PROJECT_SUFFIX):
+        raise HTTPException(status_code=400, detail="Choose a .vcg-project.json parent project. Legacy transcript projects still open from Transcript Project.")
+    try:
+        return _activate_video_project(path, load_video_project(path))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not open the private video project: {exc}") from exc
+
+
+@app.get("/api/video-project/visual-prompt")
+def video_project_visual_prompt() -> dict:
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="Create or open a private video project first.")
+    return {"prompt": build_visual_plan_prompt(active[0], active[1])}
+
+
+@app.post("/api/video-project/clips/add-dialog")
+def add_video_project_clips() -> dict:
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    sources = _choose_video_files()
+    if not sources:
+        raise HTTPException(status_code=400, detail="No source clips selected.")
+    try:
+        manifest = add_source_clips(active[0], active[1], sources)
+        return _activate_rebuilt_sequence(active[0], manifest)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not add source clips: {exc}") from exc
+
+
+@app.post("/api/video-project/clips/reorder")
+def reorder_video_project_clips(payload: SourceClipOrderRequest) -> dict:
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        manifest = reorder_source_clips(active[0], active[1], payload.clip_ids)
+        return _activate_rebuilt_sequence(active[0], manifest)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not reorder source clips: {exc}") from exc
+
+
+@app.delete("/api/video-project/clips/{clip_id}")
+def delete_video_project_clip(clip_id: str) -> dict:
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        manifest = remove_source_clip(active[0], active[1], clip_id)
+        return _activate_rebuilt_sequence(active[0], manifest)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not remove source clip: {exc}") from exc
 
 
 def _open_project_path(path: Path) -> dict:
@@ -301,6 +743,8 @@ def _open_project_path(path: Path) -> dict:
     state.project = project
     state.edits = edits
     state.project_path = path
+    state.video_project_path = None
+    state.video_project = None
     return _project_response()
 
 
@@ -339,6 +783,16 @@ def _choose_video_file() -> Path | None:
         ) from exc
 
 
+def _choose_video_files() -> list[Path]:
+    try:
+        return _windows_choose_video_files()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Windows multi-video picker error ({type(exc).__name__}): {exc}",
+        ) from exc
+
+
 def _choose_output_folder() -> Path | None:
     try:
         return _windows_choose_output_folder()
@@ -349,6 +803,20 @@ def _choose_output_folder() -> Path | None:
         ) from exc
 
 
+def _choose_visual_plan_file() -> Path | None:
+    try:
+        return _windows_choose_visual_plan_file()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise HTTPException(status_code=500, detail=f"Windows visual-plan picker error ({type(exc).__name__}): {exc}") from exc
+
+
+def _choose_visual_asset_file() -> Path | None:
+    try:
+        return _windows_choose_visual_asset_file()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise HTTPException(status_code=500, detail=f"Windows visual-asset picker error ({type(exc).__name__}): {exc}") from exc
+
+
 @app.get("/api/projects/current")
 def current_project() -> dict:
     _require_project()
@@ -357,14 +825,15 @@ def current_project() -> dict:
 
 @app.post("/api/projects/choose-video")
 def choose_transcript_video() -> dict:
-    path = _choose_video_file()
-    if path is None:
-        raise HTTPException(status_code=400, detail="No video file selected.")
-    state.transcript_video_path = path
-    state.project = None
-    state.edits = EditDecisionList()
-    state.project_path = None
-    return {"source": str(path)}
+    sources = _choose_video_files()
+    if not sources:
+        raise HTTPException(status_code=400, detail="No source clips selected.")
+    try:
+        manifest_path, manifest = create_video_project_from_sources(sources)
+        response = _activate_video_project(manifest_path, manifest)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not create the private video project: {exc}") from exc
+    return {"source": str(state.transcript_video_path), **response}
 
 
 @app.post("/api/projects/transcribe")
@@ -383,11 +852,10 @@ def transcribe_project(payload: TranscribeProjectRequest) -> dict:
         working_dir=temp_dir(),
         model_size=MODEL_OPTIONS[payload.model_label],
         compute_mode=payload.compute_label,
+        fps_override=_active_sequence_fps(),
     )
-    state.project = project
-    state.edits = EditDecisionList()
-    state.project_path = None
-    state.caption_video_path = source
+    project = _annotate_generated_project(project, source, payload.model_label, payload.compute_label)
+    _store_generated_project(project, source)
     return _project_response()
 
 
@@ -408,7 +876,7 @@ def start_transcribe_project(payload: TranscribeProjectRequest) -> dict:
 
     thread = threading.Thread(
         target=_run_transcription_job,
-        args=(job, source, MODEL_OPTIONS[payload.model_label], payload.compute_label),
+        args=(job, source, payload.model_label, payload.compute_label),
         daemon=True,
     )
     thread.start()
@@ -423,19 +891,20 @@ def transcribe_job_status(job_id: str) -> dict:
     return job.snapshot()
 
 
-def _run_transcription_job(job: TranscriptionJob, source: Path, model_size: str, compute_mode: str) -> None:
+def _run_transcription_job(job: TranscriptionJob, source: Path, model_label: str, compute_mode: str) -> None:
     try:
+        model_size = MODEL_OPTIONS[model_label]
         project = generate_editor_transcript(
             input_video_path=source,
             working_dir=temp_dir(),
             model_size=model_size,
             compute_mode=compute_mode,
+            fps_override=_active_sequence_fps(),
             progress_callback=job.update,
         )
-        state.project = project
-        state.edits = EditDecisionList()
-        state.project_path = None
-        state.caption_video_path = source
+        job.update(96, "Recording transcript provenance...")
+        project = _annotate_generated_project(project, source, model_label, compute_mode)
+        _store_generated_project(project, source)
         job.complete(_project_response())
     except Exception as exc:  # noqa: BLE001
         job.fail(str(exc))
@@ -592,7 +1061,69 @@ def adjust_splice(payload: AdjustSpliceRequest) -> dict:
 @app.post("/api/projects/current/splices/review")
 def review_splice(payload: ReviewSpliceRequest) -> dict:
     project = _require_project()
-    state.edits.adjust_splice(payload.anchor_key, reviewed=payload.reviewed)
+    if payload.anchor_key.startswith("MANUAL:"):
+        try:
+            state.edits.review_manual_cut(payload.anchor_key.removeprefix("MANUAL:"), payload.reviewed)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    else:
+        state.edits.adjust_splice(payload.anchor_key, reviewed=payload.reviewed)
+    _save_current_project_if_loaded(project)
+    return _project_response()
+
+
+@app.post("/api/projects/current/manual-cuts")
+def add_manual_cut(payload: ManualCutRequest) -> dict:
+    project = _require_project()
+    previous_edits = copy.deepcopy(state.edits)
+    state.edits.add_manual_cut(f"manual_{uuid.uuid4().hex[:10]}", payload.out_frame, payload.in_frame)
+    try:
+        generate_splices(project, state.edits)
+    except InvalidCutPlanError as exc:
+        state.edits = previous_edits
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _save_current_project_if_loaded(project)
+    return _project_response()
+
+
+@app.post("/api/projects/current/manual-cuts/adjust")
+def adjust_manual_cut(payload: AdjustManualCutRequest) -> dict:
+    project = _require_project()
+    previous_edits = copy.deepcopy(state.edits)
+    try:
+        state.edits.adjust_manual_cut(payload.cut_id, out_delta=payload.out_delta, in_delta=payload.in_delta)
+        generate_splices(project, state.edits)
+    except KeyError as exc:
+        state.edits = previous_edits
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidCutPlanError as exc:
+        state.edits = previous_edits
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _save_current_project_if_loaded(project)
+    return _project_response()
+
+
+@app.delete("/api/projects/current/manual-cuts/{cut_id}")
+def remove_manual_cut(cut_id: str) -> dict:
+    project = _require_project()
+    try:
+        state.edits.remove_manual_cut(cut_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _save_current_project_if_loaded(project)
+    return _project_response()
+
+
+@app.post("/api/projects/current/final-out-frame")
+def set_final_out_frame(payload: FinalOutFrameRequest) -> dict:
+    project = _require_project()
+    previous_edits = copy.deepcopy(state.edits)
+    state.edits.set_final_out_frame(payload.frame)
+    try:
+        generate_splices(project, state.edits)
+    except InvalidCutPlanError as exc:
+        state.edits = previous_edits
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     _save_current_project_if_loaded(project)
     return _project_response()
 
@@ -613,7 +1144,8 @@ def render_cut_preview() -> dict:
     intervals = frame_intervals_to_seconds(frame_intervals, project.fps)
 
     preview_id = uuid.uuid4().hex
-    output_path = temp_dir() / f"rendered-cut-{preview_id}.mp4"
+    cut_preview_root = _video_project_stage_path("cutPreviews") or temp_dir()
+    output_path = cut_preview_root / f"rendered-cut-{preview_id}.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         run_cut(
@@ -638,6 +1170,7 @@ def render_cut_preview() -> dict:
         "preview_id": preview_id,
         "duration_seconds": round(sum(end - start for start, end in intervals), 3),
         "splices": _rendered_preview_splices(plan, project),
+        "segments": _rendered_preview_segments(plan, project),
     }
 
 
@@ -650,6 +1183,7 @@ def save_project() -> dict:
             raise HTTPException(status_code=400, detail="No project file selected.")
         state.project_path = path
     save_editor_project(state.project_path, project, state.edits)
+    _touch_video_project()
     return {"saved": str(state.project_path)}
 
 
@@ -682,7 +1216,12 @@ def export_cut(payload: ExportCutRequest) -> dict:
         valid_preset_ids = {preset["id"] for preset in preset_options()}
         if payload.normalization_preset_id not in valid_preset_ids:
             raise HTTPException(status_code=400, detail=f"Unknown audio preset: {payload.normalization_preset_id}")
-    output_path = Path(payload.output_path).expanduser().resolve() if payload.output_path else exports_dir() / f"{source.stem}_cut.mp4"
+    project_locked_cut = _video_project_stage_path("lockedCut")
+    requested_output = Path(payload.output_path).expanduser().resolve() if payload.output_path else None
+    final_cut_path = requested_output or project_locked_cut or (exports_dir() / f"{source.stem}_cut.mp4")
+    output_path = final_cut_path
+    if payload.normalize_audio and project_locked_cut is not None and requested_output is None:
+        output_path = video_project_root(state.video_project_path) / "working" / "cut-unmastered.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     run_cut(
         ffmpeg=find_ffmpeg(),
@@ -691,13 +1230,23 @@ def export_cut(payload: ExportCutRequest) -> dict:
         intervals=frame_intervals_to_seconds(intervals, project.fps),
     )
     if not payload.normalize_audio:
+        state.caption_video_path = output_path
+        state.audio_video_path = output_path
+        _record_audio_delivery(
+            normalized=False,
+            output_path=output_path,
+            preset_id=None,
+            target_i=None,
+            measurement=None,
+        )
+        _save_final_transcript(project, plan, output_path)
         return {
             "output_path": str(output_path),
             "cut_output_path": str(output_path),
             "normalized": False,
         }
 
-    normalized_output_path = output_path.with_name(f"{output_path.stem}_normalized{output_path.suffix}")
+    normalized_output_path = final_cut_path if output_path != final_cut_path else output_path.with_name(f"{output_path.stem}_normalized{output_path.suffix}")
     try:
         measurement = analyze_audio(
             ffmpeg=find_ffmpeg(),
@@ -722,11 +1271,607 @@ def export_cut(payload: ExportCutRequest) -> dict:
             status_code=500,
             detail=f"The cut was exported successfully to {output_path}, but audio normalization failed: {exc}",
         ) from exc
+    state.caption_video_path = normalized_output_path
+    state.audio_video_path = normalized_output_path
+    _record_audio_delivery(
+        normalized=True,
+        output_path=normalized_output_path,
+        preset_id=payload.normalization_preset_id,
+        target_i=payload.target_i,
+        measurement=measurement,
+    )
+    _save_final_transcript(project, plan, normalized_output_path)
     return {
         "output_path": str(normalized_output_path),
         "cut_output_path": str(output_path),
         "normalized": True,
     }
+
+
+def _require_visual_plan() -> tuple[Path, dict]:
+    if state.visual_plan_path is None or state.visual_plan is None:
+        raise HTTPException(status_code=404, detail="No private visual-production project is open.")
+    return state.visual_plan_path, state.visual_plan
+
+
+@app.get("/api/visual/current")
+def current_visual_project() -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        plan = load_visual_plan(plan_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not reload the private visual plan: {exc}") from exc
+    state.visual_plan = plan
+    return visual_plan_response(plan_path, plan)
+
+
+@app.get("/api/visual/catalog")
+def visual_catalog() -> dict:
+    try:
+        return load_visual_catalog()
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not load the visual treatment catalog: {exc}") from exc
+
+
+@app.get("/api/visual/catalog/recipes/{recipe_id}/preview")
+def visual_recipe_preview(recipe_id: str) -> FileResponse:
+    try:
+        path = recipe_preview_path(recipe_id)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if path is None:
+        raise HTTPException(status_code=404, detail="No private production preview is available for this recipe yet.")
+    return FileResponse(path)
+
+
+@app.get("/api/visual/catalog/treatments/{treatment_id}/preview")
+def visual_treatment_preview(treatment_id: str) -> FileResponse:
+    try:
+        path = recipe_preview_path(treatment_id, require_recipe=False)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if path is None:
+        raise HTTPException(status_code=404, detail="No private production preview is available for this treatment yet.")
+    return FileResponse(path)
+
+
+@app.get("/api/visual/catalog/treatments/{treatment_id}/motion-preview")
+def visual_treatment_motion_preview(treatment_id: str) -> FileResponse:
+    try:
+        path = treatment_motion_preview_path(treatment_id)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if path is None:
+        raise HTTPException(status_code=404, detail="No private motion preview is available for this treatment yet.")
+    return FileResponse(path, media_type="video/mp4")
+
+
+@app.patch("/api/visual/catalog/treatments/{treatment_id}")
+def patch_visual_treatment(treatment_id: str, payload: TreatmentUpdateRequest) -> dict:
+    try:
+        treatment, _library = update_treatment_metadata(treatment_id, payload.updates)
+        return treatment
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/visual/source-frame")
+def visual_source_frame(time_sec: float) -> FileResponse:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        return FileResponse(scene_frame_preview(plan_path, time_sec), media_type="image/jpeg")
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/visual/review-prompt")
+def visual_review_prompt(payload: ReviewPromptRequest) -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        prompt, plan, count = build_review_prompt(plan_path, set(payload.review_ids) if payload.review_ids is not None else None)
+        state.visual_plan = plan
+        response = visual_plan_response(plan_path, plan)
+        response.update({"prompt": prompt, "noteCount": count})
+        return response
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not prepare review notes: {exc}") from exc
+
+
+@app.get("/api/creator-library")
+def creator_library(query: str = "") -> dict:
+    return {"root": str(default_creator_library()), "assets": search_creator_library(query)}
+
+
+@app.post("/api/creator-library/import-dialog")
+def import_creator_library_asset() -> dict:
+    source = _choose_visual_asset_file()
+    if source is None:
+        raise HTTPException(status_code=400, detail="No AI footage or image selected.")
+    try:
+        asset, library, duplicate = import_creator_asset(source)
+        return {"asset": asset, "duplicate": duplicate, "assets": library["assets"]}
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not import Creator Library asset: {exc}") from exc
+
+
+@app.get("/api/creator-library/{asset_id}/media")
+def creator_library_media(asset_id: str, range: str | None = Header(default=None)) -> Response:
+    try:
+        return _range_response(creator_asset_path(asset_id), range)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.patch("/api/creator-library/{asset_id}")
+def patch_creator_library_asset(asset_id: str, payload: CreatorAssetUpdateRequest) -> dict:
+    try:
+        asset, library = update_creator_asset(asset_id, payload.updates)
+        return {"asset": asset, "assets": library["assets"]}
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/creator-library/{asset_id}/use")
+def use_creator_library_asset(asset_id: str, payload: CreatorAssetUseRequest) -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        _cue, plan = freeze_creator_asset(plan_path, asset_id, start_sec=payload.start_sec, end_sec=payload.end_sec)
+        state.visual_plan = plan
+        return visual_plan_response(plan_path, plan)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not add Creator Library asset: {exc}") from exc
+
+
+@app.get("/api/visual/suggestions")
+def visual_suggestions() -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        return load_visual_suggestions(plan_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not load visual suggestions: {exc}") from exc
+
+
+@app.patch("/api/visual/suggestions/{suggestion_id}")
+def patch_visual_suggestion(suggestion_id: str, payload: SuggestionUpdateRequest) -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        return update_suggestion(plan_path, suggestion_id, payload.updates)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/visual/suggestions/{suggestion_id}/decision")
+def decide_visual_suggestion(suggestion_id: str, payload: SuggestionDecisionRequest) -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        suggestion, suggestions, plan = decide_suggestion(
+            plan_path,
+            suggestion_id,
+            action=payload.action,
+            notes=payload.notes,
+        )
+        state.visual_plan = plan
+        response = visual_plan_response(plan_path, plan)
+        response.update({"suggestion": suggestion, "suggestions": suggestions["suggestions"], "coverage": suggestions.get("coverage")})
+        return response
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/visual/suggestions/{suggestion_id}/approval-evidence/prepare")
+def prepare_visual_suggestion_approval_evidence(suggestion_id: str) -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        suggestion, suggestions = prepare_suggestion_approval_evidence(plan_path, suggestion_id)
+        return {"suggestion": suggestion, "suggestions": suggestions["suggestions"], "coverage": suggestions.get("coverage")}
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/visual/suggestions/{suggestion_id}/approval-frame")
+def visual_suggestion_approval_frame(suggestion_id: str) -> FileResponse:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        return FileResponse(suggestion_approval_frame_path(plan_path, suggestion_id), media_type="image/png")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/visual/suggestions/recipe")
+def add_recipe_suggestion(payload: RecipeSuggestionRequest) -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        return create_recipe_suggestion(
+            plan_path,
+            payload.recipe_id,
+            start_sec=payload.start_sec,
+            end_sec=payload.end_sec,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/visual/suggestions/{suggestion_id}/build")
+def build_visual_suggestion(suggestion_id: str) -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        _cue, plan = build_nonmedia_suggestion(plan_path, suggestion_id)
+        state.visual_plan = plan
+        return visual_plan_response(plan_path, plan)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/visual/pexels/settings")
+def pexels_configuration() -> dict:
+    settings = pexels_settings()
+    return {"configured": bool(settings["apiKey"]), "source": settings["source"]}
+
+
+@app.post("/api/visual/pexels/settings")
+def save_pexels_configuration(payload: PexelsKeyRequest) -> dict:
+    try:
+        save_pexels_key(payload.api_key)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"configured": True, "source": "local-settings"}
+
+
+@app.post("/api/visual/suggestions/{suggestion_id}/pexels/search")
+def search_suggestion_stock(suggestion_id: str) -> dict:
+    plan_path, _plan = _require_visual_plan()
+    suggestions = load_visual_suggestions(plan_path)
+    suggestion = next((item for item in suggestions["suggestions"] if item.get("id") == suggestion_id), None)
+    if suggestion is None:
+        raise HTTPException(status_code=404, detail="Visual suggestion not found.")
+    try:
+        candidates = search_pexels_videos(suggestion.get("stockBrief") or {}, limit=5)
+        update_suggestion(plan_path, suggestion_id, {"status": "prepared", "candidates": candidates})
+        return {"suggestionId": suggestion_id, "candidates": candidates}
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, urllib.error.URLError) as exc:
+        raise HTTPException(status_code=400, detail=f"Pexels search failed: {exc}") from exc
+
+
+@app.post("/api/visual/suggestions/{suggestion_id}/pexels/select")
+def select_suggestion_stock(suggestion_id: str, payload: StockSelectRequest) -> dict:
+    plan_path, _plan = _require_visual_plan()
+    suggestions = load_visual_suggestions(plan_path)
+    suggestion = next((item for item in suggestions["suggestions"] if item.get("id") == suggestion_id), None)
+    if suggestion is None:
+        raise HTTPException(status_code=404, detail="Visual suggestion not found.")
+    try:
+        _cue, plan = select_pexels_candidate(plan_path, suggestion_id, payload.candidate, start_sec=float(suggestion["startSec"]), end_sec=float(suggestion["endSec"]))
+        state.visual_plan = plan
+        response = visual_plan_response(plan_path, plan)
+        response["credits"] = credits_text(plan_path)
+        return response
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, urllib.error.URLError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not use Pexels footage: {exc}") from exc
+
+
+@app.get("/api/visual/credits")
+def visual_credits() -> dict:
+    plan_path, _plan = _require_visual_plan()
+    return {"credits": credits_text(plan_path)}
+
+
+@app.post("/api/visual/create-dialog")
+def create_visual_project_dialog() -> dict:
+    active = _active_video_project()
+    if active is not None:
+        return ensure_visual_project()
+    source = _choose_video_file()
+    if source is None:
+        raise HTTPException(status_code=400, detail="No locked video selected.")
+    transcript = editor_project_document(state.project, state.edits) if state.project is not None else None
+    try:
+        plan_path, plan = create_visual_project(source, transcript_document=transcript)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not create the private visual project: {exc}") from exc
+    state.visual_plan_path = plan_path
+    state.visual_plan = plan
+    return visual_plan_response(plan_path, plan)
+
+
+@app.post("/api/visual/open-dialog")
+def open_visual_project_dialog() -> dict:
+    path = _choose_visual_plan_file()
+    if path is None:
+        raise HTTPException(status_code=400, detail="No visual plan selected.")
+    try:
+        plan = load_visual_plan(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not open the visual plan: {exc}") from exc
+    state.visual_plan_path = path.resolve()
+    state.visual_plan = plan
+    return visual_plan_response(state.visual_plan_path, plan)
+
+
+@app.post("/api/visual/ensure")
+def ensure_visual_project() -> dict:
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=400, detail="Create or open a parent video project first.")
+    manifest_path, manifest = active
+    plan_path = resolve_video_project_path(manifest_path, manifest, "visualPlan")
+    if plan_path.is_file():
+        plan = load_visual_plan(plan_path)
+    else:
+        locked_cut = resolve_video_project_path(manifest_path, manifest, "lockedCut")
+        if not artifact_current(manifest, "lockedCutRevision"):
+            raise HTTPException(status_code=400, detail="Export the current source sequence as a locked cut before starting Visual Production.")
+        final_transcript = resolve_video_project_path(manifest_path, manifest, "finalTranscript")
+        transcript = final_transcript if final_transcript.is_file() else resolve_video_project_path(manifest_path, manifest, "editorProject")
+        try:
+            plan_path, plan = create_visual_plan_in_video_project(
+                video_project_root(manifest_path),
+                source_video=locked_cut,
+                transcript_path=transcript,
+                plan_path=plan_path,
+            )
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=f"Could not initialize Visual Production: {exc}") from exc
+    state.visual_plan_path = plan_path
+    state.visual_plan = plan
+    return visual_plan_response(plan_path, plan)
+
+
+@app.post("/api/visual/save")
+def save_current_visual_plan(payload: VisualPlanSaveRequest) -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        plan = save_visual_plan(plan_path, payload.plan)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not save the visual plan: {exc}") from exc
+    state.visual_plan = plan
+    return visual_plan_response(plan_path, plan)
+
+
+@app.post("/api/visual/assets/import-dialog")
+def import_visual_asset_dialog() -> dict:
+    plan_path, _plan = _require_visual_plan()
+    source = _choose_visual_asset_file()
+    if source is None:
+        raise HTTPException(status_code=400, detail="No animation or image selected.")
+    try:
+        asset, plan = import_visual_asset(plan_path, source)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not import the visual asset: {exc}") from exc
+    state.visual_plan = plan
+    response = visual_plan_response(plan_path, plan)
+    response["importedAsset"] = asset
+    return response
+
+
+@app.get("/api/visual/source")
+def visual_source_video(request: Request, range: str | None = Header(default=None)) -> Response:
+    plan_path, plan = _require_visual_plan()
+    root = find_visual_root(plan_path)
+    path = resolve_project_path(root, plan["source"]["video"])
+    return _range_response(path, range)
+
+
+@app.get("/api/visual/final")
+def visual_final_video(request: Request, range: str | None = Header(default=None)) -> Response:
+    plan_path, plan = _require_visual_plan()
+    path, _revision = active_visual_master(plan_path, plan)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="No persisted Visual Production master is available.")
+    return _range_response(path, range)
+
+
+def _hyperframes_distribution_file(name: str) -> Path:
+    path = Path(__file__).resolve().parents[1] / "node_modules" / "hyperframes" / "dist" / name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"HyperFrames runtime file is missing: {name}")
+    return path
+
+
+@app.get("/api/visual/runtime/player.js")
+def visual_runtime_player() -> FileResponse:
+    return FileResponse(_hyperframes_distribution_file("hyperframes-player.global.js"), media_type="application/javascript")
+
+
+@app.get("/api/visual/runtime/core.js")
+def visual_runtime_core() -> FileResponse:
+    return FileResponse(_hyperframes_distribution_file("hyperframe.runtime.iife.js"), media_type="application/javascript")
+
+
+@app.get("/api/visual/runtime/composition/{relative_path:path}")
+def visual_runtime_composition_file(relative_path: str) -> Response:
+    plan_path, plan = _require_visual_plan()
+    runtime_root, runtime_entry, _composition = active_visual_runtime(plan_path, plan)
+    if runtime_root is None or runtime_entry is None:
+        try:
+            runtime_root, _duration = build_hyperframes_composition(plan_path)
+            runtime_entry = runtime_root / "index.html"
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+            raise HTTPException(status_code=400, detail=f"Could not prepare the HyperFrames preview: {exc}") from exc
+    requested = relative_path or runtime_entry.name
+    target = (runtime_root / requested).resolve()
+    try:
+        target.relative_to(runtime_root.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="HyperFrames preview path escapes the registered composition.") from exc
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="HyperFrames preview file not found.")
+    if target.suffix.lower() == ".html" and target.resolve() == runtime_entry.resolve():
+        document = target.read_text(encoding="utf-8")
+        runtime_script = '<script src="/api/visual/runtime/core.js" data-vcg-runtime="hyperframes"></script>'
+        document = document.replace("</body>", f"{runtime_script}</body>") if "</body>" in document else f"{document}{runtime_script}"
+        return HTMLResponse(document, headers={"Cache-Control": "no-store"})
+    return FileResponse(target)
+
+
+@app.post("/api/visual/gates/representative")
+def approve_visual_representative(payload: VisualRepresentativeApprovalRequest) -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        plan = approve_representative_scene(plan_path, payload.cue_id)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not approve the representative scene: {exc}") from exc
+    state.visual_plan = plan
+    return visual_plan_response(plan_path, plan)
+
+
+@app.post("/api/visual/gates/full-review")
+def approve_visual_full_review() -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        plan = approve_full_review(plan_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not approve the full review: {exc}") from exc
+    state.visual_plan = plan
+    return visual_plan_response(plan_path, plan)
+
+
+@app.post("/api/visual/gates/reopen")
+def verify_visual_delivery_reopened(payload: VisualReopenVerificationRequest) -> dict:
+    plan_path, _plan = _require_visual_plan()
+    try:
+        plan = verify_delivered_revision_reopened(plan_path, payload.revision_number, payload.plan_hash)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not verify the reopened delivery: {exc}") from exc
+    state.visual_plan = plan
+    return visual_plan_response(plan_path, plan)
+
+
+@app.get("/api/visual/assets/{asset_id}")
+def visual_asset(asset_id: str, request: Request, range: str | None = Header(default=None)) -> Response:
+    plan_path, plan = _require_visual_plan()
+    asset = next((item for item in plan.get("assets", []) if item.get("id") == asset_id), None)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Visual asset not found.")
+    root = find_visual_root(plan_path)
+    path = resolve_project_path(root, asset["path"])
+    return _range_response(path, range)
+
+
+@app.post("/api/visual/render")
+def start_visual_render(payload: VisualRenderRequest) -> dict:
+    plan_path, plan = _require_visual_plan()
+    duration = float(plan["composition"]["durationSec"])
+    if payload.start_sec is not None and payload.start_sec < 0:
+        raise HTTPException(status_code=400, detail="Render start must be zero or greater.")
+    if payload.end_sec is not None and payload.end_sec > duration + 0.01:
+        raise HTTPException(status_code=400, detail="Render end is beyond the visual plan duration.")
+    if payload.start_sec is not None and payload.end_sec is not None and payload.end_sec <= payload.start_sec:
+        raise HTTPException(status_code=400, detail="Render end must be after render start.")
+    if payload.quality not in {"draft", "standard", "high"}:
+        raise HTTPException(status_code=400, detail="Unknown visual render quality.")
+
+    purpose = payload.purpose or ("range" if payload.start_sec is not None or payload.end_sec is not None else "review")
+    if purpose not in {"range", "review", "final"}:
+        raise HTTPException(status_code=400, detail="Unknown visual render purpose.")
+    if purpose == "range" and payload.start_sec is None and payload.end_sec is None:
+        raise HTTPException(status_code=400, detail="Range rendering needs a start or end time.")
+    gates = visual_production_gate_report(plan_path, plan)
+    if purpose == "review" and not gates["canRenderReview"]:
+        raise HTTPException(status_code=400, detail="Review render blocked: " + " ".join(gates["messages"]))
+    if purpose == "final" and not gates["canDeliver"]:
+        raise HTTPException(status_code=400, detail="Final delivery blocked: " + " ".join(gates["messages"]))
+
+    with state.visual_render_start_lock:
+        active = next(
+            (
+                job for job in state.visual_render_jobs.values()
+                if job.plan_path == plan_path.resolve() and job.status == "running"
+            ),
+            None,
+        )
+        if active is not None:
+            return {"job_id": active.job_id, "reused": True}
+
+        job_id = uuid.uuid4().hex
+        job = VisualRenderJob(job_id, plan_path, purpose)
+        state.visual_render_jobs[job_id] = job
+        if _active_video_project() is not None:
+            if purpose == "range":
+                output = _video_project_stage_path("visualPreviews") / f"visual-range-{job_id[:8]}.mp4"
+            elif purpose == "review":
+                output = _video_project_stage_path("visualPreviews") / f"visual-review-{job_id[:8]}.mp4"
+            else:
+                output = _video_project_stage_path("finalVideo")
+        else:
+            root = find_visual_root(plan_path)
+            output = root / "renders" / f"visual-{purpose}-{job_id[:8]}.mp4"
+        thread = threading.Thread(
+            target=_run_visual_render_job,
+            args=(job, plan_path, output, payload, purpose),
+            daemon=True,
+        )
+        thread.start()
+        return {"job_id": job_id, "reused": False}
+
+
+def _run_visual_render_job(job: VisualRenderJob, plan_path: Path, output: Path, payload: VisualRenderRequest, purpose: str) -> None:
+    try:
+        rendered = render_visual_plan(
+            plan_path,
+            output,
+            start_sec=payload.start_sec,
+            end_sec=payload.end_sec,
+            quality=payload.quality,
+            purpose=purpose,
+            progress=job.update,
+        )
+        job.complete(rendered)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+        job.fail(str(exc))
+
+
+@app.get("/api/visual/render/jobs/{job_id}")
+def visual_render_job(job_id: str) -> dict:
+    job = state.visual_render_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Visual render job not found.")
+    return job.snapshot(job_id)
+
+
+@app.get("/api/visual/render/active")
+def active_visual_render_job() -> dict:
+    plan_path, _plan = _require_visual_plan()
+    active = next(
+        (
+            job for job in reversed(list(state.visual_render_jobs.values()))
+            if job.plan_path == plan_path.resolve() and job.status == "running"
+        ),
+        None,
+    )
+    if active is not None:
+        return {"job": active.snapshot(active.job_id)}
+
+    state_path = plan_path.parent / "render-job.json"
+    if not state_path.is_file():
+        return {"job": None}
+    try:
+        persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"job": None}
+    if persisted.get("status") == "running":
+        persisted.update({
+            "status": "failed",
+            "stage": "failed",
+            "error": "The application restarted before this export completed. Start Export final again.",
+            "message": "The application restarted before this export completed. Start Export final again.",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        try:
+            state_path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+    return {"job": persisted}
+
+
+@app.get("/api/visual/render/jobs/{job_id}/video")
+def visual_render_video(job_id: str, range: str | None = Header(default=None)) -> Response:
+    job = state.visual_render_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Visual render job not found.")
+    snapshot = job.snapshot(job_id)
+    if snapshot["status"] != "complete" or not snapshot["output_path"]:
+        raise HTTPException(status_code=409, detail="Visual render is not complete.")
+    return _range_response(Path(snapshot["output_path"]), range)
 
 
 @app.get("/api/caption/options")
@@ -742,7 +1887,7 @@ def caption_options() -> dict:
         "built_in_styles": [name for name in styles if is_built_in_style(name)],
         "default_style": asdict(default_style()),
         "source": caption_source,
-        "output_folder": str(exports_dir()),
+        "output_folder": str(_video_project_output_folder()),
     }
 
 
@@ -752,7 +1897,7 @@ def choose_caption_video() -> dict:
     if path is None:
         raise HTTPException(status_code=400, detail="No video file selected.")
     state.caption_video_path = path
-    return {"source": str(path), "output_folder": str(exports_dir())}
+    return {"source": str(path), "output_folder": str(_video_project_output_folder())}
 
 
 @app.post("/api/caption/choose-output-folder")
@@ -768,7 +1913,7 @@ def audio_options() -> dict:
     return {
         "presets": preset_options(),
         "source": str(state.audio_video_path) if state.audio_video_path else None,
-        "output_folder": str(exports_dir()),
+        "output_folder": str(_video_project_output_folder()),
         "defaults": {
             "preset_id": "gentle",
             "target_i": -14.0,
@@ -789,7 +1934,7 @@ def choose_audio_video() -> dict:
     state.audio_hotspots = None
     state.audio_hotspots_source = None
     _clear_audio_preview()
-    return {"source": str(path), "output_folder": str(exports_dir())}
+    return {"source": str(path), "output_folder": str(_video_project_output_folder())}
 
 
 @app.post("/api/audio/choose-output-folder")
@@ -850,7 +1995,7 @@ def normalize_audio(payload: AudioNormalizeRequest) -> dict:
     measurement = state.audio_analysis if state.audio_analysis_key == key else None
     if measurement is None:
         raise HTTPException(status_code=400, detail="Analyze this video with the selected preset before exporting.")
-    output_root = Path(payload.output_folder).expanduser().resolve() if payload.output_folder else exports_dir()
+    output_root = Path(payload.output_folder).expanduser().resolve() if payload.output_folder else _video_project_output_folder()
     output_root.mkdir(parents=True, exist_ok=True)
     output_path = output_root / f"{source.stem}_normalized.mp4"
     try:
@@ -909,7 +2054,7 @@ def generate_audio_preview(payload: AudioPreviewRequest) -> dict:
 
     _clear_audio_preview()
     preview_id = uuid.uuid4().hex
-    preview_root = temp_dir()
+    preview_root = _video_project_stage_path("audioPreviews") or temp_dir()
     original_path = preview_root / f"audio_preview_{preview_id}_original.mp4"
     corrected_path = preview_root / f"audio_preview_{preview_id}_corrected.mp4"
     try:
@@ -983,7 +2128,7 @@ def generate_caption_video(payload: CaptionGenerateRequest) -> dict:
     if payload.compute_label not in COMPUTE_OPTIONS:
         raise HTTPException(status_code=400, detail=f"Unknown compute device: {payload.compute_label}")
 
-    output_root = Path(payload.output_folder).expanduser().resolve() if payload.output_folder else exports_dir()
+    output_root = Path(payload.output_folder).expanduser().resolve() if payload.output_folder else _video_project_output_folder()
     output_root.mkdir(parents=True, exist_ok=True)
     output_path = output_root / f"{source.stem}_captioned.mp4"
 
@@ -1273,9 +2418,132 @@ def _rendered_preview_splices(plan: SplicePlan, project: TranscriptProject) -> l
     ]
 
 
+def _rendered_preview_segments(plan: SplicePlan, project: TranscriptProject) -> list[dict]:
+    elapsed_frames = 0
+    segments: list[dict] = []
+    for kept_range in plan.kept_ranges:
+        frame_count = kept_range.adjusted_end_frame - kept_range.adjusted_start_frame + 1
+        segments.append(
+            {
+                "source_start_frame": kept_range.adjusted_start_frame,
+                "source_end_frame": kept_range.adjusted_end_frame,
+                "preview_start_seconds": round(elapsed_frames / project.fps, 6),
+                "preview_end_seconds": round((elapsed_frames + frame_count) / project.fps, 6),
+            }
+        )
+        elapsed_frames += frame_count
+    return segments
+
+
 def _save_current_project_if_loaded(project: TranscriptProject) -> None:
     if state.project_path is not None:
         save_editor_project(state.project_path, project, state.edits)
+        _touch_video_project()
+
+
+def _touch_video_project() -> None:
+    active = _active_video_project()
+    if active is None:
+        return
+    state.video_project = save_video_project(active[0], active[1])
+
+
+def _annotate_generated_project(
+    project: TranscriptProject,
+    source: Path,
+    model_label: str,
+    compute_label: str,
+) -> TranscriptProject:
+    sequence_revision = (
+        int(state.video_project.get("sequenceRevision") or 0)
+        if state.video_project is not None
+        else None
+    )
+    generation = build_generation_metadata(
+        source,
+        model_label=model_label,
+        model_id=MODEL_OPTIONS[model_label],
+        compute_label=compute_label,
+        compute=COMPUTE_OPTIONS[compute_label],
+        sequence_revision=sequence_revision,
+    )
+    annotated = replace(project, generation=generation)
+    repeats = detect_repeated_word_ids(annotated.words)
+    return replace(annotated, generation=with_initial_repeat_suggestions(annotated, repeats))
+
+
+def _store_generated_project(project: TranscriptProject, source: Path) -> None:
+    state.project = project
+    state.edits = EditDecisionList()
+    if state.project_path is not None:
+        save_editor_project(state.project_path, project, state.edits)
+        if state.video_project is not None:
+            mark_artifact_current(state.video_project, "transcriptRevision")
+            _save_original_transcript(project)
+        _touch_video_project()
+    state.caption_video_path = source
+
+
+def _save_original_transcript(project: TranscriptProject) -> None:
+    if state.video_project is None:
+        return
+    destination = _video_project_stage_path("originalTranscript")
+    if destination is None:
+        return
+    if destination.exists() and not artifact_current(state.video_project, "originalTranscriptRevision"):
+        revision = int(state.video_project.get("sequenceRevision") or 0)
+        state.video_project["paths"]["originalTranscript"] = f"transcripts/original-generated-r{revision}.vcg.json"
+        destination = _video_project_stage_path("originalTranscript")
+    if destination is not None and not destination.exists():
+        save_editor_project(destination, project, EditDecisionList())
+    mark_artifact_current(state.video_project, "originalTranscriptRevision")
+
+
+def _save_final_transcript(project: TranscriptProject, plan: SplicePlan, locked_cut: Path) -> None:
+    destination = _video_project_stage_path("finalTranscript")
+    if destination is None:
+        return
+    reviewed_destination = _video_project_stage_path("finalReviewedProject")
+    analysis_destination = _video_project_stage_path("editAnalysis")
+    if reviewed_destination is not None:
+        save_editor_project(reviewed_destination, project, state.edits)
+    if analysis_destination is not None:
+        analysis_destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = analysis_destination.with_suffix(f"{analysis_destination.suffix}.tmp")
+        temporary.write_text(
+            json.dumps(build_edit_analysis(project, state.edits, plan), indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(analysis_destination)
+    remapped = replace(remap_transcript(project, plan.kept_ranges), source=str(locked_cut.resolve()))
+    save_editor_project(destination, remapped, EditDecisionList())
+    if state.video_project is not None:
+        mark_artifact_current(state.video_project, "lockedCutRevision")
+        mark_artifact_current(state.video_project, "finalReviewedProjectRevision")
+        mark_artifact_current(state.video_project, "finalTranscriptRevision")
+        mark_artifact_current(state.video_project, "editAnalysisRevision")
+    _touch_video_project()
+
+
+def _record_audio_delivery(
+    *,
+    normalized: bool,
+    output_path: Path,
+    preset_id: str | None,
+    target_i: float | None,
+    measurement: LoudnessMeasurement | None,
+) -> None:
+    if state.video_project is None:
+        return
+    state.video_project.setdefault("artifacts", {})["audioDelivery"] = {
+        "normalizationApplied": normalized,
+        "presetId": preset_id,
+        "targetIntegratedLufs": target_i,
+        "measuredIntegratedLufs": measurement.input_i if measurement is not None else None,
+        "measurementPoint": "pre-normalization-source" if measurement is not None else "not-measured",
+        "outputPath": str(output_path.resolve()),
+        "recordedAt": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _project_response(
@@ -1285,6 +2553,7 @@ def _project_response(
 ) -> dict:
     project = _require_project()
     plan = generate_splices(project, state.edits)
+    deleted_word_ids = _deleted_word_ids(project)
     deleted_silence_ids = _deleted_silence_ids()
     dead_space_candidate_count = sum(
         1
@@ -1300,14 +2569,33 @@ def _project_response(
         and (silence.end_frame - silence.start_frame + 1) / project.fps
         >= state.edits.settings.dead_space_min_seconds
     )
+    final_range = plan.kept_ranges[-1] if plan.kept_ranges else None
+    final_cut = None
+    if final_range is not None:
+        final_word_index = project.word_index(final_range.end_word_id)
+        maximum_out_frame = (
+            project.words[final_word_index + 1].start_frame - 1
+            if final_word_index + 1 < len(project.words)
+            else None
+        )
+        final_cut = {
+            "out_frame": final_range.adjusted_end_frame,
+            "suggested_out_frame": final_range.suggested_end_frame,
+            "adjustment": final_range.adjusted_end_frame - final_range.suggested_end_frame,
+            "minimum_out_frame": final_range.adjusted_start_frame,
+            "maximum_out_frame": maximum_out_frame,
+            "custom": state.edits.final_out_frame is not None,
+        }
     return {
         "project_path": str(state.project_path) if state.project_path else None,
+        "video_project": video_project_response(state.video_project_path, state.video_project) if _active_video_project() else None,
         "project": _project_dict(project),
         "tokens": [
             asdict(token)
             for token in transcript_tokens(project, state.edits.settings.dead_space_min_seconds)
         ],
-        "deleted_word_ids": sorted(_deleted_word_ids(project)),
+        "deleted_word_ids": sorted(deleted_word_ids),
+        "repeated_word_ids": sorted(detect_repeated_word_ids(project.words, deleted_word_ids)),
         "deleted_silence_ids": sorted(deleted_silence_ids),
         "settings": asdict(state.edits.settings),
         "dead_space_candidate_count": dead_space_candidate_count,
@@ -1316,6 +2604,7 @@ def _project_response(
         "pause_analysis_summary": pause_analysis_summary,
         "splices": [_splice_dict(splice, project.fps) for splice in plan.splices],
         "kept_ranges": [asdict(item) for item in plan.kept_ranges],
+        "final_cut": final_cut,
     }
 
 
@@ -1325,17 +2614,24 @@ def _project_dict(project: TranscriptProject) -> dict:
         "fps": project.fps,
         "words": [asdict(word) for word in project.words],
         "silence_ranges": [asdict(silence) for silence in project.silence_ranges],
+        "generation": project.generation,
     }
 
 
 def _measured_pause_out_frame(project: TranscriptProject, left_word_id: str, right_word_id: str) -> int | None:
     left_word = project.word_by_id(left_word_id)
     right_word = project.word_by_id(right_word_id)
+    maximum_out_frame = min(
+        right_word.start_frame - 1,
+        round((left_word.end + MAX_EXTENSION_SECONDS) * project.fps),
+    )
     for silence in project.silence_ranges:
         if (
             silence.audio_analyzed
             and silence.start_frame == left_word.end_frame + 1
             and silence.end_frame == right_word.start_frame - 1
+            and silence.measured_start_frame is not None
+            and left_word.end_frame < silence.measured_start_frame <= maximum_out_frame
         ):
             return silence.measured_start_frame
     return None
@@ -1403,8 +2699,8 @@ def _range_response(path: Path, range_header: str | None) -> Response:
                 remaining -= len(chunk)
                 yield chunk
 
-    return Response(
-        content=b"".join(iterator()),
+    return StreamingResponse(
+        iterator(),
         status_code=206,
         media_type=media_type,
         headers={
@@ -1416,16 +2712,41 @@ def _range_response(path: Path, range_header: str | None) -> Response:
 
 
 def _parse_range(range_header: str, file_size: int) -> tuple[int, int]:
+    def unsatisfiable(detail: str) -> HTTPException:
+        return HTTPException(
+            status_code=416,
+            detail=detail,
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
+
+    if file_size <= 0:
+        raise unsatisfiable("Requested range is not satisfiable.")
     try:
         units, value = range_header.split("=", 1)
     except ValueError as exc:
-        raise HTTPException(status_code=416, detail="Invalid range header.") from exc
+        raise unsatisfiable("Invalid range header.") from exc
     if units.strip().lower() != "bytes":
-        raise HTTPException(status_code=416, detail="Only byte ranges are supported.")
-    start_text, _, end_text = value.partition("-")
-    start = int(start_text) if start_text else 0
-    end = int(end_text) if end_text else file_size - 1
+        raise unsatisfiable("Only byte ranges are supported.")
+    if "," in value:
+        raise unsatisfiable("Multiple byte ranges are not supported.")
+
+    start_text, separator, end_text = value.strip().partition("-")
+    if not separator or (not start_text and not end_text):
+        raise unsatisfiable("Invalid range header.")
+    try:
+        if start_text:
+            start = int(start_text)
+            end = int(end_text) if end_text else file_size - 1
+        else:
+            suffix_length = int(end_text)
+            if suffix_length <= 0:
+                raise unsatisfiable("Requested range is not satisfiable.")
+            start = max(0, file_size - suffix_length)
+            end = file_size - 1
+    except ValueError as exc:
+        raise unsatisfiable("Invalid range header.") from exc
+
     end = min(end, file_size - 1)
     if start < 0 or end < start or start >= file_size:
-        raise HTTPException(status_code=416, detail="Requested range is not satisfiable.")
+        raise unsatisfiable("Requested range is not satisfiable.")
     return start, end

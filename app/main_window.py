@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 
 from app.core.ffmpeg_locator import find_ffmpeg
 from app.core.process_utils import hidden_subprocess_flags
-from app.core.settings import COMPUTE_OPTIONS, MODEL_OPTIONS, PRESETS, CaptionPreset, CaptionStyle, exports_dir, temp_dir
+from app.core.settings import COMPUTE_OPTIONS, DEFAULT_COMPUTE_LABEL, DEFAULT_MODEL_LABEL, MODEL_OPTIONS, PRESETS, CaptionPreset, CaptionStyle, exports_dir, temp_dir
 from app.core.style_library import delete_user_style, is_built_in_style, load_style_library, save_user_style
 from app.transcript_editor import TranscriptEditor
 from app.worker import CaptionWorker, JobSettings
@@ -573,11 +573,11 @@ class MainWindow(QMainWindow):
 
         self.model_combo = QComboBox()
         self.model_combo.addItems(MODEL_OPTIONS.keys())
-        self.model_combo.setCurrentText("Base - balanced")
+        self.model_combo.setCurrentText(DEFAULT_MODEL_LABEL)
 
         self.compute_combo = QComboBox()
         self.compute_combo.addItems(COMPUTE_OPTIONS.keys())
-        self.compute_combo.setCurrentText("CPU")
+        self.compute_combo.setCurrentText(DEFAULT_COMPUTE_LABEL)
 
         form.addRow("Caption preset", self.preset_combo)
         form.addRow("Whisper model", self.model_combo)

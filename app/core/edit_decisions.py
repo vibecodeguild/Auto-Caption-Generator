@@ -18,12 +18,23 @@ class DeletedSilenceRange:
 
 
 @dataclass
+class ManualCut:
+    id: str
+    suggested_out_frame: int
+    suggested_in_frame: int
+    out_frame: int
+    in_frame: int
+    reviewed: bool = False
+
+
+@dataclass
 class SpliceAdjustment:
     anchor_key: str
     left_out_delta: int = 0
     right_in_delta: int = 0
     reviewed: bool = False
     assisted_left_out_frame: int | None = None
+    assisted_right_in_frame: int | None = None
 
 
 @dataclass
@@ -35,7 +46,9 @@ class EditorSettings:
 class EditDecisionList:
     deleted_word_ranges: list[DeletedWordRange] = field(default_factory=list)
     deleted_silence_ranges: list[DeletedSilenceRange] = field(default_factory=list)
+    manual_cuts: list[ManualCut] = field(default_factory=list)
     splice_adjustments: dict[str, SpliceAdjustment] = field(default_factory=dict)
+    final_out_frame: int | None = None
     settings: EditorSettings = field(default_factory=EditorSettings)
 
     def delete_words(self, decision_id: str, start_word_id: str, end_word_id: str, reason: str) -> None:
@@ -83,6 +96,40 @@ class EditDecisionList:
             return
         self.delete_silence(f"delete_{silence_id}", silence_id)
 
+    def add_manual_cut(self, cut_id: str, out_frame: int, in_frame: int) -> None:
+        self.manual_cuts.append(
+            ManualCut(
+                id=cut_id,
+                suggested_out_frame=out_frame,
+                suggested_in_frame=in_frame,
+                out_frame=out_frame,
+                in_frame=in_frame,
+            )
+        )
+
+    def adjust_manual_cut(self, cut_id: str, *, out_delta: int = 0, in_delta: int = 0) -> None:
+        cut = self.manual_cut_by_id(cut_id)
+        cut.out_frame += out_delta
+        cut.in_frame += in_delta
+
+    def review_manual_cut(self, cut_id: str, reviewed: bool) -> None:
+        self.manual_cut_by_id(cut_id).reviewed = reviewed
+
+    def remove_manual_cut(self, cut_id: str) -> None:
+        before = len(self.manual_cuts)
+        self.manual_cuts = [cut for cut in self.manual_cuts if cut.id != cut_id]
+        if len(self.manual_cuts) == before:
+            raise KeyError(f"Unknown manual cut: {cut_id}")
+
+    def manual_cut_by_id(self, cut_id: str) -> ManualCut:
+        cut = next((item for item in self.manual_cuts if item.id == cut_id), None)
+        if cut is None:
+            raise KeyError(f"Unknown manual cut: {cut_id}")
+        return cut
+
+    def set_final_out_frame(self, frame: int | None) -> None:
+        self.final_out_frame = frame
+
     def adjust_splice(
         self,
         anchor_key: str,
@@ -106,6 +153,13 @@ class EditDecisionList:
             adjustment = SpliceAdjustment(anchor_key)
             self.splice_adjustments[anchor_key] = adjustment
         adjustment.assisted_left_out_frame = frame
+
+    def set_assisted_in_frame(self, anchor_key: str, frame: int | None) -> None:
+        adjustment = self.splice_adjustments.get(anchor_key)
+        if adjustment is None:
+            adjustment = SpliceAdjustment(anchor_key)
+            self.splice_adjustments[anchor_key] = adjustment
+        adjustment.assisted_right_in_frame = frame
 
 
 def _word_number(word_id: str) -> int:

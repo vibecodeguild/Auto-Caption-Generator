@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +17,7 @@ WEB_URL = "http://127.0.0.1:3000"
 @dataclass
 class ManagedProcess:
     name: str
-    process: subprocess.Popen[str] | None
+    process: subprocess.Popen[bytes] | None
     reused: bool = False
 
 
@@ -73,15 +72,12 @@ def main() -> int:
 
 
 def _start_process(name: str, command: list[str]) -> ManagedProcess:
-    process = subprocess.Popen(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    threading.Thread(target=_pipe_output, args=(name, process), daemon=True).start()
+    # Inherit the VS Code terminal streams. Uvicorn's Windows reload supervisor
+    # starts its own child process and is not reliable behind a daemon-threaded
+    # output pipe; inheriting the console also ensures startup errors are never
+    # lost when a child exits quickly.
+    process = subprocess.Popen(command, cwd=ROOT)
     return ManagedProcess(name, process)
-
-
-def _pipe_output(name: str, process: subprocess.Popen[str]) -> None:
-    assert process.stdout is not None
-    for line in process.stdout:
-        print(f"[{name}] {line}", end="")
 
 
 def _terminate_all(processes: list[ManagedProcess]) -> None:
