@@ -8,13 +8,19 @@ from app.core.transcript_model import TranscriptProject, TranscriptWord
 
 def remap_transcript(project: TranscriptProject, kept_ranges: list[KeptRange]) -> TranscriptProject:
     output_words: list[TranscriptWord] = []
+    emitted_word_ids: set[str] = set()
     output_cursor = 0
     for kept_range in kept_ranges:
-        range_words = _words_in_range(project, kept_range)
         source_start = kept_range.adjusted_start_frame
-        for word in range_words:
-            start_frame = output_cursor + max(0, word.start_frame - source_start)
-            end_frame = output_cursor + max(0, word.end_frame - source_start)
+        source_end = kept_range.adjusted_end_frame
+        for word in project.words:
+            midpoint = (word.start_frame + word.end_frame) // 2
+            if word.id in emitted_word_ids or not source_start <= midpoint <= source_end:
+                continue
+            clipped_start = max(source_start, word.start_frame)
+            clipped_end = min(source_end, word.end_frame)
+            start_frame = output_cursor + clipped_start - source_start
+            end_frame = output_cursor + clipped_end - source_start
             output_words.append(
                 replace(
                     word,
@@ -24,6 +30,7 @@ def remap_transcript(project: TranscriptProject, kept_ranges: list[KeptRange]) -
                     end=round(end_frame / project.fps, 3),
                 )
             )
+            emitted_word_ids.add(word.id)
         output_cursor += max(0, kept_range.adjusted_end_frame - kept_range.adjusted_start_frame + 1)
 
     return TranscriptProject(
@@ -31,12 +38,5 @@ def remap_transcript(project: TranscriptProject, kept_ranges: list[KeptRange]) -
         fps=project.fps,
         words=output_words,
         silence_ranges=[],
+        generation=project.generation,
     )
-
-
-def _words_in_range(project: TranscriptProject, kept_range: KeptRange) -> list[TranscriptWord]:
-    start = project.word_index(kept_range.start_word_id)
-    end = project.word_index(kept_range.end_word_id)
-    if end < start:
-        start, end = end, start
-    return project.words[start : end + 1]

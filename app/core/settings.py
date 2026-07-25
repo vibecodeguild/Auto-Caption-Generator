@@ -14,10 +14,12 @@ MODEL_OPTIONS = {
     "Medium - high accuracy": "medium.en",
     "Large v3 - best accuracy": "large-v3",
 }
+DEFAULT_MODEL_LABEL = "Large v3 - best accuracy"
 COMPUTE_OPTIONS = {
     "CPU": {"device": "cpu", "compute_type": "int8"},
     "NVIDIA GPU": {"device": "cuda", "compute_type": "float16"},
 }
+DEFAULT_COMPUTE_LABEL = "NVIDIA GPU"
 
 
 @dataclass(frozen=True)

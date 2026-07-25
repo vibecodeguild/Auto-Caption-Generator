@@ -18,6 +18,7 @@ dist-*/
 *.log
 screenshots/
 internal/
+visual-production/
 
 app/temp/*
 !app/temp/.gitkeep
@@ -37,7 +38,20 @@ models/
 *.avi
 *.webm
 *.wav
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.aiff
 *.ass
+*.srt
+*.vtt
+*.prproj
+*.aep
+*.aepx
+*.mogrt
+*.drp
+*.vcg-private
 
 .env
 .env.*

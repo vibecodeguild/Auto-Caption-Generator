@@ -49,3 +49,16 @@ def test_uses_adjusted_range_edges_when_remapping() -> None:
 
     assert remapped.words[-1].start_frame == 34
     assert remapped.words[-1].end_frame == 49
+
+
+def test_manual_split_does_not_duplicate_a_word_and_clips_it_to_the_kept_side() -> None:
+    kept_ranges = [
+        KeptRange("keep_left", "w1", "w2", 0, 27, 0, 22),
+        KeptRange("keep_right", "w2", "w4", 15, 78, 26, 78),
+    ]
+
+    remapped = remap_transcript(_project(), kept_ranges)
+
+    fast = [word for word in remapped.words if word.id == "w2"]
+    assert len(fast) == 1
+    assert (fast[0].start_frame, fast[0].end_frame) == (15, 22)

@@ -4,9 +4,11 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  ClipboardCopy,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   FolderOpen,
   Gauge,
   Grid3X3,
@@ -22,10 +24,12 @@ import {
   VolumeX,
   WandSparkles,
   X,
+  Trash2,
 } from "lucide-react";
-import type { Dispatch, MutableRefObject, ReactNode, RefObject, SetStateAction } from "react";
+import type { Dispatch, KeyboardEvent as ReactKeyboardEvent, MutableRefObject, PointerEvent as ReactPointerEvent, ReactNode, RefObject, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HexColorInput, HexColorPicker } from "react-colorful";
+import VisualProductionWorkspace from "./visual-production";
 import {
   API_BASE,
   type AudioAnalysisResponse,
@@ -41,6 +45,10 @@ import {
   type ProjectDocumentResponse,
   type RenderedCutPreviewResponse,
   type TranscriptionJobStatus,
+  type VideoProjectResponse,
+  addManualCut,
+  addVideoProjectClips,
+  adjustManualCut,
   adjustSplice,
   analyzeBoundaries,
   analyzePauses,
@@ -55,6 +63,7 @@ import {
   chooseAudioOutputFolder,
   chooseAudioVideo,
   chooseTranscriptVideo,
+  createVideoProject,
   deleteDeadSpace,
   deleteCaptionStyle,
   deleteTokens,
@@ -64,18 +73,31 @@ import {
   getProjectDocument,
   getTranscriptionJob,
   getCurrentProject,
+  getCurrentVideoProject,
+  getVisualPlanPrompt,
   normalizeVideoAudio,
   openProjectDialog,
+  openVideoProject,
+  removeVideoProjectClip,
+  removeManualCut,
+  reorderVideoProjectClips,
   prepareCaptionPreview,
   restoreTokens,
   renderedCutPreviewUrl,
   renderCutPreview,
   reviewSplice,
   saveCaptionStyle,
+  saveProject,
+  setFinalOutFrame,
   sourceVideoUrl,
   startTranscription,
   updateEditorSettings,
 } from "../lib/api";
+import {
+  beginPreviewRequest,
+  isCurrentPreviewRequest,
+  playMediaAt,
+} from "../lib/media-preview";
 
 type PreviewState = {
   segments: [number, number][];
@@ -83,7 +105,10 @@ type PreviewState = {
   loop: boolean;
 };
 
-type ActiveTab = "transcript" | "caption" | "audio";
+type ActiveTab = "transcript" | "caption" | "audio" | "visual";
+
+const DEFAULT_WHISPER_MODEL = "Large v3 - best accuracy";
+const DEFAULT_WHISPER_COMPUTE = "NVIDIA GPU";
 
 type ExportProgressState = {
   status: "running" | "complete" | "failed";
@@ -112,6 +137,9 @@ type WindowWithSaveFilePicker = Window & {
 export default function Home() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("transcript");
   const [project, setProject] = useState<EditorProjectResponse | null>(null);
+  const [videoProject, setVideoProject] = useState<VideoProjectResponse | null>(null);
+  const [visualPrompt, setVisualPrompt] = useState<string | null>(null);
+  const [showSourceSequence, setShowSourceSequence] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [anchorToken, setAnchorToken] = useState<string | null>(null);
   const [activeSplice, setActiveSplice] = useState<string | null>(null);
@@ -127,6 +155,7 @@ export default function Home() {
   const previewRef = useRef<HTMLVideoElement | null>(null);
   const renderedCutVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewState = useRef<PreviewState>({ segments: [], index: 0, loop: false });
+  const previewRequestRef = useRef(0);
   const previewFrameRef = useRef<number | null>(null);
   const transcriptScrollRef = useRef<HTMLDivElement | null>(null);
   const spliceMarkerRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -137,8 +166,8 @@ export default function Home() {
   const [captionStyle, setCaptionStyle] = useState<CaptionStylePayload | null>(null);
   const [captionPreset, setCaptionPreset] = useState<CaptionPresetPayload | null>(null);
   const [captionStyleName, setCaptionStyleName] = useState("Magenta Pop");
-  const [captionModel, setCaptionModel] = useState("Base - balanced");
-  const [captionCompute, setCaptionCompute] = useState("CPU");
+  const [captionModel, setCaptionModel] = useState(DEFAULT_WHISPER_MODEL);
+  const [captionCompute, setCaptionCompute] = useState(DEFAULT_WHISPER_COMPUTE);
   const [captionPreview, setCaptionPreview] = useState<CaptionPreviewResponse | null>(null);
   const [transcriptSource, setTranscriptSource] = useState<string | null>(null);
   const [transcriptionProgress, setTranscriptionProgress] = useState<TranscriptionJobStatus | null>(null);
@@ -158,6 +187,7 @@ export default function Home() {
   const [audioStatus, setAudioStatus] = useState("Choose a video, then analyze its audio.");
 
   const deletedWordIds = useMemo(() => new Set(project?.deleted_word_ids ?? []), [project]);
+  const repeatedWordIds = useMemo(() => new Set(project?.repeated_word_ids ?? []), [project]);
   const deletedSilenceIds = useMemo(() => new Set(project?.deleted_silence_ids ?? []), [project]);
   const tokenIndex = useMemo(() => new Map(project?.tokens.map((token, index) => [token.id, index]) ?? []), [project]);
   const spliceByRightWord = useMemo(
@@ -181,12 +211,28 @@ export default function Home() {
 
   const applyProject = useCallback((data: EditorProjectResponse) => {
     setProject(data);
+    if (data.video_project) setVideoProject(data.video_project);
     setActiveSplice((current) => {
       if (current && data.splices.some((splice) => splice.anchor_key === current)) return current;
       return data.splices[0]?.anchor_key ?? null;
     });
     setStatus(data.project_path ? `Opened ${data.project_path}` : "Project loaded");
   }, []);
+
+  const applyVideoProject = useCallback((data: { videoProject: VideoProjectResponse; editorProject: EditorProjectResponse | null }) => {
+    setVideoProject(data.videoProject);
+    if (data.editorProject) {
+      applyProject(data.editorProject);
+      setTranscriptSource(data.editorProject.project.source);
+    } else {
+      setProject(null);
+      setTranscriptSource(data.videoProject.resolvedPaths.sourceVideo ?? null);
+      setSelected([]);
+      setActiveSplice(null);
+      setActiveWorkflowStage(1);
+    }
+    setStatus(`Opened private project: ${data.videoProject.name}`);
+  }, [applyProject]);
 
   const updatePreviewBox = useCallback((aspect = previewAspect) => {
     const panelWidth = previewPanelRef.current?.clientWidth ?? 420;
@@ -220,6 +266,23 @@ export default function Home() {
     };
   }, [applyProject]);
 
+  useEffect(() => {
+    getCurrentVideoProject().then(setVideoProject).catch(() => {
+      // A legacy transcript project may be open without a parent video project.
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!videoProject) return;
+    const source = videoProject.preferredSource;
+    const output = videoProject.resolvedPaths.finalVideo?.replace(/[\\/][^\\/]+$/, "") ?? "";
+    setTranscriptSource(videoProject.resolvedPaths.sourceVideo ?? null);
+    setCaptionSource(source ?? null);
+    setAudioSource(source ?? null);
+    setCaptionOutputFolder(output);
+    setAudioOutputFolder(output);
+  }, [videoProject]);
+
   const applyCaptionOptions = useCallback((data: CaptionOptionsResponse) => {
     setCaptionOptionsData(data);
     setCaptionSource(data.source);
@@ -229,10 +292,10 @@ export default function Home() {
     setCaptionStyle(data.styles[styleName] ?? data.default_style);
     setCaptionPreset(data.presets.Creator ?? Object.values(data.presets)[0] ?? null);
     if (!data.models[captionModel]) {
-      setCaptionModel(Object.keys(data.models)[0] ?? "Base - balanced");
+      setCaptionModel(data.models[DEFAULT_WHISPER_MODEL] ? DEFAULT_WHISPER_MODEL : (Object.keys(data.models)[0] ?? DEFAULT_WHISPER_MODEL));
     }
     if (!data.compute[captionCompute]) {
-      setCaptionCompute(Object.keys(data.compute)[0] ?? "CPU");
+      setCaptionCompute(data.compute[DEFAULT_WHISPER_COMPUTE] ? DEFAULT_WHISPER_COMPUTE : (Object.keys(data.compute)[0] ?? DEFAULT_WHISPER_COMPUTE));
     }
   }, [captionCompute, captionModel, captionStyleName]);
 
@@ -279,8 +342,10 @@ export default function Home() {
     try {
       const result = await operation();
       done?.(result);
+      return result;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
+      return undefined;
     } finally {
       setBusy(false);
     }
@@ -302,15 +367,69 @@ export default function Home() {
     void run(
       () => chooseTranscriptVideo(),
       (data) => {
+        setVideoProject(data.videoProject);
         setTranscriptSource(data.source);
         setProject(null);
         projectFileHandleRef.current = null;
         setSelected([]);
         setActiveSplice(null);
         setActiveWorkflowStage(1);
-        setStatus(`Selected ${data.source}`);
+        setStatus(`Created ${data.videoProject.name}. Source copied to ${data.source}`);
+        setShowSourceSequence(true);
       },
     );
+  };
+
+  const handleCreateVideoProject = () => {
+    void run(createVideoProject, (data) => {
+      applyVideoProject(data);
+      setShowSourceSequence(true);
+    });
+  };
+
+  const handleOpenVideoProject = () => {
+    void run(openVideoProject, applyVideoProject);
+  };
+
+  const handleCookVisualPlanPrompt = () => {
+    void run(getVisualPlanPrompt, ({ prompt }) => {
+      setVisualPrompt(prompt);
+      void navigator.clipboard.writeText(prompt).then(
+        () => setStatus("Cook Visual Plan prompt copied to the clipboard."),
+        () => setStatus("Prompt generated. Use Copy Prompt in the dialog."),
+      );
+    });
+  };
+
+  const handleAddSourceClips = () => {
+    void run(addVideoProjectClips, (data) => {
+      applyVideoProject(data);
+      setShowSourceSequence(true);
+      setStatus("Source sequence rebuilt. Generate a new transcript when the clip order is final.");
+    });
+  };
+
+  const handleMoveSourceClip = (clipId: string, direction: -1 | 1) => {
+    if (!videoProject) return;
+    const clips = [...(videoProject.manifest.sourceSequence ?? [])].sort((a, b) => a.order - b.order);
+    const index = clips.findIndex((clip) => clip.id === clipId);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= clips.length) return;
+    [clips[index], clips[target]] = [clips[target], clips[index]];
+    void run(() => reorderVideoProjectClips(clips.map((clip) => clip.id)), (data) => {
+      applyVideoProject(data);
+      setShowSourceSequence(true);
+      setStatus("Source sequence reordered. Previous transcript and downstream outputs are now stale.");
+    });
+  };
+
+  const handleRemoveSourceClip = (clipId: string) => {
+    if (!window.confirm("Remove this clip from the sequence? The original file remains private, but the transcript and downstream outputs must be regenerated.")) return;
+    void run(() => removeVideoProjectClip(clipId), (data) => {
+      applyVideoProject(data);
+      setShowSourceSequence(true);
+      setStatus("Clip removed and source sequence rebuilt. Generate a new transcript.");
+    });
   };
 
   const handleGenerateTranscript = () => {
@@ -358,6 +477,8 @@ export default function Home() {
       target_tp: audioTargetTp,
     })
       .then((result) => {
+        setCaptionSource(result.output_path);
+        setAudioSource(result.output_path);
         setStatus(`Exported ${result.output_path}`);
         setExportProgress({
           status: "complete",
@@ -551,11 +672,8 @@ export default function Home() {
 
   const handleSaveProject = () => {
     void run(
-      async () => {
-        const projectDocument = await getProjectDocument();
-        return saveProjectDocument(projectDocument, projectFileHandleRef);
-      },
-      (fileName) => setStatus(`Saved ${fileName}`),
+      saveProject,
+      ({ saved }) => setStatus(`Saved ${saved}`),
     );
   };
 
@@ -622,23 +740,14 @@ export default function Home() {
     }
   }, []);
 
-  const seekPreview = (video: HTMLVideoElement, time: number) =>
-    new Promise<void>((resolve) => {
-      if (Math.abs(video.currentTime - time) < 0.001) {
-        resolve();
-        return;
-      }
-      const done = () => {
-        video.removeEventListener("seeked", done);
-        resolve();
-      };
-      video.addEventListener("seeked", done, { once: true });
-      video.currentTime = time;
-    });
-
-  const startPreviewMonitor = useCallback(() => {
+  const startPreviewMonitor = useCallback((requestId: number) => {
+    if (!isCurrentPreviewRequest(previewRequestRef, requestId)) return;
     stopPreviewMonitor();
     const tick = () => {
+      if (!isCurrentPreviewRequest(previewRequestRef, requestId)) {
+        previewFrameRef.current = null;
+        return;
+      }
       const video = previewRef.current;
       const state = previewState.current;
       const segment = state.segments[state.index];
@@ -650,10 +759,18 @@ export default function Home() {
       if (video.currentTime >= segment[1] - frameGuardSeconds / 2) {
         if (state.index === 0 && state.segments[1]) {
           state.index = 1;
-          void seekPreview(video, state.segments[1][0]).then(() => video.play());
+          void playMediaAt(video, state.segments[1][0]).catch((error) => {
+            if (!isCurrentPreviewRequest(previewRequestRef, requestId)) return;
+            stopPreviewMonitor();
+            setStatus(`Preview failed: ${error instanceof Error ? error.message : String(error)}`);
+          });
         } else if (state.loop) {
           state.index = 0;
-          void seekPreview(video, state.segments[0][0]).then(() => video.play());
+          void playMediaAt(video, state.segments[0][0]).catch((error) => {
+            if (!isCurrentPreviewRequest(previewRequestRef, requestId)) return;
+            stopPreviewMonitor();
+            setStatus(`Preview failed: ${error instanceof Error ? error.message : String(error)}`);
+          });
         } else {
           video.pause();
           previewState.current = { segments: [], index: 0, loop: state.loop };
@@ -672,15 +789,41 @@ export default function Home() {
     const video = previewRef.current;
     if (!video) return;
     const segments = splice[`preview_segments_${seconds}s`];
+    const requestId = beginPreviewRequest(previewRequestRef);
     previewState.current = { segments, index: 0, loop };
     setActiveSplice(splice.anchor_key);
     setStatus(`${splice.id}: preview ${seconds}s from source video`);
     stopPreviewMonitor();
     video.pause();
-    void seekPreview(video, segments[0][0])
-      .then(() => video.play())
-      .then(startPreviewMonitor)
-      .catch((error) => setStatus(`Preview failed: ${error.message}`));
+    void playMediaAt(video, segments[0][0])
+      .then(() => startPreviewMonitor(requestId))
+      .catch((error) => {
+        if (!isCurrentPreviewRequest(previewRequestRef, requestId)) return;
+        setStatus(`Preview failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  };
+
+  const playFinalCut = (seconds: 2 | 4 | 6) => {
+    const video = previewRef.current;
+    const finalCut = project?.final_cut;
+    if (!video || !finalCut || !project) return;
+    const endSeconds = (finalCut.out_frame + 1) / project.project.fps;
+    const keptStartSeconds = finalCut.minimum_out_frame / project.project.fps;
+    const startSeconds = Math.max(keptStartSeconds, endSeconds - seconds);
+    // The shared monitor stops half a frame before a segment boundary, so offset
+    // this preview boundary by half a frame to match the export's inclusive OUT.
+    const monitoredEndSeconds = endSeconds + 0.5 / project.project.fps;
+    const requestId = beginPreviewRequest(previewRequestRef);
+    previewState.current = { segments: [[startSeconds, monitoredEndSeconds]], index: 0, loop: false };
+    setStatus(`Previewing the final ${seconds}s through OUT frame ${finalCut.out_frame}`);
+    stopPreviewMonitor();
+    video.pause();
+    void playMediaAt(video, startSeconds)
+      .then(() => startPreviewMonitor(requestId))
+      .catch((error) => {
+        if (!isCurrentPreviewRequest(previewRequestRef, requestId)) return;
+        setStatus(`Final preview failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
   };
 
   const handleRenderCutPreview = () => {
@@ -704,14 +847,24 @@ export default function Home() {
   const seekRenderedJoin = (splice: DynamicSplice, autoplay = true) => {
     const video = renderedCutVideoRef.current;
     const marker = renderedBoundaryByAnchor.get(splice.anchor_key);
-    if (!video || !marker) return;
-    video.currentTime = Math.max(0, marker.preview_time_seconds - 2);
+    const mappedSegment = renderedCutPreview?.segments.find(
+      (segment) => segment.source_start_frame <= splice.left_out_frame && splice.left_out_frame <= segment.source_end_frame,
+    );
+    const previewTime = marker?.preview_time_seconds ?? (mappedSegment
+      ? mappedSegment.preview_start_seconds + (splice.left_out_frame - mappedSegment.source_start_frame) / Math.max(project?.project.fps ?? 30, 1)
+      : null);
+    if (!video || previewTime === null) return;
+    video.currentTime = Math.max(0, previewTime - 2);
     if (autoplay) void video.play().catch((error) => setStatus(`Preview failed: ${error.message}`));
   };
 
-  const updateSplice = (operation: () => Promise<EditorProjectResponse>) => {
-    void run(operation, applyProject);
-  };
+  const updateSplice = (
+    operation: () => Promise<EditorProjectResponse>,
+    afterApply?: (data: EditorProjectResponse) => void,
+  ) => run(operation, (data) => {
+    applyProject(data);
+    afterApply?.(data);
+  });
 
   const reviewSpliceAndAdvance = (splice: DynamicSplice) => {
     const shouldAdvance = !splice.reviewed && !!project && selectedSpliceIndex < project.splices.length - 1;
@@ -769,6 +922,15 @@ export default function Home() {
     }
     return [...groups.entries()].map(([sentenceId, words]) => ({ sentenceId, words }));
   }, [project]);
+  const sourceBoundaryByWord = useMemo(() => {
+    const boundaries = new Map<string, { name: string; startSec: number }>();
+    if (!project || !videoProject) return boundaries;
+    for (const clip of videoProject.manifest.sourceSequence ?? []) {
+      const word = project.project.words.find((item) => item.start >= clip.startSec - 0.05);
+      if (word) boundaries.set(word.id, { name: clip.name, startSec: clip.startSec });
+    }
+    return boundaries;
+  }, [project, videoProject]);
 
   return (
     <main className="app-shell">
@@ -786,6 +948,61 @@ export default function Home() {
       {previewRenderProgress && (
         <PreviewRenderModal progress={previewRenderProgress} onClose={() => setPreviewRenderProgress(null)} />
       )}
+      {visualPrompt && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="visual-prompt-modal" role="dialog" aria-modal="true" aria-labelledby="visual-prompt-title">
+            <div className="visual-prompt-heading">
+              <div><span className="eyebrow">Codex handoff</span><h2 id="visual-prompt-title">Cook a Visual Plan</h2></div>
+              <button className="header-icon-button" aria-label="Close prompt" onClick={() => setVisualPrompt(null)}><X size={18} /></button>
+            </div>
+            <p>This includes the active project’s exact private paths and the VCG editorial rules. Paste it into a new Codex task.</p>
+            <textarea readOnly value={visualPrompt} aria-label="Cook Visual Plan prompt" />
+            <div className="visual-prompt-actions">
+              <button onClick={() => setVisualPrompt(null)}>Close</button>
+              <button className="primary" onClick={() => void navigator.clipboard.writeText(visualPrompt).then(() => setStatus("Cook Visual Plan prompt copied."))}><ClipboardCopy size={16} /> Copy Prompt</button>
+            </div>
+          </section>
+        </div>
+      )}
+      {showSourceSequence && videoProject && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="source-sequence-modal" role="dialog" aria-modal="true" aria-labelledby="source-sequence-title">
+            <div className="visual-prompt-heading">
+              <div><span className="eyebrow">Phase 1</span><h2 id="source-sequence-title">Source Sequence</h2></div>
+              <button className="header-icon-button" aria-label="Close source sequence" onClick={() => setShowSourceSequence(false)}><X size={18} /></button>
+            </div>
+            <div className={`sequence-compatibility ${(videoProject.manifest.sequenceBuild?.compatible ?? true) ? "compatible" : "normalized"}`}>
+              <Check size={17} />
+              <span>{videoProject.manifest.sequenceBuild?.compatible
+                ? `${videoProject.manifest.sourceSequence?.length ?? 0} clips compatible · combined without re-encoding`
+                : `Compatibility differences found · standardized working copies were used`}</span>
+            </div>
+            {!!videoProject.manifest.sequenceBuild?.differences.length && (
+              <ul className="sequence-differences">{videoProject.manifest.sequenceBuild.differences.map((difference) => <li key={difference}>{difference}</li>)}</ul>
+            )}
+            <div className="source-clip-list">
+              {[...(videoProject.manifest.sourceSequence ?? [])].sort((a, b) => a.order - b.order).map((clip, index, clips) => (
+                <article className="source-clip-row" key={clip.id}>
+                  <span className="source-clip-index">{String(index + 1).padStart(2, "0")}</span>
+                  <div className="source-clip-copy">
+                    <strong>{clip.name}</strong>
+                    <small>{formatTime(clip.durationSec)} · starts {formatTime(clip.startSec)} · {clip.metadata.width}×{clip.metadata.height} · {clip.metadata.frameRate} fps</small>
+                  </div>
+                  <div className="source-clip-actions">
+                    <button aria-label={`Move ${clip.name} up`} disabled={busy || index === 0} onClick={() => handleMoveSourceClip(clip.id, -1)}><ChevronUp size={16} /></button>
+                    <button aria-label={`Move ${clip.name} down`} disabled={busy || index === clips.length - 1} onClick={() => handleMoveSourceClip(clip.id, 1)}><ChevronDown size={16} /></button>
+                    <button aria-label={`Remove ${clip.name}`} disabled={busy || clips.length === 1} onClick={() => handleRemoveSourceClip(clip.id)}><Trash2 size={16} /></button>
+                  </div>
+                </article>
+              ))}
+            </div>
+            <div className="source-sequence-footer">
+              <span>Total sequence: {formatTime(videoProject.manifest.sequenceBuild?.durationSec ?? 0)}</span>
+              <div><button onClick={() => setShowSourceSequence(false)}>Done</button><button className="primary" onClick={handleAddSourceClips} disabled={busy}><Upload size={16} /> Add recordings</button></div>
+            </div>
+          </section>
+        </div>
+      )}
       {showTranscriptSettings && project && (
         <TranscriptSettingsModal
           busy={busy}
@@ -800,7 +1017,7 @@ export default function Home() {
       <header className="topbar modern-topbar">
         <div className="brand-block">
           <h1>VCG Content Command Center</h1>
-          <p>Local web editor for transcript cuts and source-video splice review</p>
+          <p>{videoProject ? `${videoProject.name} · Private project` : "Create or open a private video project"}</p>
         </div>
         <div className="header-menu tools-menu">
           <button className="header-menu-trigger" aria-haspopup="menu">
@@ -816,16 +1033,20 @@ export default function Home() {
             <button className={activeTab === "audio" ? "active" : ""} onClick={() => setActiveTab("audio")}>
               Audio Normalizer
             </button>
+            <button className={activeTab === "visual" ? "active" : ""} onClick={() => setActiveTab("visual")}>
+              Visual Production
+            </button>
           </div>
         </div>
 
         {activeTab === "transcript" ? (
           <nav className="workflow-rail" aria-label="Transcript workflow">
             <WorkflowStage stage={1} activeStage={activeWorkflowStage} setActiveStage={setActiveWorkflowStage}>
-              <span className="workflow-stage-label">Source</span>
+              <span className="workflow-stage-label">Project</span>
               <button className="workflow-action" onClick={handleChooseTranscriptVideo} disabled={busy}>
-                <FolderOpen size={15} /> Open Video
+                <FolderOpen size={15} /> New from Clips
               </button>
+              {videoProject && <button className="workflow-action" onClick={() => setShowSourceSequence(true)} disabled={busy}>{videoProject.manifest.sourceSequence?.length ?? 1} Source Clips</button>}
               <button className="workflow-action emphasized" onClick={handleGenerateTranscript} disabled={busy || !transcriptSource}>
                 <Upload size={15} /> Generate Transcript
               </button>
@@ -875,7 +1096,7 @@ export default function Home() {
                 onClick={handleRenderCutPreview}
                 disabled={busy || !project}
               >
-                <Play size={15} /> {renderedCutPreview ? "Refresh Preview" : "Render Cut Preview"}
+                <Play size={15} /> {renderedCutPreview ? "Rerender Preview" : "Render Cut Preview"}
               </button>
             </WorkflowStage>
             <WorkflowStage stage={5} activeStage={activeWorkflowStage} setActiveStage={setActiveWorkflowStage}>
@@ -911,15 +1132,19 @@ export default function Home() {
           <div className="contextual-tool-actions">
             {activeTab === "caption" ? (
               <>
-                <button onClick={handleChooseCaptionVideo} disabled={busy}><FolderOpen size={16} /> Choose Video</button>
+                {!videoProject && <button onClick={handleChooseCaptionVideo} disabled={busy}><FolderOpen size={16} /> Choose Video</button>}
+                {videoProject && <span className="workflow-status">Using active project cut</span>}
                 <button className="outline-primary" onClick={handleGenerateCaptions} disabled={busy || !captionStyle || !captionPreset || !captionSource}><Upload size={16} /> Generate Captioned Video</button>
               </>
-            ) : (
+            ) : activeTab === "audio" ? (
               <>
-                <button onClick={handleChooseAudioVideo} disabled={busy}><FolderOpen size={16} /> Choose Video</button>
+                {!videoProject && <button onClick={handleChooseAudioVideo} disabled={busy}><FolderOpen size={16} /> Choose Video</button>}
+                {videoProject && <span className="workflow-status">Using active project cut</span>}
                 <button onClick={handleAnalyzeAudio} disabled={busy || !audioSource}><Gauge size={16} /> Analyze Audio</button>
                 <button className="outline-primary" onClick={handleNormalizeAudio} disabled={busy || !audioAnalysis}><WandSparkles size={16} /> Export Corrected Video</button>
               </>
+            ) : (
+              <span className="workflow-status">Private post-cut graphics, imported animations, and rendering</span>
             )}
           </div>
         )}
@@ -928,7 +1153,11 @@ export default function Home() {
           <div className="header-menu project-menu">
             <button className="header-menu-trigger" aria-haspopup="menu"><FolderOpen size={17} /> Project <ChevronDown size={14} /></button>
             <div className="header-dropdown project-dropdown" role="menu">
-              <button onClick={handleOpen} disabled={busy}><FolderOpen size={15} /> Open Project</button>
+              <button onClick={handleCreateVideoProject} disabled={busy}><Upload size={15} /> New Video Project</button>
+              <button onClick={handleOpenVideoProject} disabled={busy}><FolderOpen size={15} /> Open Video Project</button>
+              <button onClick={() => setShowSourceSequence(true)} disabled={busy || !videoProject}><Scissors size={15} /> Manage Source Clips</button>
+              <button onClick={handleCookVisualPlanPrompt} disabled={busy || !videoProject}><ClipboardCopy size={15} /> Cook Visual Plan Prompt</button>
+              <button onClick={handleOpen} disabled={busy}><FolderOpen size={15} /> Open Legacy Transcript</button>
               <button onClick={handleSaveProject} disabled={busy || !project}><Save size={15} /> Save Project</button>
             </div>
           </div>
@@ -986,13 +1215,15 @@ export default function Home() {
           <SpliceReviewPanel
             loop={loop}
             moveSpliceSelection={moveSpliceSelection}
+            playFinalCut={playFinalCut}
             playSplice={playSplice}
             project={project}
             reviewSpliceAndAdvance={reviewSpliceAndAdvance}
             selectedSplice={selectedSplice}
-            selectedSpliceIndex={selectedSpliceIndex}
-            setLoop={setLoop}
-            updateSplice={updateSplice}
+          selectedSpliceIndex={selectedSpliceIndex}
+          setLoop={setLoop}
+          sourceVideoRef={previewRef}
+          updateSplice={updateSplice}
           />
         </div>
 
@@ -1001,12 +1232,14 @@ export default function Home() {
           deletedSilenceIds={deletedSilenceIds}
           deletedWordIds={deletedWordIds}
           project={project}
+          repeatedWordIds={repeatedWordIds}
           selected={selected}
           sentenceGroups={sentenceGroups}
           selectToken={selectToken}
           selectedMarkerRef={selectedMarkerRef}
           selectSplice={selectSplice}
           spliceByRightWord={spliceByRightWord}
+          sourceBoundaryByWord={sourceBoundaryByWord}
           status={status}
           transcriptScrollRef={transcriptScrollRef}
         />
@@ -1022,6 +1255,7 @@ export default function Home() {
           captionPreview={captionPreview}
           captionSource={captionSource}
           captionStatus={captionStatus}
+          projectManaged={!!videoProject}
           captionStyle={captionStyle}
           captionStyleName={captionStyleName}
           handleChooseCaptionOutputFolder={handleChooseCaptionOutputFolder}
@@ -1037,7 +1271,7 @@ export default function Home() {
           updateCaptionPreset={updateCaptionPreset}
           updateCaptionStyle={updateCaptionStyle}
         />
-      ) : (
+      ) : activeTab === "audio" ? (
         <AudioNormalizer
           analysis={audioAnalysis}
           busy={busy}
@@ -1047,6 +1281,7 @@ export default function Home() {
           preview={audioPreview}
           source={audioSource}
           status={audioStatus}
+          projectManaged={!!videoProject}
           targetI={audioTargetI}
           targetLra={audioTargetLra}
           targetTp={audioTargetTp}
@@ -1077,6 +1312,8 @@ export default function Home() {
             setAudioPreview(null);
           }}
         />
+      ) : (
+        <VisualProductionWorkspace />
       )}
     </main>
   );
@@ -1091,6 +1328,7 @@ function AudioNormalizer({
   preview,
   source,
   status,
+  projectManaged,
   targetI,
   targetLra,
   targetTp,
@@ -1112,6 +1350,7 @@ function AudioNormalizer({
   preview: AudioPreviewResponse | null;
   source: string | null;
   status: string;
+  projectManaged: boolean;
   targetI: number;
   targetLra: number;
   targetTp: number;
@@ -1298,10 +1537,10 @@ function AudioNormalizer({
         </div>
         <div className="folder-row">
           <label>
-            Output folder
-            <input value={outputFolder} onChange={(event) => onOutputFolderChange(event.target.value)} />
+            {projectManaged ? "Project output folder" : "Output folder"}
+            <input value={outputFolder} readOnly={projectManaged} onChange={(event) => onOutputFolderChange(event.target.value)} />
           </label>
-          <button onClick={onChooseOutputFolder} disabled={busy}>
+          <button onClick={onChooseOutputFolder} disabled={busy || projectManaged} title={projectManaged ? "Managed automatically by the active video project" : undefined}>
             <FolderOpen size={16} /> Change
           </button>
         </div>
@@ -1416,12 +1655,14 @@ function TranscriptContext({
   deletedSilenceIds,
   deletedWordIds,
   project,
+  repeatedWordIds,
   selected,
   sentenceGroups,
   selectToken,
   selectedMarkerRef,
   selectSplice,
   spliceByRightWord,
+  sourceBoundaryByWord,
   status,
   transcriptScrollRef,
 }: {
@@ -1429,12 +1670,14 @@ function TranscriptContext({
   deletedSilenceIds: Set<string>;
   deletedWordIds: Set<string>;
   project: EditorProjectResponse | null;
+  repeatedWordIds: Set<string>;
   selected: string[];
   sentenceGroups: { sentenceId: number; words: EditorProjectResponse["project"]["words"] }[];
   selectToken: (tokenId: string, shiftKey: boolean) => void;
   selectedMarkerRef: (anchorKey: string) => (element: HTMLButtonElement | null) => void;
   selectSplice: (splice: DynamicSplice) => void;
   spliceByRightWord: Map<string, DynamicSplice>;
+  sourceBoundaryByWord: Map<string, { name: string; startSec: number }>;
   status: string;
   transcriptScrollRef: RefObject<HTMLDivElement | null>;
 }) {
@@ -1450,10 +1693,13 @@ function TranscriptContext({
           <div className="sentence" key={group.sentenceId}>
             {group.words.map((word) => {
               const splice = spliceByRightWord.get(word.id);
+              const sourceBoundary = sourceBoundaryByWord.get(word.id);
               const deleted = deletedWordIds.has(word.id);
+              const repeated = repeatedWordIds.has(word.id) && !deleted;
               const selectedToken = selected.includes(word.id);
               return (
                 <span key={word.id} className="word-wrap">
+                  {sourceBoundary && <span className="source-boundary-marker">CLIP · {sourceBoundary.name} · {formatTime(sourceBoundary.startSec)}</span>}
                   {splice && (
                     <SpliceMarker
                       active={activeSplice === splice.anchor_key}
@@ -1463,8 +1709,9 @@ function TranscriptContext({
                     />
                   )}
                   <button
-                    className={["token", deleted ? "deleted" : "", selectedToken ? "selected" : ""].join(" ")}
+                    className={["token", deleted ? "deleted" : "", repeated ? "repeated" : "", selectedToken ? "selected" : ""].join(" ")}
                     onClick={(event) => selectToken(word.id, event.shiftKey)}
+                    title={repeated ? "Likely earlier take repeated below" : undefined}
                   >
                     {word.text}
                   </button>
@@ -1509,6 +1756,7 @@ function CaptionGenerator({
   captionPreview,
   captionSource,
   captionStatus,
+  projectManaged,
   captionStyle,
   captionStyleName,
   handleChooseCaptionOutputFolder,
@@ -1533,6 +1781,7 @@ function CaptionGenerator({
   captionPreview: CaptionPreviewResponse | null;
   captionSource: string | null;
   captionStatus: string;
+  projectManaged: boolean;
   captionStyle: CaptionStylePayload | null;
   captionStyleName: string;
   handleChooseCaptionOutputFolder: () => void;
@@ -1677,10 +1926,10 @@ function CaptionGenerator({
         </button>
         <div className="folder-row">
           <label>
-            Output folder
-            <input value={captionOutputFolder} onChange={(event) => setCaptionOutputFolder(event.target.value)} />
+            {projectManaged ? "Project output folder" : "Output folder"}
+            <input value={captionOutputFolder} readOnly={projectManaged} onChange={(event) => setCaptionOutputFolder(event.target.value)} />
           </label>
-          <button onClick={handleChooseCaptionOutputFolder} disabled={busy}>
+          <button onClick={handleChooseCaptionOutputFolder} disabled={busy || projectManaged} title={projectManaged ? "Managed automatically by the active video project" : undefined}>
             <FolderOpen size={16} /> Change
           </button>
         </div>
@@ -1907,7 +2156,36 @@ function CaptionWordSpan({
 
 function ColorField({ compact = false, label, onChange, value }: { compact?: boolean; label: string; onChange: (value: string) => void; value: string }) {
   const [open, setOpen] = useState(false);
-  const normalized = completeHexOrFallback(value);
+  const normalized = normalizeHexColor(value) ?? "#FFFFFF";
+  const [draft, setDraft] = useState(normalized);
+
+  useEffect(() => {
+    setDraft(normalized);
+  }, [normalized]);
+
+  useEffect(() => {
+    if (!normalizeHexColor(value)) onChange(normalized);
+  }, [normalized, onChange, value]);
+
+  const handlePickerChange = (nextColor: string) => {
+    const next = normalizeHexColor(nextColor);
+    if (!next) return;
+    setDraft(next);
+    onChange(next);
+  };
+
+  const handleInputChange = (nextColor: string) => {
+    setDraft(nextColor);
+    const next = normalizeSixDigitHexColor(nextColor);
+    if (next) onChange(next);
+  };
+
+  const commitDraft = () => {
+    const next = normalizeHexColor(draft) ?? normalized;
+    setDraft(next);
+    onChange(next);
+  };
+
   return (
     <div className={compact ? "color-field compact" : "color-field"}>
       {!compact && <span>{label}</span>}
@@ -1917,8 +2195,8 @@ function ColorField({ compact = false, label, onChange, value }: { compact?: boo
       </button>
       {open && (
         <div className="color-popover">
-          <HexColorPicker color={normalized} onChange={onChange} onChangeEnd={() => setOpen(false)} />
-          <HexColorInput className="hex-input" color={normalized} onChange={onChange} prefixed />
+          <HexColorPicker color={normalized} onChange={handlePickerChange} onChangeEnd={() => setOpen(false)} />
+          <HexColorInput className="hex-input" color={draft} onBlur={commitDraft} onChange={handleInputChange} prefixed />
         </div>
       )}
     </div>
@@ -2052,9 +2330,17 @@ function outlineTextShadows(width: number, color: string) {
   return shadows;
 }
 
-function completeHexOrFallback(value: string) {
+function normalizeSixDigitHexColor(value: string) {
   const hex = value.trim().toUpperCase();
-  return /^#[0-9A-F]{6}$/.test(hex) ? hex : "#FFFFFF";
+  return /^#[0-9A-F]{6}$/.test(hex) ? hex : null;
+}
+
+function normalizeHexColor(value: string) {
+  const hex = value.trim().toUpperCase();
+  const complete = normalizeSixDigitHexColor(hex);
+  if (complete) return complete;
+  const shorthand = /^#([0-9A-F]{3})$/.exec(hex);
+  return shorthand ? `#${[...shorthand[1]].map((character) => character.repeat(2)).join("")}` : null;
 }
 
 function previewFontStack(fontFamily: string) {
@@ -2294,15 +2580,345 @@ function RenderedCutPreviewWorkspace({
   selectedSplice: DynamicSplice | undefined;
   selectedSpliceIndex: number;
   stale: boolean;
-  updateSplice: (operation: () => Promise<EditorProjectResponse>) => void;
+  updateSplice: (
+    operation: () => Promise<EditorProjectResponse>,
+    afterApply?: (data: EditorProjectResponse) => void,
+  ) => Promise<EditorProjectResponse | undefined>;
   videoRef: RefObject<HTMLVideoElement | null>;
 }) {
+  const [manualOutTime, setManualOutTime] = useState("");
+  const [manualInTime, setManualInTime] = useState("");
+  const [manualCutError, setManualCutError] = useState("");
+  const [manualDraftBaseFrames, setManualDraftBaseFrames] = useState<{ outFrame: number; inFrame: number } | null>(null);
+  const [renderedPlayheadSeconds, setRenderedPlayheadSeconds] = useState(0);
+  const [timelineZoom, setTimelineZoom] = useState(1);
+  const [timelineScrubbing, setTimelineScrubbing] = useState(false);
+  const [manualPreviewSeconds, setManualPreviewSeconds] = useState<2 | 4 | 6 | null>(null);
+  const timelineViewportRef = useRef<HTMLDivElement | null>(null);
+  const timelineContentRef = useRef<HTMLDivElement | null>(null);
+  const timelinePlayheadRef = useRef<HTMLDivElement | null>(null);
+  const timelineScrubbingRef = useRef(false);
+  const renderedPlayheadSecondsRef = useRef(0);
+  const timelinePlaybackFrameRef = useRef<number | null>(null);
+  const manualPreviewRef = useRef<{ segments: [[number, number], [number, number]]; index: number } | null>(null);
   const previewMarkerByAnchor = new Map(preview.splices.map((splice) => [splice.anchor_key, splice]));
   const move = (direction: -1 | 1) => {
     const next = project.splices[selectedSpliceIndex + direction];
     if (next) selectSplice(next);
   };
-  const isFrontTrim = selectedSplice?.left_word_id === "";
+  const isFrontTrim = selectedSplice?.kind === "front_trim";
+  const sourceFrameAtPreviewTime = (currentTime: number) => {
+    const segment = preview.segments.find(
+      (item, index) => currentTime >= item.preview_start_seconds
+        && (currentTime < item.preview_end_seconds
+          || (index === preview.segments.length - 1 && currentTime <= item.preview_end_seconds)),
+    );
+    if (!segment) return null;
+    const offset = Math.floor((currentTime - segment.preview_start_seconds) * project.project.fps);
+    return Math.min(segment.source_end_frame, Math.max(segment.source_start_frame, segment.source_start_frame + offset));
+  };
+  const previewTimeAtSourceFrame = (frame: number) => {
+    const segment = preview.segments.find(
+      (item) => item.source_start_frame <= frame && frame <= item.source_end_frame,
+    );
+    return segment
+      ? segment.preview_start_seconds + (frame - segment.source_start_frame) / project.project.fps
+      : null;
+  };
+  const maximumTimelineZoom = () => {
+    const viewportWidth = Math.max(1, timelineViewportRef.current?.clientWidth ?? 1);
+    const frameCount = Math.max(1, Math.ceil(preview.duration_seconds * project.project.fps));
+    return Math.max(1, Math.min(500, frameCount * 10 / viewportWidth));
+  };
+  const changeTimelineZoom = (requestedZoom: number, anchorX?: number) => {
+    const viewport = timelineViewportRef.current;
+    const nextZoom = Math.min(maximumTimelineZoom(), Math.max(1, requestedZoom));
+    if (!viewport || Math.abs(nextZoom - timelineZoom) < 0.001) return;
+    const anchor = Math.min(viewport.clientWidth, Math.max(0, anchorX ?? viewport.clientWidth / 2));
+    const timelineRatio = (viewport.scrollLeft + anchor) / Math.max(1, viewport.scrollWidth);
+    setTimelineZoom(nextZoom);
+    requestAnimationFrame(() => {
+      viewport.scrollLeft = timelineRatio * viewport.scrollWidth - anchor;
+    });
+  };
+  useEffect(() => {
+    const viewport = timelineViewportRef.current;
+    if (!viewport) return;
+    const zoomWithWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      const pointerX = event.clientX - viewport.getBoundingClientRect().left;
+      const deltaScale = event.deltaMode === 1 ? 0.06 : 0.002;
+      changeTimelineZoom(timelineZoom * Math.exp(-event.deltaY * deltaScale), pointerX);
+    };
+    viewport.addEventListener("wheel", zoomWithWheel, { passive: false });
+    return () => viewport.removeEventListener("wheel", zoomWithWheel);
+  }, [timelineZoom, preview.duration_seconds, project.project.fps]);
+  const positionTimelinePlayhead = useCallback((seconds: number) => {
+    const clamped = Math.min(preview.duration_seconds, Math.max(0, seconds));
+    renderedPlayheadSecondsRef.current = clamped;
+    if (timelinePlayheadRef.current) {
+      timelinePlayheadRef.current.style.left = `${clamped / Math.max(preview.duration_seconds, 0.001) * 100}%`;
+    }
+    return clamped;
+  }, [preview.duration_seconds]);
+  const stopTimelinePlaybackMonitor = useCallback(() => {
+    if (timelinePlaybackFrameRef.current !== null) {
+      cancelAnimationFrame(timelinePlaybackFrameRef.current);
+      timelinePlaybackFrameRef.current = null;
+    }
+  }, []);
+  const startTimelinePlaybackMonitor = useCallback(() => {
+    stopTimelinePlaybackMonitor();
+    const tick = () => {
+      const video = videoRef.current;
+      if (!video || video.paused || video.ended) {
+        timelinePlaybackFrameRef.current = null;
+        return;
+      }
+      const manualPreview = manualPreviewRef.current;
+      const segment = manualPreview?.segments[manualPreview.index];
+      const frameGuard = 1 / Math.max(project.project.fps, 1);
+      if (manualPreview && segment && video.currentTime >= segment[1] - frameGuard / 2) {
+        if (manualPreview.index === 0) {
+          manualPreview.index = 1;
+          video.currentTime = manualPreview.segments[1][0];
+          positionTimelinePlayhead(manualPreview.segments[1][0]);
+        } else {
+          const heldTime = positionTimelinePlayhead(segment[1]);
+          manualPreviewRef.current = null;
+          setManualPreviewSeconds(null);
+          setRenderedPlayheadSeconds(heldTime);
+          video.pause();
+          timelinePlaybackFrameRef.current = null;
+          return;
+        }
+      } else {
+        positionTimelinePlayhead(video.currentTime);
+      }
+      timelinePlaybackFrameRef.current = requestAnimationFrame(tick);
+    };
+    timelinePlaybackFrameRef.current = requestAnimationFrame(tick);
+  }, [positionTimelinePlayhead, project.project.fps, stopTimelinePlaybackMonitor, videoRef]);
+  useEffect(() => stopTimelinePlaybackMonitor, [stopTimelinePlaybackMonitor]);
+  const timelineTimeAtPointer = (clientX: number) => {
+    const timeline = timelineContentRef.current;
+    if (!timeline) return null;
+    const bounds = timeline.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (clientX - bounds.left) / Math.max(1, bounds.width)));
+    const totalFrames = Math.max(1, Math.round(preview.duration_seconds * project.project.fps));
+    return Math.min(preview.duration_seconds, Math.round(ratio * totalFrames) / project.project.fps);
+  };
+  const scrubTimelineToPointer = (clientX: number, commitState = false) => {
+    const time = timelineTimeAtPointer(clientX);
+    const video = videoRef.current;
+    if (time === null || !video) return null;
+    video.currentTime = time;
+    positionTimelinePlayhead(time);
+    if (commitState) setRenderedPlayheadSeconds(time);
+    return time;
+  };
+  const cancelManualDraftPreview = () => {
+    manualPreviewRef.current = null;
+    setManualPreviewSeconds(null);
+  };
+  const beginTimelineScrub = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelManualDraftPreview();
+    videoRef.current?.pause();
+    timelineScrubbingRef.current = true;
+    setTimelineScrubbing(true);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    scrubTimelineToPointer(event.clientX);
+  };
+  const moveTimelineScrub = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!timelineScrubbingRef.current) return;
+    scrubTimelineToPointer(event.clientX);
+  };
+  const finishTimelineScrub = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!timelineScrubbingRef.current) return;
+    scrubTimelineToPointer(event.clientX, true);
+    timelineScrubbingRef.current = false;
+    setTimelineScrubbing(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+  const cancelTimelineScrub = (event: ReactPointerEvent<HTMLDivElement>) => {
+    timelineScrubbingRef.current = false;
+    setTimelineScrubbing(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setRenderedPlayheadSeconds(renderedPlayheadSecondsRef.current);
+  };
+  const handleTimelinePlayheadKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      cancelManualDraftPreview();
+      videoRef.current?.pause();
+      const direction = event.key === "ArrowLeft" ? -1 : 1;
+      const next = positionTimelinePlayhead(renderedPlayheadSecondsRef.current + direction / project.project.fps);
+      if (videoRef.current) videoRef.current.currentTime = next;
+      setRenderedPlayheadSeconds(next);
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      void videoRef.current?.play().catch(() => undefined);
+    }
+  };
+  const resolveManualCutDraft = (outValue: string, inValue: string): {
+    cut: { outSeconds: number; inSeconds: number; outFrame: number; inFrame: number } | null;
+    error: string;
+  } => {
+    const outSeconds = parsePreviewTimecode(outValue, project.project.fps);
+    const inSeconds = parsePreviewTimecode(inValue, project.project.fps);
+    if (outSeconds === null || inSeconds === null) {
+      return { cut: null, error: "Enter times as SS, MM:SS, HH:MM:SS, or HH:MM:SS:FF." };
+    }
+    if (outSeconds < 0 || inSeconds < 0 || outSeconds > preview.duration_seconds || inSeconds > preview.duration_seconds) {
+      return { cut: null, error: `Times must stay within this ${formatTime(preview.duration_seconds)} preview.` };
+    }
+    const outFrame = sourceFrameAtPreviewTime(outSeconds);
+    const inFrame = sourceFrameAtPreviewTime(inSeconds);
+    if (outFrame === null || inFrame === null) {
+      return { cut: null, error: "One of those times does not map to a kept section of this preview." };
+    }
+    const outSegment = preview.segments.find((item) => item.source_start_frame <= outFrame && outFrame <= item.source_end_frame);
+    const inSegment = preview.segments.find((item) => item.source_start_frame <= inFrame && inFrame <= item.source_end_frame);
+    if (outSegment !== inSegment) {
+      return { cut: null, error: "A manual cut cannot cross an existing cut marker. Add it on one side of that marker." };
+    }
+    if (inFrame < outFrame + 2) {
+      return { cut: null, error: "IN must be at least two frames after OUT so the cut removes a complete frame." };
+    }
+    return { cut: { outSeconds, inSeconds, outFrame, inFrame }, error: "" };
+  };
+  const parsedManualOutSeconds = parsePreviewTimecode(manualOutTime, project.project.fps);
+  const manualOutReady = parsedManualOutSeconds !== null
+    && parsedManualOutSeconds >= 0
+    && parsedManualOutSeconds <= preview.duration_seconds
+    && sourceFrameAtPreviewTime(parsedManualOutSeconds) !== null;
+  const resolvedManualDraft = manualInTime.trim()
+    ? resolveManualCutDraft(manualOutTime, manualInTime).cut
+    : null;
+  const manualDraftFrames = resolvedManualDraft
+    ? (manualDraftBaseFrames ?? { outFrame: resolvedManualDraft.outFrame, inFrame: resolvedManualDraft.inFrame })
+    : null;
+  const manualDraftSegment = resolvedManualDraft
+    ? preview.segments.find(
+      (item) => item.source_start_frame <= resolvedManualDraft.outFrame
+        && resolvedManualDraft.inFrame <= item.source_end_frame,
+    )
+    : null;
+  const manualDraftTimeText = (frame: number) => {
+    const seconds = previewTimeAtSourceFrame(frame);
+    if (seconds === null) return null;
+    const timecode = formatPreviewTimecode(seconds, project.project.fps);
+    const parsed = parsePreviewTimecode(timecode, project.project.fps);
+    if (parsed !== null && sourceFrameAtPreviewTime(parsed) === frame) return timecode;
+    return (seconds + 0.25 / project.project.fps).toFixed(6);
+  };
+  const nudgeManualDraft = (outDelta: number, inDelta: number) => {
+    if (!resolvedManualDraft || !manualDraftSegment) return;
+    const nextOutFrame = resolvedManualDraft.outFrame + outDelta;
+    const nextInFrame = resolvedManualDraft.inFrame + inDelta;
+    if (
+      nextOutFrame < manualDraftSegment.source_start_frame
+      || nextInFrame > manualDraftSegment.source_end_frame
+      || nextInFrame < nextOutFrame + 2
+    ) return;
+    const nextOutTime = manualDraftTimeText(nextOutFrame);
+    const nextInTime = manualDraftTimeText(nextInFrame);
+    if (!nextOutTime || !nextInTime) {
+      setManualCutError("That nudge falls outside the working preview.");
+      return;
+    }
+    cancelManualDraftPreview();
+    videoRef.current?.pause();
+    setManualOutTime(nextOutTime);
+    setManualInTime(nextInTime);
+    setManualCutError("");
+  };
+  const setManualOutFromPlayhead = () => {
+    cancelManualDraftPreview();
+    videoRef.current?.pause();
+    setManualOutTime(formatPreviewTimecode(renderedPlayheadSecondsRef.current, project.project.fps));
+    setManualInTime("");
+    setManualDraftBaseFrames(null);
+    setManualCutError("");
+  };
+  const setManualInFromPlayhead = () => {
+    if (!manualOutReady) {
+      setManualCutError("Set a valid OUT point before setting IN.");
+      return;
+    }
+    const candidate = formatPreviewTimecode(renderedPlayheadSecondsRef.current, project.project.fps);
+    const resolved = resolveManualCutDraft(manualOutTime, candidate);
+    if (!resolved.cut) {
+      setManualCutError(resolved.error);
+      return;
+    }
+    cancelManualDraftPreview();
+    videoRef.current?.pause();
+    setManualInTime(candidate);
+    setManualDraftBaseFrames({ outFrame: resolved.cut.outFrame, inFrame: resolved.cut.inFrame });
+    setManualCutError("");
+  };
+  const playManualCutDraft = (seconds: 2 | 4 | 6) => {
+    const resolved = resolveManualCutDraft(manualOutTime, manualInTime);
+    const video = videoRef.current;
+    if (!resolved.cut || !video) {
+      setManualCutError(resolved.error || "The rendered preview is not ready.");
+      return;
+    }
+    const halfSeconds = seconds / 2;
+    const outEnd = Math.min(preview.duration_seconds, resolved.cut.outSeconds + 1 / project.project.fps);
+    const segments: [[number, number], [number, number]] = [
+      [Math.max(0, outEnd - halfSeconds), outEnd],
+      [resolved.cut.inSeconds, Math.min(preview.duration_seconds, resolved.cut.inSeconds + halfSeconds)],
+    ];
+    video.pause();
+    manualPreviewRef.current = { segments, index: 0 };
+    setManualPreviewSeconds(seconds);
+    setManualCutError("");
+    const heldTime = positionTimelinePlayhead(segments[0][0]);
+    setRenderedPlayheadSeconds(heldTime);
+    void playMediaAt(video, segments[0][0])
+      .catch((error) => {
+        manualPreviewRef.current = null;
+        setManualPreviewSeconds(null);
+        setManualCutError(`Preview failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  };
+  const finishManualCut = async () => {
+    const resolved = resolveManualCutDraft(manualOutTime, manualInTime);
+    if (!resolved.cut) {
+      setManualCutError(resolved.error);
+      return;
+    }
+    const { outFrame, inFrame } = resolved.cut;
+    const existingManualCutIds = new Set(
+      project.splices.filter((splice) => splice.kind === "manual").map((splice) => splice.manual_cut_id),
+    );
+    cancelManualDraftPreview();
+    videoRef.current?.pause();
+    const result = await updateSplice(
+      () => addManualCut(outFrame, inFrame),
+      (data) => {
+        const createdCut = data.splices.find(
+          (splice) => splice.kind === "manual" && !existingManualCutIds.has(splice.manual_cut_id),
+        );
+        if (createdCut) selectSplice(createdCut);
+      },
+    );
+    if (result) {
+      setManualOutTime("");
+      setManualInTime("");
+      setManualDraftBaseFrames(null);
+      setManualCutError("");
+    }
+  };
   return (
     <section className="rendered-cut-workspace">
       <aside className="rendered-cut-sidebar">
@@ -2324,8 +2940,10 @@ function RenderedCutPreviewWorkspace({
               >
                 <span>{index + 1}</span>
                 <div>
-                  <strong>{formatTime(marker?.preview_time_seconds ?? 0)}</strong>
-                  <p><small>Before</small>{marker?.left_section || "Start of source"}</p>
+                  <strong>{splice.kind === "manual"
+                    ? `Manual cut · ${formatTime(marker?.preview_time_seconds ?? previewTimeAtSourceFrame(splice.left_out_frame) ?? 0)}`
+                    : formatTime(marker?.preview_time_seconds ?? 0)}</strong>
+                  <p><small>Before</small>{marker?.left_section || splice.left_context || "Start of source"}</p>
                   <p><small>After</small>{marker?.right_section || splice.right_context}</p>
                 </div>
               </button>
@@ -2345,7 +2963,7 @@ function RenderedCutPreviewWorkspace({
             <h2>Rendered Cut Preview</h2>
           </div>
           {stale ? (
-            <span className="preview-stale"><Gauge size={15} /> Preview stale · {pendingFrames} frame adjustment{pendingFrames === 1 ? "" : "s"} pending</span>
+            <span className="preview-stale"><Gauge size={15} /> Working preview · {pendingFrames} pending change{pendingFrames === 1 ? "" : "s"}</span>
           ) : (
             <span className="preview-current"><Check size={15} /> Preview current</span>
           )}
@@ -2357,42 +2975,237 @@ function RenderedCutPreviewWorkspace({
             controls
             preload="metadata"
             src={renderedCutPreviewUrl(preview.preview_id)}
-            onLoadedMetadata={() => selectedSplice && seekRenderedJoin(selectedSplice, false)}
+            onLoadedMetadata={() => {
+              if (selectedSplice) seekRenderedJoin(selectedSplice, false);
+              const currentTime = positionTimelinePlayhead(videoRef.current?.currentTime ?? 0);
+              setRenderedPlayheadSeconds(currentTime);
+            }}
+            onTimeUpdate={(event) => {
+              const currentTime = positionTimelinePlayhead(event.currentTarget.currentTime);
+              setRenderedPlayheadSeconds(currentTime);
+            }}
+            onPlay={startTimelinePlaybackMonitor}
+            onPause={stopTimelinePlaybackMonitor}
+            onEnded={stopTimelinePlaybackMonitor}
           />
         </div>
-        <div className="rendered-timeline" aria-label="Rendered cut splice timeline">
-          <div className="rendered-timeline-track" />
-          {preview.splices.map((marker, index) => (
+        <div className="manual-cut-toolbar">
+          <div className="manual-cut-copy">
+            <strong><Scissors size={15} /> Manual cut</strong>
+            <span>
+              {stale
+                ? "Accepted changes are pending. Keep editing here or rerender the entire preview when useful."
+                : "Type preview times or drag the playhead, then set each boundary."}
+            </span>
+          </div>
+          <div className="manual-cut-time-fields">
+            <label>
+              <span>OUT</span>
+              <input
+                aria-label="Manual cut OUT preview time"
+                value={manualOutTime}
+                placeholder="00:00:00:00"
+                onChange={(event) => {
+                  cancelManualDraftPreview();
+                  setManualOutTime(event.target.value);
+                  setManualInTime("");
+                  setManualDraftBaseFrames(null);
+                  setManualCutError("");
+                }}
+                disabled={busy}
+              />
+              <button onClick={setManualOutFromPlayhead} disabled={busy}>Set OUT</button>
+            </label>
+            <label>
+              <span>IN</span>
+              <input
+                aria-label="Manual cut IN preview time"
+                value={manualInTime}
+                placeholder={manualOutReady ? "00:00:00:00" : "Set OUT first"}
+                onChange={(event) => {
+                  cancelManualDraftPreview();
+                  const candidate = event.target.value;
+                  const resolved = resolveManualCutDraft(manualOutTime, candidate);
+                  setManualInTime(candidate);
+                  setManualDraftBaseFrames(resolved.cut
+                    ? { outFrame: resolved.cut.outFrame, inFrame: resolved.cut.inFrame }
+                    : null);
+                  setManualCutError("");
+                }}
+                disabled={busy || !manualOutReady}
+              />
+              <button onClick={setManualInFromPlayhead} disabled={busy || !manualOutReady}>Set IN</button>
+            </label>
+            <div className="manual-cut-preview-controls" aria-label="Manual cut preview duration">
+              <span>Preview join</span>
+              {([2, 4, 6] as const).map((seconds) => (
+                <button
+                  key={seconds}
+                  className={manualPreviewSeconds === seconds ? "active" : ""}
+                  onClick={() => playManualCutDraft(seconds)}
+                  disabled={busy || !manualOutReady || !manualInTime.trim()}
+                >{seconds}s</button>
+              ))}
+            </div>
             <button
-              key={marker.anchor_key}
-              className={selectedSplice?.anchor_key === marker.anchor_key ? "active" : ""}
-              style={{ left: `${Math.min(100, Math.max(0, marker.preview_time_seconds / Math.max(preview.duration_seconds, 0.001) * 100))}%` }}
-              title={`Splice ${index + 1} at ${formatTime(marker.preview_time_seconds)}`}
-              onClick={() => {
-                const splice = project.splices.find((item) => item.anchor_key === marker.anchor_key);
-                if (splice) selectSplice(splice);
-              }}
+              className="manual-cut-confirm"
+              onClick={() => void finishManualCut()}
+              disabled={busy || !manualOutTime.trim() || !manualInTime.trim()}
+            >Accept Manual Cut</button>
+          </div>
+          {manualCutError && <p className="manual-cut-error" role="alert">{manualCutError}</p>}
+        </div>
+        <div className="rendered-timeline-shell">
+          <div className="rendered-timeline-toolbar">
+            <span><strong>Cut timeline</strong> Drag playhead to seek · Ctrl + wheel to zoom · scrollbar to move</span>
+            <div className="rendered-timeline-zoom-controls" aria-label="Timeline zoom controls">
+              <button title="Zoom timeline out" onClick={() => changeTimelineZoom(timelineZoom / 1.5)} disabled={timelineZoom <= 1.001}>−</button>
+              <button title="Reset timeline zoom" onClick={() => changeTimelineZoom(1)}>{timelineZoom < 10 ? timelineZoom.toFixed(1) : timelineZoom.toFixed(0)}×</button>
+              <button title="Zoom timeline in" onClick={() => changeTimelineZoom(timelineZoom * 1.5)} disabled={timelineZoom >= maximumTimelineZoom() - 0.001}>+</button>
+            </div>
+          </div>
+          <div
+            className="rendered-timeline-viewport"
+            ref={timelineViewportRef}
+          >
+            <div
+              className="rendered-timeline"
+              ref={timelineContentRef}
+              aria-label="Rendered cut splice timeline"
+              style={{ width: `${timelineZoom * 100}%` }}
             >
-              <Scissors size={16} />
-              <span>{index + 1}</span>
-            </button>
-          ))}
-          <div className="rendered-timeline-labels"><span>00:00</span><span>{formatTime(preview.duration_seconds)}</span></div>
+              <div className="rendered-timeline-track" />
+              {manualOutReady && parsedManualOutSeconds !== null && (
+                <div
+                  className="manual-draft-boundary out"
+                  style={{ left: `${parsedManualOutSeconds / Math.max(preview.duration_seconds, 0.001) * 100}%` }}
+                  title={`Draft OUT ${formatPreviewTimecode(parsedManualOutSeconds, project.project.fps)}`}
+                ><span>OUT</span></div>
+              )}
+              {resolvedManualDraft && (
+                <>
+                  <div
+                    className="manual-draft-cut-range"
+                    style={{
+                      left: `${resolvedManualDraft.outSeconds / Math.max(preview.duration_seconds, 0.001) * 100}%`,
+                      width: `${(resolvedManualDraft.inSeconds - resolvedManualDraft.outSeconds) / Math.max(preview.duration_seconds, 0.001) * 100}%`,
+                    }}
+                  />
+                  <div
+                    className="manual-draft-boundary in"
+                    style={{ left: `${resolvedManualDraft.inSeconds / Math.max(preview.duration_seconds, 0.001) * 100}%` }}
+                    title={`Draft IN ${formatPreviewTimecode(resolvedManualDraft.inSeconds, project.project.fps)}`}
+                  ><span>IN</span></div>
+                </>
+              )}
+              <div
+                ref={timelinePlayheadRef}
+                className={["rendered-timeline-playhead", timelineScrubbing ? "scrubbing" : ""].join(" ")}
+                style={{ left: `${renderedPlayheadSeconds / Math.max(preview.duration_seconds, 0.001) * 100}%` }}
+                role="slider"
+                tabIndex={0}
+                aria-label="Preview playhead"
+                aria-valuemin={0}
+                aria-valuemax={preview.duration_seconds}
+                aria-valuenow={renderedPlayheadSeconds}
+                aria-valuetext={formatPreviewTimecode(renderedPlayheadSeconds, project.project.fps)}
+                title={`${formatPreviewTimecode(renderedPlayheadSeconds, project.project.fps)} · drag to scrub, release to hold`}
+                onPointerDown={beginTimelineScrub}
+                onPointerMove={moveTimelineScrub}
+                onPointerUp={finishTimelineScrub}
+                onPointerCancel={cancelTimelineScrub}
+                onLostPointerCapture={() => {
+                  timelineScrubbingRef.current = false;
+                  setTimelineScrubbing(false);
+                }}
+                onKeyDown={handleTimelinePlayheadKey}
+              >
+                <span />
+              </div>
+              {project.splices.map((splice, index) => {
+                const marker = previewMarkerByAnchor.get(splice.anchor_key);
+                const markerTime = marker?.preview_time_seconds ?? previewTimeAtSourceFrame(splice.left_out_frame);
+                if (markerTime === null) return null;
+                const pending = !marker;
+                return (
+                  <button
+                    key={splice.anchor_key}
+                    className={[
+                      selectedSplice?.anchor_key === splice.anchor_key ? "active" : "",
+                      splice.kind === "manual" ? "manual" : "",
+                      pending ? "pending" : "",
+                    ].join(" ")}
+                    style={{ left: `${Math.min(100, Math.max(0, markerTime / Math.max(preview.duration_seconds, 0.001) * 100))}%` }}
+                    title={`${splice.kind === "manual" ? "Manual cut" : `Splice ${index + 1}`} at ${formatPreviewTimecode(markerTime, project.project.fps)}${pending ? " · accepted, not yet in the working video" : ""}`}
+                    onClick={() => selectSplice(splice)}
+                  >
+                    <Scissors size={16} />
+                    <span>{splice.kind === "manual" ? "M" : index + 1}</span>
+                  </button>
+                );
+              })}
+              <div className="rendered-timeline-labels"><span>00:00</span><span>{formatTime(preview.duration_seconds)}</span></div>
+            </div>
+          </div>
         </div>
 
         <section className="rendered-splice-controls">
           <div className="rendered-control-heading">
-            <h3>{selectedSplice ? `Splice ${selectedSpliceIndex + 1} of ${project.splices.length}` : "No splice selected"}</h3>
-            <div className="rendered-control-actions">
-              <button onClick={() => selectedSplice && seekRenderedJoin(selectedSplice)} disabled={!selectedSplice}><RotateCcw size={15} /> Replay Join</button>
-              <button className={selectedSplice?.reviewed ? "reviewed" : ""} onClick={() => selectedSplice && reviewSpliceAndAdvance(selectedSplice)} disabled={!selectedSplice}>
-                <Check size={15} /> {selectedSplice?.reviewed ? "Reviewed" : "Mark Reviewed"}
-              </button>
-              <button onClick={() => move(-1)} disabled={selectedSpliceIndex <= 0}><ChevronLeft size={15} /> Previous</button>
-              <button onClick={() => move(1)} disabled={selectedSpliceIndex < 0 || selectedSpliceIndex >= project.splices.length - 1}>Next <ChevronRight size={15} /></button>
-            </div>
+            <h3>{resolvedManualDraft ? "Manual cut draft · not yet accepted" : selectedSplice ? `Splice ${selectedSpliceIndex + 1} of ${project.splices.length}` : "No splice selected"}</h3>
+            {resolvedManualDraft ? (
+              <div className="rendered-control-actions">
+                <span>Preview join</span>
+                {([2, 4, 6] as const).map((seconds) => (
+                  <button
+                    key={seconds}
+                    className={manualPreviewSeconds === seconds ? "active" : ""}
+                    onClick={() => playManualCutDraft(seconds)}
+                    disabled={busy}
+                  >{seconds}s</button>
+                ))}
+              </div>
+            ) : (
+              <div className="rendered-control-actions">
+                <button onClick={() => selectedSplice && seekRenderedJoin(selectedSplice)} disabled={!selectedSplice}><RotateCcw size={15} /> Replay Join</button>
+                <button className={selectedSplice?.reviewed ? "reviewed" : ""} onClick={() => selectedSplice && reviewSpliceAndAdvance(selectedSplice)} disabled={!selectedSplice}>
+                  <Check size={15} /> {selectedSplice?.reviewed ? "Reviewed" : "Mark Reviewed"}
+                </button>
+                <button onClick={() => move(-1)} disabled={selectedSpliceIndex <= 0}><ChevronLeft size={15} /> Previous</button>
+                <button onClick={() => move(1)} disabled={selectedSpliceIndex < 0 || selectedSpliceIndex >= project.splices.length - 1}>Next <ChevronRight size={15} /></button>
+                {selectedSplice?.kind === "manual" && (
+                  <button className="danger" onClick={() => void updateSplice(() => removeManualCut(selectedSplice.manual_cut_id))} disabled={busy}><Trash2 size={15} /> Remove Cut</button>
+                )}
+              </div>
+            )}
           </div>
-          {selectedSplice && (
+          {resolvedManualDraft && manualDraftFrames && manualDraftSegment ? (
+            <div className="rendered-frame-grid">
+              <CutFrameCard
+                title="Draft OUT frame"
+                frame={resolvedManualDraft.outFrame}
+                fps={project.project.fps}
+                adjustment={resolvedManualDraft.outFrame - manualDraftFrames.outFrame}
+                whisperFrame={manualDraftFrames.outFrame}
+                suggestedFrame={manualDraftFrames.outFrame}
+                minFrame={manualDraftSegment.source_start_frame}
+                maxFrame={resolvedManualDraft.inFrame - 2}
+                sourceLabel="Set"
+                onNudge={(delta) => nudgeManualDraft(delta, 0)}
+              />
+              <CutFrameCard
+                title="Draft IN frame"
+                frame={resolvedManualDraft.inFrame}
+                fps={project.project.fps}
+                adjustment={resolvedManualDraft.inFrame - manualDraftFrames.inFrame}
+                whisperFrame={manualDraftFrames.inFrame}
+                suggestedFrame={manualDraftFrames.inFrame}
+                minFrame={resolvedManualDraft.outFrame + 2}
+                maxFrame={manualDraftSegment.source_end_frame}
+                sourceLabel="Set"
+                onNudge={(delta) => nudgeManualDraft(0, delta)}
+              />
+            </div>
+          ) : selectedSplice && (
             <div className={isFrontTrim ? "rendered-frame-grid single" : "rendered-frame-grid"}>
               {!isFrontTrim && (
                 <CutFrameCard
@@ -2402,8 +3215,11 @@ function RenderedCutPreviewWorkspace({
                   adjustment={selectedSplice.left_out_adjustment}
                   whisperFrame={selectedSplice.left_whisper_out_frame}
                   suggestedFrame={selectedSplice.left_suggested_out_frame}
-                  maxFrame={selectedSplice.right_in_frame - 1}
-                  onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, delta, 0))}
+                  maxFrame={selectedSplice.right_in_frame - (selectedSplice.kind === "manual" ? 2 : 1)}
+                  sourceLabel={selectedSplice.kind === "manual" ? "Initial" : "Whisper"}
+                  onNudge={(delta) => void updateSplice(() => selectedSplice.kind === "manual"
+                    ? adjustManualCut(selectedSplice.manual_cut_id, delta, 0)
+                    : adjustSplice(selectedSplice.anchor_key, delta, 0))}
                 />
               )}
               <CutFrameCard
@@ -2413,13 +3229,16 @@ function RenderedCutPreviewWorkspace({
                 adjustment={selectedSplice.right_in_adjustment}
                 whisperFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
                 suggestedFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
-                minFrame={isFrontTrim ? 0 : selectedSplice.left_out_frame + 1}
-                onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, 0, delta))}
+                minFrame={isFrontTrim ? 0 : selectedSplice.left_out_frame + (selectedSplice.kind === "manual" ? 2 : 1)}
+                sourceLabel={selectedSplice.kind === "manual" ? "Initial" : "Whisper"}
+                onNudge={(delta) => void updateSplice(() => selectedSplice.kind === "manual"
+                  ? adjustManualCut(selectedSplice.manual_cut_id, 0, delta)
+                  : adjustSplice(selectedSplice.anchor_key, 0, delta))}
               />
             </div>
           )}
-          <button className="refresh-rendered-preview" onClick={onRefresh} disabled={busy || !stale}>
-            <RotateCcw size={18} /> Apply Changes & Refresh Preview
+          <button className="refresh-rendered-preview" onClick={onRefresh} disabled={busy}>
+            <RotateCcw size={18} /> {busy ? "Rerendering Entire Preview..." : "Rerender Entire Preview"}
           </button>
         </section>
       </section>
@@ -2431,25 +3250,59 @@ function SpliceReviewPanel({
   loop,
   moveSpliceSelection,
   playSplice,
+  playFinalCut,
   project,
   reviewSpliceAndAdvance,
   selectedSplice,
   selectedSpliceIndex,
   setLoop,
+  sourceVideoRef,
   updateSplice,
 }: {
   loop: boolean;
   moveSpliceSelection: (direction: -1 | 1) => void;
   playSplice: (splice: DynamicSplice, seconds: 2 | 4 | 6) => void;
+  playFinalCut: (seconds: 2 | 4 | 6) => void;
   project: EditorProjectResponse | null;
   reviewSpliceAndAdvance: (splice: DynamicSplice) => void;
   selectedSplice: DynamicSplice | undefined;
   selectedSpliceIndex: number;
   setLoop: Dispatch<SetStateAction<boolean>>;
+  sourceVideoRef: RefObject<HTMLVideoElement | null>;
   updateSplice: (operation: () => Promise<EditorProjectResponse>) => void;
 }) {
   const count = project?.splices.length ?? 0;
   const isFrontTrim = selectedSplice?.left_word_id === "";
+  const finalCut = project?.final_cut ?? null;
+  const [finalCutExpanded, setFinalCutExpanded] = useState(false);
+  const [finalOutDraft, setFinalOutDraft] = useState(finalCut ? String(finalCut.out_frame) : "");
+  useEffect(() => {
+    setFinalOutDraft(finalCut ? String(finalCut.out_frame) : "");
+  }, [finalCut?.out_frame]);
+  const sourceVideo = sourceVideoRef.current;
+  const sourceMaximumOutFrame = sourceVideo && Number.isFinite(sourceVideo.duration)
+    ? Math.max(0, Math.ceil(sourceVideo.duration * (project?.project.fps ?? 30)) - 1)
+    : null;
+  const maximumOutFrame = finalCut?.maximum_out_frame === null
+    ? sourceMaximumOutFrame
+    : sourceMaximumOutFrame === null
+      ? finalCut?.maximum_out_frame
+      : Math.min(finalCut?.maximum_out_frame ?? sourceMaximumOutFrame, sourceMaximumOutFrame);
+  const parsedFinalOutDraft = Number(finalOutDraft);
+  const finalOutDraftValid = !!finalCut
+    && finalOutDraft.trim() !== ""
+    && Number.isInteger(parsedFinalOutDraft)
+    && parsedFinalOutDraft >= finalCut.minimum_out_frame
+    && (maximumOutFrame === null || maximumOutFrame === undefined || parsedFinalOutDraft <= maximumOutFrame);
+  const setFinalFromPlayhead = () => {
+    if (!finalCut || !sourceVideo || !Number.isFinite(sourceVideo.currentTime)) return;
+    const requestedFrame = Math.max(0, Math.round(sourceVideo.currentTime * (project?.project.fps ?? 30)));
+    const frame = maximumOutFrame === null || maximumOutFrame === undefined
+      ? requestedFrame
+      : Math.min(maximumOutFrame, requestedFrame);
+    setFinalOutDraft(String(frame));
+    updateSplice(() => setFinalOutFrame(frame));
+  };
   return (
     <section className="splice-review-panel">
       <div className="splice-review-header">
@@ -2487,34 +3340,103 @@ function SpliceReviewPanel({
           </div>
         )}
       </div>
-      {selectedSplice ? (
-        <div className={isFrontTrim ? "splice-review-body single" : "splice-review-body"}>
-          {!isFrontTrim && (
+      <div className="splice-review-content">
+        {selectedSplice ? (
+          <div className={isFrontTrim ? "splice-review-body single" : "splice-review-body"}>
+            {!isFrontTrim && (
+              <CutFrameCard
+                title="OUT frame"
+                frame={selectedSplice.left_out_frame}
+                fps={project?.project.fps ?? 30}
+                adjustment={selectedSplice.left_out_adjustment}
+                whisperFrame={selectedSplice.left_whisper_out_frame}
+                suggestedFrame={selectedSplice.left_suggested_out_frame}
+                maxFrame={selectedSplice.right_in_frame - 1}
+                onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, delta, 0))}
+              />
+            )}
             <CutFrameCard
-              title="OUT frame"
-              frame={selectedSplice.left_out_frame}
+              title={isFrontTrim ? "START frame" : "IN frame"}
+              frame={selectedSplice.right_in_frame}
               fps={project?.project.fps ?? 30}
-              adjustment={selectedSplice.left_out_adjustment}
-              whisperFrame={selectedSplice.left_whisper_out_frame}
-              suggestedFrame={selectedSplice.left_suggested_out_frame}
-              maxFrame={selectedSplice.right_in_frame - 1}
-              onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, delta, 0))}
+              adjustment={selectedSplice.right_in_adjustment}
+              whisperFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
+              suggestedFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
+              minFrame={isFrontTrim ? 0 : selectedSplice.left_out_frame + 1}
+              onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, 0, delta))}
             />
-          )}
-          <CutFrameCard
-            title={isFrontTrim ? "START frame" : "IN frame"}
-            frame={selectedSplice.right_in_frame}
-            fps={project?.project.fps ?? 30}
-            adjustment={selectedSplice.right_in_adjustment}
-            whisperFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
-            suggestedFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
-            minFrame={isFrontTrim ? 0 : selectedSplice.left_out_frame + 1}
-            onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, 0, delta))}
-          />
-        </div>
-      ) : (
-        <p className="muted">Delete content to create splice points for review.</p>
-      )}
+          </div>
+        ) : (
+          <p className="muted">Delete content to create splice points for review.</p>
+        )}
+        {finalCut && (
+          <div className={finalCutExpanded ? "final-cut-control expanded" : "final-cut-control collapsed"}>
+            <div className="final-cut-heading">
+              <button
+                type="button"
+                className="final-cut-toggle"
+                aria-expanded={finalCutExpanded}
+                aria-controls="final-cut-details"
+                onClick={() => setFinalCutExpanded((expanded) => !expanded)}
+              >
+                <span>
+                  <strong>Final endpoint</strong>
+                  <small>
+                    {finalCutExpanded
+                      ? "Seek the source preview to the end of the final word, then set its exact frame."
+                      : `FINAL OUT ${formatFrameTimecode(finalCut.out_frame, project?.project.fps ?? 30)} · frame ${finalCut.out_frame.toLocaleString()}`}
+                  </small>
+                </span>
+                {finalCutExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              </button>
+              {finalCutExpanded && finalCut.custom && <button onClick={() => updateSplice(() => setFinalOutFrame(null))}>Reset to transcript</button>}
+            </div>
+            {finalCutExpanded && (
+              <div className="final-cut-details" id="final-cut-details">
+                <CutFrameCard
+                  title="FINAL OUT frame"
+                  frame={finalCut.out_frame}
+                  fps={project?.project.fps ?? 30}
+                  adjustment={finalCut.adjustment}
+                  whisperFrame={finalCut.suggested_out_frame}
+                  suggestedFrame={finalCut.suggested_out_frame}
+                  minFrame={finalCut.minimum_out_frame}
+                  maxFrame={maximumOutFrame ?? undefined}
+                  sourceLabel="Transcript"
+                  onNudge={(delta) => updateSplice(() => setFinalOutFrame(finalCut.out_frame + delta))}
+                />
+                <div className="review-playbar final-cut-playbar">
+                  <span>Preview final</span>
+                  {([2, 4, 6] as const).map((seconds) => (
+                    <button key={seconds} onClick={() => playFinalCut(seconds)}><Play size={13} /> {seconds}s</button>
+                  ))}
+                  <small>Plays the retained source and stops on FINAL OUT.</small>
+                </div>
+                <div className="final-cut-actions">
+                  <label>
+                    Exact frame
+                    <input
+                      type="number"
+                      min={finalCut.minimum_out_frame}
+                      max={maximumOutFrame ?? undefined}
+                      step={1}
+                      value={finalOutDraft}
+                      onChange={(event) => setFinalOutDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && finalOutDraftValid) {
+                          updateSplice(() => setFinalOutFrame(parsedFinalOutDraft));
+                        }
+                      }}
+                    />
+                  </label>
+                  <button disabled={!finalOutDraftValid || parsedFinalOutDraft === finalCut.out_frame} onClick={() => updateSplice(() => setFinalOutFrame(parsedFinalOutDraft))}>Set frame</button>
+                  <button onClick={setFinalFromPlayhead} disabled={!sourceVideo}>Set from playhead</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </section>
   );
 }
@@ -2529,6 +3451,7 @@ function CutFrameCard({
   minFrame,
   maxFrame,
   onNudge,
+  sourceLabel = "Whisper",
 }: {
   title: string;
   frame: number;
@@ -2539,6 +3462,7 @@ function CutFrameCard({
   minFrame?: number;
   maxFrame?: number;
   onNudge: (delta: number) => void;
+  sourceLabel?: string;
 }) {
   const allowedDelta = (requested: number) => {
     const requestedFrame = frame + requested;
@@ -2558,7 +3482,7 @@ function CutFrameCard({
   return (
     <div className="cut-frame-card">
       <div className="cut-frame-header">
-        <span>{title}<small>Whisper {formatFrameTimecode(whisperFrame, fps)} · frame {whisperFrame.toLocaleString()}</small></span>
+        <span>{title}<small>{sourceLabel} {formatFrameTimecode(whisperFrame, fps)} · frame {whisperFrame.toLocaleString()}</small></span>
         <strong>{formatFrameTimecode(frame, fps)}<small>Frame {frame.toLocaleString()} · {formatSignedFrames(adjustment)}</small></strong>
       </div>
       {suggestedFrame !== whisperFrame && (
@@ -2588,6 +3512,33 @@ function formatFrameTimecode(frame: number, fps: number) {
   const minutes = Math.floor(totalSeconds / 60) % 60;
   const hours = Math.floor(totalSeconds / 3600);
   return [hours, minutes, seconds, frames].map((value) => String(value).padStart(2, "0")).join(":");
+}
+
+function formatPreviewTimecode(seconds: number, fps: number) {
+  return formatFrameTimecode(Math.max(0, Math.round(seconds * fps)), fps);
+}
+
+function parsePreviewTimecode(value: string, fps: number): number | null {
+  const clean = value.trim();
+  if (!clean) return null;
+  const parts = clean.split(":");
+  const numeric = parts.map((part) => Number(part));
+  if (numeric.some((part) => !Number.isFinite(part) || part < 0)) return null;
+  if (parts.length === 1) return numeric[0];
+  if (parts.length === 2) {
+    if (numeric[1] >= 60) return null;
+    return numeric[0] * 60 + numeric[1];
+  }
+  if (parts.length === 3) {
+    if (numeric[1] >= 60 || numeric[2] >= 60) return null;
+    return numeric[0] * 3600 + numeric[1] * 60 + numeric[2];
+  }
+  if (parts.length === 4) {
+    const roundedFps = Math.max(1, Math.round(fps));
+    if (numeric.some((part) => !Number.isInteger(part)) || numeric[1] >= 60 || numeric[2] >= 60 || numeric[3] >= roundedFps) return null;
+    return numeric[0] * 3600 + numeric[1] * 60 + numeric[2] + numeric[3] / roundedFps;
+  }
+  return null;
 }
 
 function formatSignedFrames(value: number) {

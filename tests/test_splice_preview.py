@@ -16,6 +16,8 @@ def _splice() -> DynamicSplice:
         right_in_frame=300,
         left_whisper_out_frame=29,
         left_suggested_out_frame=29,
+        right_whisper_in_frame=300,
+        right_suggested_in_frame=300,
         left_out_adjustment=0,
         right_in_adjustment=0,
         left_context="...one",

@@ -24,7 +24,7 @@ $owner.Activate()
 """
 
 
-def _run_dialog(script: str, *, environment: dict[str, str] | None = None) -> Path | None:
+def _run_dialog_output(script: str, *, environment: dict[str, str] | None = None) -> str:
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     env = os.environ.copy()
     if environment:
@@ -48,7 +48,11 @@ def _run_dialog(script: str, *, environment: dict[str, str] | None = None) -> Pa
     if result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(f"Windows file picker failed.{f' {details}' if details else ''}")
-    selected = result.stdout.strip()
+    return result.stdout.strip()
+
+
+def _run_dialog(script: str, *, environment: dict[str, str] | None = None) -> Path | None:
+    selected = _run_dialog_output(script, environment=environment)
     return Path(selected).resolve() if selected else None
 
 
@@ -72,6 +76,30 @@ try {
     )
 
 
+def choose_video_files() -> list[Path]:
+    selected = _run_dialog_output(
+        _DIALOG_SETUP
+        + """
+try {
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = 'Choose source clips in recording order'
+    $dialog.Filter = 'Video files|*.mp4;*.mov;*.mkv;*.avi;*.webm|All files|*.*'
+    $dialog.Multiselect = $true
+    $dialog.RestoreDirectory = $true
+    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+        [Console]::Out.Write(($dialog.FileNames -join [Environment]::NewLine))
+    }
+} finally {
+    $owner.Close()
+    $owner.Dispose()
+}
+"""
+    )
+    if not selected:
+        return []
+    return [Path(item).resolve() for item in selected.splitlines() if item.strip()]
+
+
 def choose_project_file() -> Path | None:
     return _run_dialog(
         _DIALOG_SETUP
@@ -79,7 +107,47 @@ def choose_project_file() -> Path | None:
 try {
     $dialog = New-Object System.Windows.Forms.OpenFileDialog
     $dialog.Title = 'Open VCG project'
-    $dialog.Filter = 'VCG project|*.vcg.json|JSON files|*.json|All files|*.*'
+    $dialog.Filter = 'VCG video project|*.vcg-project.json|Legacy transcript project|*.vcg.json|JSON files|*.json|All files|*.*'
+    $dialog.RestoreDirectory = $true
+    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+        [Console]::Out.Write($dialog.FileName)
+    }
+} finally {
+    $owner.Close()
+    $owner.Dispose()
+}
+"""
+    )
+
+
+def choose_visual_plan_file() -> Path | None:
+    return _run_dialog(
+        _DIALOG_SETUP
+        + """
+try {
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = 'Open private visual plan'
+    $dialog.Filter = 'VCG visual plan|visual-plan.json|JSON files|*.json|All files|*.*'
+    $dialog.RestoreDirectory = $true
+    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+        [Console]::Out.Write($dialog.FileName)
+    }
+} finally {
+    $owner.Close()
+    $owner.Dispose()
+}
+"""
+    )
+
+
+def choose_visual_asset_file() -> Path | None:
+    return _run_dialog(
+        _DIALOG_SETUP
+        + """
+try {
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = 'Import visual-production media'
+    $dialog.Filter = 'Visual media|*.mp4;*.mov;*.mkv;*.avi;*.webm;*.png;*.jpg;*.jpeg;*.gif;*.webp|All files|*.*'
     $dialog.RestoreDirectory = $true
     if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
         [Console]::Out.Write($dialog.FileName)

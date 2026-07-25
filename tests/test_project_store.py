@@ -34,6 +34,11 @@ def test_saves_and_loads_editor_project(tmp_path) -> None:
     edits.delete_words("delete_w2", "w2", "w2", reason="word")
     edits.adjust_splice("w1->w2", left_out_delta=2, right_in_delta=-1, reviewed=True)
     edits.set_assisted_out_frame("w1->w2", 17)
+    edits.set_assisted_in_frame("w1->w2", 19)
+    edits.add_manual_cut("manual_1", 8, 12)
+    edits.adjust_manual_cut("manual_1", out_delta=-1, in_delta=2)
+    edits.review_manual_cut("manual_1", True)
+    edits.set_final_out_frame(34)
     edits.settings.dead_space_min_seconds = 0.9
 
     path = tmp_path / "editor.json"
@@ -47,6 +52,9 @@ def test_saves_and_loads_editor_project(tmp_path) -> None:
     assert loaded_edits.splice_adjustments["w1->w2"].right_in_delta == -1
     assert loaded_edits.splice_adjustments["w1->w2"].reviewed is True
     assert loaded_edits.splice_adjustments["w1->w2"].assisted_left_out_frame == 17
+    assert loaded_edits.splice_adjustments["w1->w2"].assisted_right_in_frame == 19
+    assert loaded_edits.manual_cuts == edits.manual_cuts
+    assert loaded_edits.final_out_frame == 34
     assert loaded_edits.settings == edits.settings
     assert json.loads(path.read_text(encoding="utf-8"))["version"] == PROJECT_VERSION
 
@@ -76,6 +84,7 @@ def test_loads_version_one_project_with_safe_setting_defaults(tmp_path) -> None:
     _, loaded_edits = load_editor_project(path)
 
     assert loaded_edits.settings.dead_space_min_seconds == 0.8
+    assert loaded_edits.final_out_frame is None
 
 
 def test_ignores_abandoned_per_word_assisted_end_field(tmp_path) -> None:
