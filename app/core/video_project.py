@@ -11,7 +11,9 @@ from pathlib import Path
 
 from app.core.settings import project_root
 from app.core.ffmpeg_locator import find_ffmpeg, find_ffprobe
+from app.core.file_utils import is_within, slug
 from app.core.process_utils import hidden_subprocess_flags
+from app.core.visual_production import scene_geometry
 
 
 VIDEO_PROJECT_VERSION = 1
@@ -56,17 +58,8 @@ def default_video_workspace() -> Path:
     return (Path.home() / "Videos" / "VCG Projects").resolve()
 
 
-def _slug(value: str) -> str:
-    value = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return value or "video-project"
-
-
-def _is_within(path: Path, parent: Path) -> bool:
-    try:
-        path.resolve().relative_to(parent.resolve())
-        return True
-    except ValueError:
-        return False
+_slug = slug
+_is_within = is_within
 
 
 def _unique_root(workspace: Path, name: str) -> Path:
@@ -375,6 +368,97 @@ def mark_artifact_current(manifest: dict, artifact_key: str) -> None:
     manifest.setdefault("artifacts", {})[artifact_key] = int(manifest.get("sequenceRevision") or 0)
 
 
+def _treatment_vocabulary_text() -> str:
+    """Render the available treatment vocabulary for the Cook prompt.
+
+    Generated from the catalogs and the private treatment library at request time. Hand-written
+    claims about what is available and what is locked drifted away from the catalogs, which is how
+    Cook came to rank treatments that no longer existed.
+    """
+    from app.core.story_assets import load_visual_catalog
+
+    catalog = load_visual_catalog()
+    lines: list[str] = []
+
+    def describe(item: dict) -> str:
+        marks = []
+        if item.get("lockedDefault"):
+            scopes = ", ".join(item.get("lockScopes") or []) or "all compatible scenes"
+            marks.append(f"LOCKED DEFAULT for {scopes}")
+        if item.get("creatorRating"):
+            marks.append(f"creator rating {item['creatorRating']}/5")
+        if item.get("usageCount"):
+            marks.append(f"used {item['usageCount']}x")
+        if item.get("previewAvailable"):
+            marks.append("has a still preview")
+        if item.get("motionPreviewAvailable"):
+            marks.append("has a motion preview")
+        suffix = f" [{'; '.join(marks)}]" if marks else ""
+        layouts = ", ".join(item.get("allowedLayouts") or [])
+        label = item.get("name") or item.get("purpose") or item.get("description") or item["id"]
+        family = item.get("family")
+        family_text = f" Family: {family}." if family else ""
+        return f"- {item['id']} — {label}{family_text} Layouts: {layouts}.{suffix}"
+
+    modules = [item for item in catalog["modules"] if not item.get("archived")]
+    recipes = [item for item in catalog["recipes"] if not item.get("archived")]
+    lines.append(f"Registered modules the renderer can execute today ({len(modules)}):")
+    lines.extend(describe(item) for item in modules)
+    lines.append("")
+    lines.append(
+        f"Catalog recipes ({len(recipes)}). Each needs realizing as a registered composition or a "
+        "frozen overlay asset before it can render; selecting one commits to building it:"
+    )
+    lines.extend(describe(item) for item in recipes)
+
+    locked = [item for item in [*modules, *recipes] if item.get("lockedDefault")]
+    lines.append("")
+    if locked:
+        lines.append(
+            "Locked defaults must be your first choice wherever they are compatible: "
+            + ", ".join(f"{item['id']} ({', '.join(item.get('lockScopes') or ['all compatible scenes'])})" for item in locked)
+            + "."
+        )
+    else:
+        lines.append("No treatment is currently locked as a default, so rank purely on fit, rating, and variation.")
+    return "\n".join(lines)
+
+
+def _scene_geometry_text() -> str:
+    """Render the measured per-layout speaker geometry for the Cook prompt.
+
+    Generated from scene-geometry.json rather than written by hand so the prompt cannot drift away
+    from the values the validators enforce.
+    """
+    geometry = scene_geometry()
+    frame = geometry["frame"]
+    lines = []
+    for layout, entry in geometry["layouts"].items():
+        bounds = entry.get("speakerBounds")
+        if not isinstance(bounds, dict):
+            lines.append(f"- {layout}: no speaker on screen. The whole frame is available.")
+            continue
+        x0 = round(bounds["x"] * frame["width"])
+        y0 = round(bounds["y"] * frame["height"])
+        x1 = round((bounds["x"] + bounds["width"]) * frame["width"])
+        y1 = round((bounds["y"] + bounds["height"]) * frame["height"])
+        free = []
+        if x0 > 40:
+            free.append(f"x 0-{x0}")
+        if x1 < frame["width"] - 40:
+            free.append(f"x {x1}-{frame['width']}")
+        if y0 > 40:
+            free.append(f"y 0-{y0}")
+        if y1 < frame["height"] - 40:
+            free.append(f"y {y1}-{frame['height']}")
+        lines.append(
+            f"- {layout}: speaker occupies ({x0},{y0})-({x1},{y1})px, normalized "
+            f"{{\"x\": {bounds['x']}, \"y\": {bounds['y']}, \"width\": {bounds['width']}, \"height\": {bounds['height']}}}. "
+            f"Free for graphics: {'; '.join(free) if free else 'nothing clears the speaker in this layout'}."
+        )
+    return "\n".join(lines)
+
+
 def build_visual_plan_prompt(manifest_path: Path, manifest: dict) -> str:
     paths = {key: resolve_video_project_path(manifest_path, manifest, key) for key in manifest["paths"]}
     transcript = paths["finalTranscript"] if paths["finalTranscript"].is_file() else paths["editorProject"]
@@ -418,27 +502,35 @@ Private reusable sources to inspect before proposing new work:
 Readiness:
 {readiness_text}
 
-First pass only: inspect the locked cut and timestamped transcript together, identify protected source-footage moments, and propose an editable timeline of graphics, reframes, imported-animation opportunities, transitions, intentional clean sections, and appropriate B-roll. Never reveal punchlines or conclusions before the matching spoken words. Move the speaker into a bounded container before showing side panels. Animate charts toward the spoken conclusion. Use Montserrat and the VCG white-editorial brand.
+First pass only: inspect the locked cut and timestamped transcript together, identify the specific moments that must stay clean, and propose an editable timeline of graphics, reframes, imported-animation opportunities, transitions, and appropriate B-roll running the whole length of the video. Never reveal punchlines or conclusions before the matching spoken words. Move the speaker into a bounded container before showing side panels. Animate charts toward the spoken conclusion. Use Montserrat and the VCG white-editorial brand.
 
-Single Cook operation: perform Scene Analysis, Scene Selection, Production Planning, Variation Audit, cadence audit, and preview-evidence preparation sequentially inside this one Cook pass. These are responsibilities within one path, not separate agents, handoffs, files, or competing workflows. The Scene Analysis stage must create scenePacket with the actual layout, screenshot time, actual speaker and protected-content geometry, transcript and spoken beats, editorial purpose, content density, motion/reveal opportunities, B-roll fit, intentional-series identity, and surrounding constraints. The only valid layouts are full-screen-talking, talking-left, talking-right, talking-bottom-left, talking-top-left, talking-bottom-right, talking-top-right, and computer-screen-only.
+Single Cook operation: perform Scene Analysis, Scene Selection, Production Planning, Variation Audit, cadence audit, and preview-evidence preparation sequentially inside this one Cook pass. These are responsibilities within one path, not separate agents, handoffs, files, or competing workflows. The Scene Analysis stage must create scenePacket with the actual layout, screenshot time, actual speaker and protected-content geometry, transcript and spoken beats, editorial purpose, content density, motion/reveal opportunities, B-roll fit, intentional-series identity, and surrounding constraints. The only valid layouts, and the measured speaker rectangle for each, are listed below. These are measured facts about the recording setup, not estimates. Identify which layout a scene uses, then read the speaker rectangle from this table. Do not estimate the speaker position from the footage and do not report a speakerBounds that disagrees with this table; suggestions that do are rejected.
 
-Visual cadence standard: account for the complete locked-cut runtime with explicit editorial decisions. Schedule at least one meaningful visual change in every rolling five-second interval unless that interval is deliberately marked as an intentional clean-performance hold or protected-footage hold with a concrete reason. A meaningful change may be a treatment entrance or exit, an internal bullet or label reveal, chart/data change, UI action, callout change, composition or speaker reframe, supporting visual, punch zoom, or emphasis change. A treatment may remain on screen longer than five seconds when its internal reveals or other meaningful changes keep meeting this cadence. Record those timed internal events in meaningfulChanges. Entrance and exit count automatically; do not split one coherent graphic into arbitrary five-second cards. Use zoom-in or zoom-out only when it creates a purposeful emphasis or reframe, not as meaningless motion. Do not use the same selected treatment more than twice unless the later use is a declared intentional callback or series.
+{_scene_geometry_text()}
 
-Reuse-first and variety gate (Scene Selector): inspect the complete registered module catalog, proven treatment recipes, Creator Library index, creator ratings and locked defaults in treatments.json, and prior recipe previews before proposing bespoke work. For every graphic scene, return at least three rankedCandidates with treatmentId, rank, family, fitReason, limitations, previewAvailable, creatorRating, and lockedDefault. Hard-filter candidates by scenePacket.layout and every protected region before ranking exact intent, locked canonical default, creator rating, proven usage, content/motion fit, and global variation. Copy the ranked IDs into candidateTreatmentIds, select exactly one moduleId or recipeId, record visualFamily and selectionRationale, and include it in the top-level reuse audit. When the spoken intent is “Example number ___”, numbered-step-intro is the locked first-choice family whenever compatible. The Producer may accept the best compatible library treatment or record a structured bespoke gap; it may not silently substitute an easier generic card.
+Visual cadence standard: account for the complete locked-cut runtime with explicit editorial decisions. Schedule at least one meaningful visual change in every rolling five-second interval, everywhere, with no exceptions. It applies inside protected footage exactly as it applies everywhere else. There is no hold concept and no exemption. Critically, only a scene that renders a treatment counts toward cadence: a meaningfulChange written against bare source footage produces nothing on screen and is ignored by the audit. Writing "punch-zoom" in meaningfulChanges does not create a punch zoom. To create movement over a demonstration you must schedule an actual source-punch-zoom or ui-callout cue as its own suggestion, overlapping the protected span. Those two modules exist precisely so a software demonstration can stay readable and still carry a visual event every five seconds. Protected-footage and clean-speaker scenes render nothing at all, so each one is capped at eight seconds and is reserved for the exact clicks, punchlines, and reactions the footage must carry alone. It is rare that a whole screen must stay unobstructed: to keep a demonstration readable for longer, place a treatment beside it and list the exact area that must remain visible in scenePacket.protectedRegions. Overlays are then validated against that rectangle, so a graphic can sit in the free part of the screen while the application stays legible. On the corner-speaker and computer-screen-only layouts the frame is mostly application, and every graphic there must list its protectedRegions for exactly this reason. Graphics over a software demonstration are expected, not exceptional. A fifteen-minute video needs roughly one hundred and eighty meaningful changes; a plan with a few dozen is not a plan, and declaring long stretches protected to avoid the work is the specific failure this rule exists to prevent. A meaningful change may be a treatment entrance or exit, an internal bullet or label reveal, chart/data change, UI action, callout change, composition or speaker reframe, supporting visual, punch zoom, or emphasis change. A treatment may remain on screen longer than five seconds when its internal reveals or other meaningful changes keep meeting this cadence. Record those timed internal events in meaningfulChanges. Entrance and exit count automatically; do not split one coherent graphic into arbitrary five-second cards. Use zoom-in or zoom-out only when it creates a purposeful emphasis or reframe, not as meaningless motion. Do not use the same selected treatment more than twice unless the later use is a declared intentional callback or series. intentionalRepeat and seriesId excuse a deliberate callback; they do not excuse monotony, and they do not reach the plan-level variety ceilings, which always apply: no single treatment may exceed 25 percent of the graphics, no single visual family may exceed 25 percent, and the two most-used treatments together may not exceed 45 percent. A plan that meets the five-second cadence by alternating one zoom and one callout for fifteen minutes is rejected. Reach for a different device: there are twenty-nine registered modules, twenty-three of which work over a software demonstration. No graphic may run for less than one second; a sub-second flash reads as a glitch, not a visual event.
+
+Reuse-first and variety gate (Scene Selector): inspect the complete registered module catalog, proven treatment recipes, Creator Library index, creator ratings and locked defaults in treatments.json, and prior recipe previews before proposing bespoke work. For every graphic scene, return at least three rankedCandidates with treatmentId, rank, family, fitReason, limitations, previewAvailable, creatorRating, and lockedDefault. Hard-filter candidates by scenePacket.layout and every protected region before ranking exact intent, locked canonical default, creator rating, proven usage, content/motion fit, and global variation. Copy the ranked IDs into candidateTreatmentIds, select exactly one moduleId or recipeId, record visualFamily and selectionRationale, and include it in the top-level reuse audit. A moduleId names something the renderer executes; a recipeId names a catalog entry that still needs realizing. Do not cross them. The Producer may accept the best compatible library treatment or record a structured bespoke gap; it may not silently substitute an easier generic card.
+
+The job in one sentence: put graphics all the way through the video, reuse the library wherever it fits, and where nothing fits, design a new treatment and propose it. Proposing a new treatment is expected and welcome; it is not a last resort. To do it, build the treatment as a HyperFrames composition inside the private project, register it in visual-plan.json under customCompositions with its treatmentId and real sourceHash, and the app will render its approval evidence from that exact source. What is never acceptable is thinning the plan to avoid the work: fewer graphics is not a valid response to a treatment being missing.
+
+Available treatment vocabulary. This list is generated from the catalogs and your rated library at request time; it is the complete set. Do not propose a treatment that is not on it.
+
+{_treatment_vocabulary_text()}
 
 Variation Agent gate: maintain coverage.variationAudit with familyCounts, treatmentCounts, intentionalSeriesIds, and warnings. Do not place the same visualFamily on consecutive graphic suggestions or use one selected treatment more than twice unless it belongs to a declared intentional series or callback with seriesId, intentionalRepeat true, and a concrete repeatRationale. Reuse atoms and motion grammar while varying the full composition, choreography, and speaker placement. Every Creator Library suggestion needs a concrete libraryQuery. Use a bespoke treatment only when registered and library sources cannot serve the editorial beat, and record the reason in coverage.reuseAudit.bespokeRationales.
 
-Speaker-safety gate: inspect the locked footage at the setup, every reveal that changes occupied area, the resolved state, and the exit. Every graphic suggestion must include speakerSafety with checked true, a speaker mode, normalized speakerBounds, normalized overlayOcclusionBounds for every region rendered above the speaker, at least three verifiedAtSec values, and maxSpeakerAbsenceSec no greater than 2. Overlay occlusion bounds may not intersect the protected speaker bounds. If the graphic intentionally replaces the speaker, use brief-full-frame-hit and keep both the suggestion and declared absence at two seconds or less. A centered-bottom or lower-third treatment is not automatically safe: measure it against the actual face in this footage.
+Speaker-safety gate: inspect the locked footage at the setup, every reveal that changes occupied area, the resolved state, and the exit. Every graphic suggestion must include speakerSafety with checked true, a speaker mode, normalized speakerBounds, normalized overlayOcclusionBounds for every region rendered above the speaker, at least three verifiedAtSec values, and maxSpeakerAbsenceSec of exactly 0. Overlay occlusion bounds may not intersect the protected speaker bounds. The speaker stays on screen for the entire runtime. Every graphic is an overlay inside a validated container. Full-frame takeovers are not permitted and there is no mode that allows one. A centered-bottom or lower-third treatment is not automatically safe: measure it against the actual face in this footage.
 
 Pre-render approval gate: save every scene with decision.status pending. The creator must compare the locked-video screenshot with the candidate treatment screenshot, approve the selected treatment, or reject it with notes before any full production render. Rejected notes stay in rejectionHistory and are routed back through the Producer. Intentional series may be approved as a group. The accepted treatment map is an implementation contract: do not substitute another family or treatment without returning the scene to decision.status revision-requested.
 
-One-frame evidence gate: every graphic needs approvalEvidence bound to its currently selected treatment. Set sourceFrameTimeSec to the actual scene frame shown on the left and representativeTimeSec/representativeState to one resolved state that honestly shows the proposed composition on the right. When a historical render exists, use status historical-ready. When it does not exist, render exactly one representative sample frame inside the private project, save it at previews/visual/approval-samples/<suggestion-id>-<treatment-id>.png, and use status sample-ready with sampleFramePath. Do not render a motion preview or full scene during Cook. Do not use a generic illustration, wireframe, or different treatment as evidence. A missing historical render is a requirement to make this one sample frame, not a reason to omit the proposal.
+One-frame evidence gate: every graphic needs approvalEvidence bound to its currently selected treatment. Set sourceFrameTimeSec to the actual scene frame shown on the left and representativeTimeSec/representativeState to one resolved state that honestly shows the proposed composition on the right. When a historical render exists, use status historical-ready. When it does not exist, the app renders the sample for you: register the treatment as a module or a custom HyperFrames composition, then call POST /api/visual/suggestions/{{id}}/approval-evidence/prepare. The app writes the PNG and a signed receipt beside it; a frame without that receipt is rejected and cannot be approved. Do not draw, composite, screenshot, or otherwise author the sample yourself — a picture of the treatment is not the treatment, and approving it approves nothing. Do not set approvalEvidence.status by hand; the app derives it. Do not render a motion preview or full scene during Cook. A missing historical render is a requirement to register the treatment so one frame can be rendered, not a reason to omit the proposal or to approximate it.
 
 Build-through gate: when an approved graphic is built later, copy planningSuggestionId, approvedTreatmentId, speakerSafety, visualFamily, candidateTreatmentIds, selectionRationale, meaningfulChanges, approvalEvidence, and recipeId into the registered cue parameters; set the suggestion status to built and its cueId to that cue. Review and final export are blocked when a contract-version-three suggestion lacks creator approval, is not registered, or its cue drops the approved safety, evidence, cadence, and treatment audit.
 
 B-roll gate: explicitly audit the full transcript and footage for literal or metaphorical B-roll opportunities. Do not force B-roll over a software demonstration, authored joke, gesture, or strong direct-address beat. Set coverage.bRollAudit.decision to planned when at least one useful B-roll suggestion exists, otherwise set it to not-suitable and explain why. Planned B-roll items must use timelineLane b-roll and include a structured stockBrief or a Creator Library query. This audit is required even when the correct decision is no B-roll.
 
-Do not build cues, modify visual-plan.json, or render motion/full-production scenes yet. The only permitted render during Cook is the required single approval sample frame for a selected treatment that lacks historical evidence. Save one machine-readable version-one suggestion file using approval contract three to the exact Visual suggestions destination. Include coverage.reuseAudit {{ contractVersion: 3, reviewed, reusedModuleIds, reusedRecipeIds, creatorLibraryQueries, bespokeRationales }}, coverage.variationAudit {{ reviewed, familyCounts, treatmentCounts, intentionalSeriesIds, warnings }}, and coverage.bRollAudit {{ reviewed, decision, rationale }}. The app computes coverage.runtimeSec, coverage.decisionCounts, and coverage.cadenceAudit from the saved suggestions; do not invent or hand-count those numbers. Use one of these categories for each item: clean-speaker, protected-footage, graphic, creator-library, project-asset, stock, or ai-brief. Every item needs a unique id, status proposed, exact startSec/endSec, transcriptContext, editorialPurpose, confidence, protectedFootageConflict, scenePacket, meaningfulChanges (an empty list is valid only when entrance/exit already satisfy cadence), decision {{ status: "pending", selectedTreatmentId, notes: "" }}, rejectionHistory, and the appropriate moduleParameters, libraryQuery, stockBrief, or generationBrief. A deliberate clean section also needs intentionalHold {{ reason, representativeTimeSec }} and may only use category clean-speaker or protected-footage. Every graphic also needs rankedCandidates, candidateTreatmentIds, visualFamily, selectionRationale, intentionalRepeat, approvalEvidence, and the complete speakerSafety record described above. A stockBrief needs literalQueries, metaphoricalQueries, avoid, and desiredDurationSec. Present the same items as a timestamped approval table using the app-computed fixed counts: total timeline decisions, graphic treatments, clean-performance holds, protected-footage decisions, B-roll decisions, and unresolved approvals. Show the source frame and bound historical/sample evidence side by side for every graphic. Wait for creator approval on every decision before building cues.
+Do not build cues, modify visual-plan.json, or render motion/full-production scenes yet. The only permitted render during Cook is the required single approval sample frame for a selected treatment that lacks historical evidence. Save one machine-readable version-one suggestion file using approval contract three to the exact Visual suggestions destination. Include coverage.reuseAudit {{ contractVersion: 3, reviewed, reusedModuleIds, reusedRecipeIds, creatorLibraryQueries, bespokeRationales }}, coverage.variationAudit {{ reviewed, familyCounts, treatmentCounts, intentionalSeriesIds, warnings }}, and coverage.bRollAudit {{ reviewed, decision, rationale }}. The app computes coverage.runtimeSec, coverage.decisionCounts, and coverage.cadenceAudit from the saved suggestions; do not invent or hand-count those numbers. Use one of these categories for each item: clean-speaker, protected-footage, graphic, creator-library, project-asset, stock, or ai-brief. Every item needs a unique id, status proposed, exact startSec/endSec, transcriptContext, editorialPurpose, confidence, protectedFootageConflict, scenePacket, meaningfulChanges (an empty list is valid only when entrance/exit already satisfy cadence), decision {{ status: "pending", selectedTreatmentId, notes: "" }}, rejectionHistory, and the appropriate moduleParameters, libraryQuery, stockBrief, or generationBrief. Every graphic also needs rankedCandidates, candidateTreatmentIds, visualFamily, selectionRationale, intentionalRepeat, approvalEvidence, and the complete speakerSafety record described above. A stockBrief needs literalQueries, metaphoricalQueries, avoid, and desiredDurationSec. Present the same items as a timestamped approval table using the app-computed fixed counts: total timeline decisions, graphic treatments, clean-performance holds, protected-footage decisions, B-roll decisions, and unresolved approvals. Show the source frame and bound historical/sample evidence side by side for every graphic. Wait for creator approval on every decision before building cues.
 
 Privacy: all footage, transcripts, suggestions, plans, assets, previews, and renders must remain inside the private project root. Only content-neutral reusable code and contracts may enter the public repository.
 """

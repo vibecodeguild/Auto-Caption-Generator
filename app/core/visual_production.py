@@ -9,15 +9,25 @@ import shutil
 import subprocess
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
 from app.core.ffmpeg_locator import find_ffmpeg, find_ffprobe
+from app.core.file_utils import bounds_intersect, is_within, normalized_bounds, sha256_file, slug
 from app.core.process_utils import hidden_subprocess_flags
 from app.core.settings import project_root
 
 
 VISUAL_PLAN_VERSION = 2
+# The speaker modes a graphic may declare. Full-frame takeovers are deliberately absent.
+SPEAKER_SAFETY_MODES = {
+    "full-frame-speaker",
+    "left-container",
+    "right-container",
+    "bottom-container",
+    "corner-container",
+}
 BRAND_ID = "vcg-white-editorial"
 MODULE_IDS = {
     "punchline-reveal",
@@ -26,6 +36,33 @@ MODULE_IDS = {
     "progress-scale",
     "dependency-stack",
     "dual-comparison",
+    "numbered-example-card",
+    # Movement and emphasis over a software demonstration. Without these the vocabulary could not
+    # express anything at all over 500+ seconds of screen recording, so plans went bare there.
+    "source-punch-zoom",
+    "ui-callout",
+    # Ported from the July-22 project's built library. These are the families that already worked
+    # over a software demonstration: they anchor to one edge and leave the screen readable.
+    "side-list-panel",
+    "result-badge",
+    "link-chip",
+    "milestone-path",
+    "before-after-grade",
+    "lower-third-flow",
+    "three-step-celebration",
+    "career-pathway",
+    "list-reveal-pinned-thesis",
+    "kinetic-word-punctuation",
+    "numbered-step-intro",
+    "problem-card-triptych",
+    "speaker-rise-callouts",
+    "conversation-bubble-sequence",
+    "tradeoff-meter",
+    "rank-medal-hit",
+    "brand-cta-lockup",
+    "command-popup-stack",
+    "windows-prompt-typing",
+    "uplifting-sunrise-finale",
 }
 CUE_KINDS = {"module", "asset", "composition"}
 ANCHOR_TYPES = {"spoken", "scene-relative", "unanchored"}
@@ -35,13 +72,40 @@ COMMON_MODULE_PARAMETERS = {
     "planningSuggestionId", "approvedTreatmentId", "meaningfulChanges", "approvalEvidence",
 }
 MODULE_PARAMETER_KEYS = {
-    "punchline-reveal": COMMON_MODULE_PARAMETERS | {"text", "kicker", "accentColor"},
+    "punchline-reveal": COMMON_MODULE_PARAMETERS | {"text", "kicker", "accentColor", "imageAssetId"},
     "source-footage-hold": COMMON_MODULE_PARAMETERS,
     "speaker-side-panel": COMMON_MODULE_PARAMETERS | {"text", "kicker", "accentColor", "side", "panelWidth", "videoBounds", "frameStyle", "items"},
     "progress-scale": COMMON_MODULE_PARAMETERS | {"text", "kicker", "startLabel", "targetLabel", "accentColor", "milestones"},
     "dependency-stack": COMMON_MODULE_PARAMETERS | {"text", "kicker", "nodes", "accentColor"},
     "dual-comparison": COMMON_MODULE_PARAMETERS | {"kicker", "leftTitle", "rightTitle", "leftItems", "rightItems", "leftColor", "rightColor"},
+    "numbered-example-card": COMMON_MODULE_PARAMETERS | {
+        "kicker", "exampleNumber", "totalExamples", "titleLines", "accentLineIndex", "tags", "accentColor",
+    },
+    "source-punch-zoom": COMMON_MODULE_PARAMETERS | {"focusX", "focusY", "zoom", "settleSec"},
+    "ui-callout": COMMON_MODULE_PARAMETERS | {"label", "detail", "targetBounds", "accentColor", "pointer"},
+    "side-list-panel": COMMON_MODULE_PARAMETERS | {"kicker", "text", "rows", "accentRowIndex", "side", "rowStyle"},
+    "result-badge": COMMON_MODULE_PARAMETERS | {"kicker", "lines", "accentLineIndex", "mark", "side"},
+    "link-chip": COMMON_MODULE_PARAMETERS | {"kicker", "glyph", "words", "accentWordIndex", "side"},
+    "milestone-path": COMMON_MODULE_PARAMETERS | {"kicker", "text", "stops", "accentStopIndex", "side"},
+    "before-after-grade": COMMON_MODULE_PARAMETERS | {"kicker", "before", "after", "arrow", "footerLeft", "footerRight", "side"},
+    "lower-third-flow": COMMON_MODULE_PARAMETERS | {"kicker", "items", "accentItemIndex", "variant"},
+    "three-step-celebration": COMMON_MODULE_PARAMETERS | {"kicker", "steps", "payoff", "side"},
+    "career-pathway": COMMON_MODULE_PARAMETERS | {"kicker", "rows", "accentRowIndex", "side"},
+    "list-reveal-pinned-thesis": COMMON_MODULE_PARAMETERS | {"kicker", "thesis", "rows", "accentRowIndex", "side"},
+    "kinetic-word-punctuation": COMMON_MODULE_PARAMETERS | {"phrase", "anchor", "side", "accentColor"},
+    "numbered-step-intro": COMMON_MODULE_PARAMETERS | {"stepNumber", "title", "action", "side", "showNumber"},
+    "problem-card-triptych": COMMON_MODULE_PARAMETERS | {"kicker", "cards", "accentCardIndex"},
+    "speaker-rise-callouts": COMMON_MODULE_PARAMETERS | {"thesis", "callouts", "accentCalloutIndex"},
+    "conversation-bubble-sequence": COMMON_MODULE_PARAMETERS | {"kicker", "bubbles", "accentBubbleIndex", "side"},
+    "tradeoff-meter": COMMON_MODULE_PARAMETERS | {"kicker", "leftLabel", "rightLabel", "value", "verdict", "side"},
+    "rank-medal-hit": COMMON_MODULE_PARAMETERS | {"rank", "verdict", "medal", "side"},
+    "brand-cta-lockup": COMMON_MODULE_PARAMETERS | {"logoText", "logoAssetId", "action", "destination", "side"},
+    "command-popup-stack": COMMON_MODULE_PARAMETERS | {"kicker", "commands", "purposes", "accentCommandIndex", "side"},
+    "windows-prompt-typing": COMMON_MODULE_PARAMETERS | {"appName", "prompt", "side"},
+    "uplifting-sunrise-finale": COMMON_MODULE_PARAMETERS | {"kicker", "claim", "action"},
 }
+SIDE_ANCHORS = {"left", "right"}
+MAX_PUNCH_ZOOM = 2.0
 ASSET_PARAMETER_KEYS = {
     "x", "y", "width", "height", "opacity", "scale", "rotation", "fit", "muted", "volume",
     "sourceStartSec", "playbackRate", "loop", "transitionIn", "transitionOut", "reviewLabel",
@@ -66,17 +130,9 @@ def default_visual_workspace() -> Path:
     return (Path.home() / "Videos" / "VCG Projects").resolve()
 
 
-def _slug(value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return normalized or "visual-project"
-
-
-def _is_within(path: Path, parent: Path) -> bool:
-    try:
-        path.resolve().relative_to(parent.resolve())
-        return True
-    except ValueError:
-        return False
+# Kept as module-local names because callers and tests refer to them here.
+_slug = slug
+_is_within = is_within
 
 
 def _unique_directory(root: Path, name: str) -> Path:
@@ -283,7 +339,9 @@ def create_visual_plan_in_video_project(
     plan = {
         "schemaVersion": VISUAL_PLAN_VERSION,
         "project": {"id": uuid.uuid4().hex, "name": root.name, "createdAt": now, "updatedAt": now},
-        "source": {"video": source_ref, "transcript": transcript_ref},
+        # Cue times are seconds against this exact file. Recording which file it was turns a
+        # re-cut from silent drift into an explicit mismatch.
+        "source": {"video": source_ref, "transcript": transcript_ref, "videoSha256": sha256_file(source_video)},
         "composition": {**metadata, "brandId": BRAND_ID},
         "assets": [],
         "customCompositions": [],
@@ -333,7 +391,42 @@ def _module_semantic_texts(cue: dict) -> list[tuple[str, str, str]]:
             ("parameters.leftTitle", str(params.get("leftTitle") or "")),
             ("parameters.rightTitle", str(params.get("rightTitle") or "")),
         ])
-    list_fields = ["nodes"] if module_id == "dependency-stack" else ["leftItems", "rightItems"] if module_id == "dual-comparison" else ["items"] if module_id == "speaker-side-panel" else []
+    if module_id == "numbered-example-card":
+        fields.append(("parameters.kicker", str(params.get("kicker") or "")))
+    if module_id in PORTED_MODULE_IDS:
+        for key in ("kicker", "thesis", "phrase", "title", "action", "payoff", "verdict", "rank",
+                    "leftLabel", "rightLabel", "logoText", "destination", "appName", "prompt", "claim"):
+            if key in MODULE_PARAMETER_KEYS.get(module_id, set()):
+                fields.append((f"parameters.{key}", str(params.get(key) or "")))
+    if module_id in LIBRARY_MODULE_IDS:
+        fields.append(("parameters.kicker", str(params.get("kicker") or "")))
+        for key in ("text", "before", "after", "footerLeft", "footerRight"):
+            if key in MODULE_PARAMETER_KEYS.get(module_id, set()):
+                fields.append((f"parameters.{key}", str(params.get(key) or "")))
+    if module_id == "ui-callout":
+        fields.extend([
+            ("parameters.label", str(params.get("label") or "")),
+            ("parameters.detail", str(params.get("detail") or "")),
+        ])
+    list_fields = (
+        ["nodes"] if module_id == "dependency-stack"
+        else ["leftItems", "rightItems"] if module_id == "dual-comparison"
+        else ["milestones"] if module_id == "progress-scale"
+        else ["items"] if module_id == "speaker-side-panel"
+        else ["titleLines"] if module_id == "numbered-example-card"
+        else ["rows"] if module_id == "side-list-panel"
+        else ["lines"] if module_id == "result-badge"
+        else ["words"] if module_id == "link-chip"
+        else ["stops"] if module_id == "milestone-path"
+        else ["items"] if module_id == "lower-third-flow"
+        else ["steps"] if module_id == "three-step-celebration"
+        else ["rows"] if module_id in {"career-pathway", "list-reveal-pinned-thesis"}
+        else ["cards"] if module_id == "problem-card-triptych"
+        else ["callouts"] if module_id == "speaker-rise-callouts"
+        else ["bubbles"] if module_id == "conversation-bubble-sequence"
+        else ["commands", "purposes"] if module_id == "command-popup-stack"
+        else []
+    )
     for field in list_fields:
         values = params.get(field) if isinstance(params.get(field), list) else []
         fields.extend((f"parameters.{field}.{index}", str(value)) for index, value in enumerate(values))
@@ -421,7 +514,10 @@ def active_visual_revision(plan: dict) -> dict | None:
 def load_visual_plan(plan_path: Path) -> dict:
     root = find_visual_root(plan_path)
     plan = normalize_visual_plan(json.loads(plan_path.read_text(encoding="utf-8")))
+    # Domain validation first: it names the cue and the rule. The schema runs second as the
+    # backstop that catches anything the hand-written checks do not cover.
     validate_visual_plan(plan, root)
+    validate_document_schema("visual-plan", plan, label=f"{plan_path.name}")
     return plan
 
 
@@ -430,6 +526,7 @@ def save_visual_plan(plan_path: Path, plan: dict) -> dict:
     plan = normalize_visual_plan(plan)
     plan.setdefault("project", {})["updatedAt"] = datetime.now(timezone.utc).isoformat()
     validate_visual_plan(plan, root)
+    validate_document_schema("visual-plan", plan, label=f"{plan_path.name}")
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = plan_path.with_suffix(f"{plan_path.suffix}.tmp")
     temporary.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -444,7 +541,19 @@ def validate_visual_plan(plan: dict, root: Path) -> None:
     duration = float(composition.get("durationSec") or 0)
     if duration <= 0 or int(composition.get("width") or 0) <= 0 or int(composition.get("height") or 0) <= 0:
         raise ValueError("Visual plan composition metadata is invalid.")
-    resolve_project_path(root, (plan.get("source") or {}).get("video", ""))
+    source = resolve_project_path(root, (plan.get("source") or {}).get("video", ""))
+    # Cue timing is validated against the composition duration, so a stored duration that no
+    # longer matches the media would validate cues that fall off the end of the real video.
+    if source.is_file():
+        try:
+            probed = float(probe_visual_source(source)["durationSec"])
+        except (RuntimeError, ValueError, KeyError, json.JSONDecodeError):
+            probed = duration
+        if abs(probed - duration) > 0.5:
+            raise ValueError(
+                f"The visual plan records a {duration:.3f}s runtime but its locked cut is "
+                f"{probed:.3f}s. Re-create the plan from the current locked cut."
+            )
 
     assets = {asset.get("id"): asset for asset in plan.get("assets", [])}
     if None in assets or len(assets) != len(plan.get("assets", [])):
@@ -467,6 +576,15 @@ def validate_visual_plan(plan: dict, root: Path) -> None:
         entry_path = resolve_project_path(root, f"{composition_record.get('projectPath', '').rstrip('/')}/{entry_file}")
         if not project_path.is_dir() or not entry_path.is_file():
             raise ValueError(f"Custom composition {composition_record.get('id')} source is missing.")
+        # The hash must match the directory it claims to describe. Checking only its shape let a
+        # declared value stand in for a measured one, which is the same hole as guessed geometry.
+        measured = sha256_directory(project_path)
+        if composition_record["sourceHash"] != measured:
+            raise ValueError(
+                f"Custom composition {composition_record.get('id')} records sourceHash "
+                f"{composition_record['sourceHash'][:12]}… but its source directory hashes to "
+                f"{measured[:12]}…. Register the hash of the files that are actually there."
+            )
         for optional_path in ("storyboardPath", "timingLedgerPath"):
             value = str(composition_record.get(optional_path) or "")
             if value:
@@ -661,7 +779,19 @@ def visual_plan_response(plan_path: Path, plan: dict) -> dict:
         },
         "activeRevision": revision,
         "production": gate_report,
+        "libraryCuration": delivery_library_curation(plan_path),
     }
+
+
+def delivery_library_curation(plan_path: Path) -> dict | None:
+    """Expose the last harvest outcome so a failed one is visible instead of buried in a file."""
+    manifest = find_visual_root(plan_path) / "visual-production" / "delivery-manifest.json"
+    if not manifest.is_file():
+        return None
+    try:
+        return json.loads(manifest.read_text(encoding="utf-8")).get("libraryCuration")
+    except (OSError, json.JSONDecodeError):
+        return {"status": "failed", "error": "The delivery manifest could not be read."}
 
 
 def active_visual_master(plan_path: Path, plan: dict) -> tuple[Path, dict | None]:
@@ -711,14 +841,6 @@ def _relative_project_path(root: Path, path: Path) -> str:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError as exc:
         raise ValueError("Visual revision artifacts must stay inside the private project.") from exc
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def sha256_directory(path: Path) -> str:
@@ -1012,15 +1134,11 @@ def visual_safety_gate_issues(plan_path: Path, plan: dict) -> list[str]:
     """Require every approved audited graphic suggestion to survive into its rendered cue."""
     suggestions_path = find_visual_root(plan_path) / "visual-production" / "visual-suggestions.json"
     if not suggestions_path.is_file():
-        return []
+        return _missing_suggestions_issues(plan, "speaker-safety and treatment audits")
     try:
         data = json.loads(suggestions_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return ["The visual suggestions audit cannot be read."]
-    reuse_audit = (data.get("coverage") or {}).get("reuseAudit") or {}
-    contract_version = reuse_audit.get("contractVersion")
-    if contract_version not in {2, 3}:
-        return []
 
     cues = {cue.get("id"): cue for cue in plan.get("cues", []) if cue.get("enabled", True)}
     issues: list[str] = []
@@ -1039,19 +1157,26 @@ def visual_safety_gate_issues(plan_path: Path, plan: dict) -> list[str]:
             if parameters.get(key) != suggestion.get(key):
                 issues.append(f"{suggestion_id} cue does not preserve its approved {key} audit.")
         selected_id = suggestion.get("moduleId") or suggestion.get("recipeId")
-        realized_id = cue.get("moduleId") if suggestion.get("moduleId") else parameters.get("recipeId")
+        # A treatment renders either as its own module cue or as a registered custom composition
+        # that names it. Either way the cue must say which treatment it is.
+        realized_id = cue.get("moduleId") or parameters.get("recipeId")
         if selected_id != realized_id:
             issues.append(f"{suggestion_id} cue does not use its approved treatment {selected_id}.")
-        if contract_version == 3:
-            for key in ("meaningfulChanges", "approvalEvidence"):
-                if parameters.get(key) != suggestion.get(key):
-                    issues.append(f"{suggestion_id} cue does not preserve its approved {key} contract.")
-            if parameters.get("planningSuggestionId") != suggestion_id:
-                issues.append(f"{suggestion_id} cue is not linked back to its approved scene packet.")
-            approved_id = (suggestion.get("decision") or {}).get("selectedTreatmentId")
-            if parameters.get("approvedTreatmentId") != approved_id:
-                issues.append(f"{suggestion_id} cue does not preserve its approved treatment-map decision.")
-        issues.extend(_speaker_safety_metadata_issues(suggestion_id, suggestion.get("speakerSafety"), float(suggestion.get("endSec") or 0) - float(suggestion.get("startSec") or 0)))
+        for key in ("meaningfulChanges", "approvalEvidence"):
+            if parameters.get(key) != suggestion.get(key):
+                issues.append(f"{suggestion_id} cue does not preserve its approved {key} contract.")
+        if parameters.get("planningSuggestionId") != suggestion_id:
+            issues.append(f"{suggestion_id} cue is not linked back to its approved scene packet.")
+        approved_id = (suggestion.get("decision") or {}).get("selectedTreatmentId")
+        if parameters.get("approvedTreatmentId") != approved_id:
+            issues.append(f"{suggestion_id} cue does not preserve its approved treatment-map decision.")
+        issues.extend(speaker_safety_issues(
+            suggestion_id,
+            suggestion.get("speakerSafety"),
+            (suggestion.get("scenePacket") or {}).get("layout"),
+            start_sec=float(suggestion.get("startSec") or 0),
+            end_sec=float(suggestion.get("endSec") or 0),
+        ))
         packet = suggestion.get("scenePacket") if isinstance(suggestion.get("scenePacket"), dict) else {}
         protected_regions = packet.get("protectedRegions") if isinstance(packet.get("protectedRegions"), list) else []
         overlays = (suggestion.get("speakerSafety") or {}).get("overlayOcclusionBounds")
@@ -1063,7 +1188,7 @@ def visual_safety_gate_issues(plan_path: Path, plan: dict) -> list[str]:
                     continue
                 for value in overlays:
                     overlay = _safe_normalized_bounds(value)
-                    if overlay is not None and _normalized_bounds_intersect(protected, overlay):
+                    if overlay is not None and bounds_intersect(protected, overlay):
                         issues.append(
                             f"{suggestion_id} places rendered graphics over protected content: "
                             f"{region.get('label') or 'important screen region'}."
@@ -1071,18 +1196,54 @@ def visual_safety_gate_issues(plan_path: Path, plan: dict) -> list[str]:
     return issues
 
 
+def locked_cut_drift_issues(plan_path: Path, plan: dict) -> list[str]:
+    """Detect a plan whose cue times were authored against a different locked cut.
+
+    Every cue time is seconds into a specific file. Re-cutting the transcript rewrites that file
+    and leaves every cue pointing at the wrong moment, with nothing to notice it.
+    """
+    recorded = str((plan.get("source") or {}).get("videoSha256") or "")
+    if not recorded:
+        if not any(cue.get("enabled", True) for cue in plan.get("cues", [])):
+            return []
+        return [
+            "This plan does not record which locked cut it was authored against, so cue timing "
+            "cannot be verified. Re-create the visual plan from the current locked cut."
+        ]
+    try:
+        source = resolve_project_path(find_visual_root(plan_path), (plan.get("source") or {}).get("video", ""))
+    except ValueError:
+        return ["The plan's locked cut is outside the private project."]
+    if not source.is_file():
+        return ["The locked cut this plan was authored against is missing."]
+    if sha256_file(source) != recorded:
+        cue_count = sum(1 for cue in plan.get("cues", []) if cue.get("enabled", True))
+        return [
+            f"The locked cut has changed since this plan was authored. All {cue_count} cue "
+            "time(s) refer to the previous cut and must be re-timed before rendering."
+        ]
+    return []
+
+
+def _missing_suggestions_issues(plan: dict, what: str) -> list[str]:
+    """A plan with cues and no decision record cannot be traced, so it cannot be delivered."""
+    if not any(cue.get("enabled", True) for cue in plan.get("cues", [])):
+        return []
+    return [
+        f"visual-suggestions.json is missing, so the {what} cannot be checked "
+        "and no cue in this plan can be traced to an approved decision."
+    ]
+
+
 def visual_planning_gate_issues(plan_path: Path, plan: dict) -> list[str]:
-    """Block production until every contract-v3 planning decision is approved and traceable."""
+    """Block production until every planning decision is approved and traceable."""
     suggestions_path = find_visual_root(plan_path) / "visual-production" / "visual-suggestions.json"
     if not suggestions_path.is_file():
-        return []
+        return _missing_suggestions_issues(plan, "planning approvals")
     try:
         data = json.loads(suggestions_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return ["The visual suggestions approval contract cannot be read."]
-    reuse = (data.get("coverage") or {}).get("reuseAudit") or {}
-    if reuse.get("contractVersion") != 3:
-        return []
     suggestions = [
         item
         for item in data.get("suggestions", [])
@@ -1123,50 +1284,184 @@ def visual_planning_gate_issues(plan_path: Path, plan: dict) -> list[str]:
     return issues
 
 
-def _speaker_safety_metadata_issues(suggestion_id: str, safety: object, duration: float) -> list[str]:
+@lru_cache(maxsize=4)
+def _document_validator(name: str):
+    from jsonschema import Draft202012Validator
+
+    path = project_root() / "visual-production" / "schemas" / f"{name}.schema.json"
+    if not path.is_file():
+        raise RuntimeError(f"The {name} schema is missing. Documents cannot be validated without it.")
+    schema = json.loads(path.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    return Draft202012Validator(schema)
+
+
+def validate_document_schema(name: str, document: dict, *, label: str) -> None:
+    """Enforce the published JSON Schema on every read and write.
+
+    The schemas were previously documentation: jsonschema was not a dependency, so no document
+    had ever been checked against them. Running them alongside the Python validators means the
+    two contracts cannot silently disagree.
+    """
+    errors = sorted(_document_validator(name).iter_errors(document), key=lambda error: list(error.path))
+    if not errors:
+        return
+    details = "; ".join(_describe_schema_error(error) for error in errors[:5])
+    more = f" (and {len(errors) - 5} more)" if len(errors) > 5 else ""
+    raise ValueError(f"{label} does not match {name}.schema.json. {details}{more}")
+
+
+def _describe_schema_error(error) -> str:
+    """Name the field that is wrong.
+
+    A oneOf failure reports the whole object as invalid, which says nothing useful when the real
+    problem is one mistyped field. Drill into the closest-matching branch instead.
+    """
+    from jsonschema.exceptions import best_match
+
+    if error.context:
+        deepest = best_match(error.context)
+        if deepest is not None:
+            path = list(error.absolute_path) + list(deepest.path)
+            location = "/".join(str(part) for part in path) or "document root"
+            return f"{location}: {deepest.message}"
+    location = "/".join(str(part) for part in error.absolute_path) or "document root"
+    return f"{location}: {error.message}"
+
+
+def scene_geometry_path() -> Path:
+    return project_root() / "visual-production" / "layouts" / "scene-geometry.json"
+
+
+@lru_cache(maxsize=1)
+def scene_geometry() -> dict:
+    path = scene_geometry_path()
+    if not path.is_file():
+        raise RuntimeError(
+            "visual-production/layouts/scene-geometry.json is missing. Speaker safety cannot be measured without it."
+        )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def measured_speaker_bounds(layout: str) -> dict[str, float] | None:
+    """Return the measured speaker rectangle for a recording layout, or None when no speaker is on screen.
+
+    Composited layouts are computed from the OBS scene geometry; full-screen-talking is measured from
+    delivered footage because its camera source is uncropped. Either way these are facts about the
+    capture setup, so they are looked up rather than accepted from a suggestion.
+    """
+    entry = scene_geometry()["layouts"].get(layout)
+    if entry is None:
+        raise ValueError(f"Layout {layout} has no measured scene geometry.")
+    bounds = entry.get("speakerBounds")
+    return dict(bounds) if isinstance(bounds, dict) else None
+
+
+SCREEN_SHARE_SPEAKER_AREA = 0.15
+
+
+def is_screen_share_layout(layout: str) -> bool:
+    """True when the speaker sits in a corner or is absent, so the frame is mostly screen.
+
+    On these layouts the thing that must stay readable is a region of the screen, not the whole
+    span of time. Naming the region is what lets a graphic sit beside a demonstration instead of
+    the demonstration being declared off-limits for minutes at a stretch.
+    """
+    bounds = measured_speaker_bounds(layout)
+    if bounds is None:
+        return True
+    return bounds["width"] * bounds["height"] < SCREEN_SHARE_SPEAKER_AREA
+
+
+def bounds_match(left: dict[str, float], right: dict[str, float], tolerance: float = 0.02) -> bool:
+    return all(abs(left[key] - right[key]) <= tolerance for key in ("x", "y", "width", "height"))
+
+
+def describe_bounds(bounds: dict[str, float]) -> str:
+    frame = scene_geometry()["frame"]
+    x0 = round(bounds["x"] * frame["width"])
+    y0 = round(bounds["y"] * frame["height"])
+    x1 = round((bounds["x"] + bounds["width"]) * frame["width"])
+    y1 = round((bounds["y"] + bounds["height"]) * frame["height"])
+    return f"({x0},{y0})-({x1},{y1})px"
+
+
+def speaker_safety_issues(
+    suggestion_id: str,
+    safety: object,
+    layout: object,
+    *,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
+) -> list[str]:
+    """The speaker-safety rules, in one place.
+
+    Two implementations of these rules previously existed: one raising in the suggestion
+    validator, one collecting issues in the production gate. They could disagree about what was
+    safe, which is the worst possible way for a safety check to fail.
+    """
     if not isinstance(safety, dict) or safety.get("checked") is not True:
         return [f"{suggestion_id} is missing its completed speaker-safety audit."]
+    if safety.get("mode") not in SPEAKER_SAFETY_MODES:
+        return [f"{suggestion_id} has an unknown speakerSafety mode."]
     try:
         absence = float(safety.get("maxSpeakerAbsenceSec"))
     except (TypeError, ValueError):
-        return [f"{suggestion_id} has an invalid speaker-absence duration."]
-    if absence < 0 or absence > 2:
-        return [f"{suggestion_id} hides the speaker for more than two seconds."]
-    if safety.get("mode") == "brief-full-frame-hit":
-        return [] if duration <= 2.01 else [f"{suggestion_id} uses a full-frame hit longer than two seconds."]
-    speaker = _safe_normalized_bounds(safety.get("speakerBounds"))
+        return [f"{suggestion_id} needs maxSpeakerAbsenceSec."]
+    if absence != 0:
+        return [f"{suggestion_id} may not hide the speaker. Every graphic is an overlay; the speaker stays on screen."]
+
+    issues: list[str] = []
+    if start_sec is not None and end_sec is not None:
+        verified = safety.get("verifiedAtSec")
+        if not isinstance(verified, list):
+            issues.append(f"{suggestion_id} must verify speaker safety at least three scene states.")
+        else:
+            try:
+                times = [float(value) for value in verified]
+            except (TypeError, ValueError):
+                return [*issues, f"{suggestion_id} has invalid speakerSafety verifiedAtSec values."]
+            if len(set(times)) < 3:
+                issues.append(f"{suggestion_id} must verify speaker safety at least three scene states.")
+            if any(value < start_sec or value > end_sec for value in times):
+                issues.append(f"{suggestion_id} speakerSafety checks must stay inside the suggestion range.")
+
+    try:
+        speaker = measured_speaker_bounds(str(layout))
+    except (ValueError, RuntimeError):
+        return [
+            *issues,
+            f"{suggestion_id} needs a known scenePacket.layout before speaker safety can be measured.",
+        ]
+    reported = safety.get("speakerBounds")
+    if speaker is not None:
+        parsed = normalized_bounds(reported)
+        if parsed is None or not bounds_match(parsed, speaker):
+            issues.append(
+                f"{suggestion_id} reports speakerBounds that do not match the measured geometry for "
+                f"layout {layout} ({describe_bounds(speaker)}). Use the measured bounds; they are not "
+                "a judgement call."
+            )
+    elif reported is not None:
+        issues.append(f"{suggestion_id} uses layout {layout}, which has no speaker on screen.")
+
     overlays = safety.get("overlayOcclusionBounds")
-    if speaker is None or not isinstance(overlays, list):
-        return [f"{suggestion_id} is missing normalized speaker or overlay bounds."]
-    issues = []
-    for value in overlays:
-        overlay = _safe_normalized_bounds(value)
+    if not isinstance(overlays, list):
+        return [*issues, f"{suggestion_id} needs overlayOcclusionBounds."]
+    for index, value in enumerate(overlays):
+        overlay = normalized_bounds(value)
         if overlay is None:
-            issues.append(f"{suggestion_id} has invalid overlay occlusion bounds.")
-        elif _normalized_bounds_intersect(speaker, overlay):
-            issues.append(f"{suggestion_id} places rendered graphics over the protected speaker bounds.")
+            issues.append(f"{suggestion_id} overlayOcclusionBounds[{index}] must be normalized frame bounds.")
+        elif speaker is not None and bounds_intersect(speaker, overlay):
+            issues.append(
+                f"{suggestion_id} places an overlay over the speaker. Layout {layout} occupies "
+                f"{describe_bounds(speaker)}; this overlay covers {describe_bounds(overlay)}."
+            )
     return issues
 
 
 def _safe_normalized_bounds(value: object) -> dict[str, float] | None:
-    if not isinstance(value, dict):
-        return None
-    try:
-        bounds = {key: float(value[key]) for key in ("x", "y", "width", "height")}
-    except (KeyError, TypeError, ValueError):
-        return None
-    if bounds["x"] < 0 or bounds["y"] < 0 or bounds["width"] <= 0 or bounds["height"] <= 0 or bounds["x"] + bounds["width"] > 1 or bounds["y"] + bounds["height"] > 1:
-        return None
-    return bounds
-
-
-def _normalized_bounds_intersect(left: dict[str, float], right: dict[str, float]) -> bool:
-    return not (
-        left["x"] + left["width"] <= right["x"]
-        or right["x"] + right["width"] <= left["x"]
-        or left["y"] + left["height"] <= right["y"]
-        or right["y"] + right["height"] <= left["y"]
-    )
+    return normalized_bounds(value)
 
 
 def visual_production_gate_report(plan_path: Path, plan: dict) -> dict:
@@ -1196,6 +1491,7 @@ def visual_production_gate_report(plan_path: Path, plan: dict) -> dict:
     overflow_files = blanket_overflow_exceptions(plan_path, plan)
     visual_safety_issues = visual_safety_gate_issues(plan_path, plan)
     planning_approval_issues = visual_planning_gate_issues(plan_path, plan)
+    source_drift_issues = locked_cut_drift_issues(plan_path, plan)
     reopen = gates.get("deliveryReopen") if isinstance(gates.get("deliveryReopen"), dict) else None
     reopen_verified = bool(
         reopen and revision and revision.get("status") == "delivered"
@@ -1204,8 +1500,18 @@ def visual_production_gate_report(plan_path: Path, plan: dict) -> dict:
     )
     timing_anchored = not unanchored
     active_review_count = sum(1 for item in plan.get("reviews", []) if str(item.get("note") or "").strip())
-    can_render_review = representative_approved and timing_anchored and not overflow_files and not visual_safety_issues and not planning_approval_issues
-    can_deliver = timing_anchored and not overflow_files and not visual_safety_issues and not planning_approval_issues and active_review_count == 0
+    # Loop A gates the review render: every scene approved from its still frame.
+    # Loop B gates delivery: the full render watched in context and signed off.
+    # There is deliberately no route to a final export that skips either loop.
+    planning_ready = (
+        timing_anchored
+        and not overflow_files
+        and not visual_safety_issues
+        and not planning_approval_issues
+        and not source_drift_issues
+    )
+    can_render_review = planning_ready
+    can_deliver = planning_ready and full_review_approved and active_review_count == 0
     messages: list[str] = []
     if unanchored:
         messages.append(f"Anchor {len(unanchored)} visible semantic item(s) to spokenStartSec and fullyVisibleSec before exporting.")
@@ -1217,6 +1523,14 @@ def visual_production_gate_report(plan_path: Path, plan: dict) -> dict:
         messages.append(f"Approve or revise {len(planning_approval_issues)} scene-planning decision(s) before rendering.")
     if active_review_count:
         messages.append(f"Accept or resolve {active_review_count} active review note(s) before exporting the final video.")
+    if source_drift_issues:
+        messages.extend(source_drift_issues)
+    if planning_ready and not full_review_approved:
+        messages.append(
+            "Render a review pass and approve it against the full cut before exporting the final video."
+            if not review_render_available
+            else "Approve the full review render before exporting the final video."
+        )
     return {
         "planHash": plan_hash,
         "representativeApproved": representative_approved,
@@ -1232,6 +1546,8 @@ def visual_production_gate_report(plan_path: Path, plan: dict) -> dict:
         "speakerSafetyIssues": visual_safety_issues,
         "planningApprovalPassed": not planning_approval_issues,
         "planningApprovalIssues": planning_approval_issues,
+        "lockedCutMatches": not source_drift_issues,
+        "lockedCutIssues": source_drift_issues,
         "canRenderReview": can_render_review,
         "canDeliver": can_deliver,
         "canExportFinal": can_deliver,
@@ -1396,7 +1712,314 @@ def _cue_window(cue: dict, range_start: float, range_end: float) -> tuple[float,
     return start - range_start, end - start
 
 
-def _module_markup(cue: dict, element_id: str, start: float, duration: float, track: int) -> str:
+LIBRARY_MODULE_IDS = {
+    "side-list-panel", "result-badge", "link-chip",
+    "milestone-path", "before-after-grade", "lower-third-flow",
+}
+# The catalog families, built. Each was a name with a description and no renderer; a plan that
+# selected one could not even produce an approval frame, which is why plans came back thin.
+PORTED_MODULE_IDS = {
+    "three-step-celebration", "career-pathway", "list-reveal-pinned-thesis",
+    "kinetic-word-punctuation", "numbered-step-intro", "problem-card-triptych",
+    "speaker-rise-callouts", "conversation-bubble-sequence", "tradeoff-meter",
+    "rank-medal-hit", "brand-cta-lockup", "command-popup-stack",
+    "windows-prompt-typing", "uplifting-sunrise-finale",
+}
+
+
+def _ported_markup(
+    module_id: str,
+    params: dict,
+    common: str,
+    accent: str,
+    kicker: str,
+    staged_assets: dict[str, str] | None = None,
+) -> str:
+    """Markup for the fourteen catalog families, built against the creator's brand language."""
+    side = str(params.get("side")) if str(params.get("side")) in SIDE_ANCHORS else "right"
+    open_tag = f'<section {common} style="--cue-accent:{accent}">'
+    kick = f'<div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+
+    def accent_at(key: str) -> int:
+        return int(_number(params.get(key), -1, -1, 9))
+
+    if module_id == "three-step-celebration":
+        steps = _strings(params.get("steps"), 3)
+        payoff = html.escape(str(params.get("payoff") or ""))
+        body = "".join(
+            f'<div class="pf-step"><i>{index + 1}</i>'
+            f'<span data-semantic-path="parameters.steps.{index}">{html.escape(step)}</span></div>'
+            for index, step in enumerate(steps)
+        )
+        spark = "".join('<i class="pf-spark"></i>' for _ in range(9))
+        return (f'{open_tag}<div class="pf-card pf-{side}">{kick}<div class="pf-steps">{body}</div>'
+                f'<div class="pf-payoff" data-semantic-path="parameters.payoff">{payoff}</div>'
+                f'<div class="pf-sparks">{spark}</div></div></section>')
+
+    if module_id == "career-pathway":
+        rows = _strings(params.get("rows"), 4)
+        marked = accent_at("accentRowIndex")
+        body = "".join(
+            f'<div class="pf-path-row pf-{"odd" if index % 2 else "even"}{" lib-accent" if index == marked else ""}" '
+            f'data-semantic-path="parameters.rows.{index}">{html.escape(row)}</div>'
+            for index, row in enumerate(rows)
+        )
+        return f'{open_tag}<div class="pf-card pf-{side}">{kick}<div class="pf-path">{body}</div></div></section>'
+
+    if module_id == "list-reveal-pinned-thesis":
+        thesis = html.escape(str(params.get("thesis") or ""))
+        rows = _strings(params.get("rows"), 5)
+        marked = accent_at("accentRowIndex")
+        body = "".join(
+            f'<div class="pf-pin-row{" lib-accent" if index == marked else ""}" data-layout-allow-overlap>'
+            f'<i></i><span data-semantic-path="parameters.rows.{index}">{html.escape(row)}</span></div>'
+            for index, row in enumerate(rows)
+        )
+        return (f'{open_tag}<div class="pf-card pf-{side}">{kick}'
+                f'<div class="pf-thesis" data-semantic-path="parameters.thesis">{thesis}</div>'
+                f'<div class="pf-pin-rows">{body}</div></div></section>')
+
+    if module_id == "kinetic-word-punctuation":
+        phrase = html.escape(str(params.get("phrase") or "THIS"))
+        anchor = str(params.get("anchor")) if str(params.get("anchor")) in {"top", "middle", "bottom"} else "middle"
+        return (f'{open_tag}<div class="pf-kinetic pf-k-{anchor} pf-{side}">'
+                f'<span data-semantic-path="parameters.phrase">{phrase}</span></div></section>')
+
+    if module_id == "numbered-step-intro":
+        number = int(_number(params.get("stepNumber"), 1, 1, 99))
+        show_number = params.get("showNumber") is not False
+        title = html.escape(str(params.get("title") or ""))
+        action = html.escape(str(params.get("action") or ""))
+        number_markup = f'<div class="pf-step-num">{number:02d}</div>' if show_number else ""
+        no_number = " pf-step-no-num" if not show_number else ""
+        return (f'{open_tag}<div class="pf-card pf-step-intro{no_number} pf-{side}">'
+                f'{number_markup}'
+                f'<div class="pf-step-title" data-semantic-path="parameters.title">{title}</div>'
+                f'<div class="pf-step-action" data-semantic-path="parameters.action">{action}</div></div></section>')
+
+    if module_id == "problem-card-triptych":
+        cards = _strings(params.get("cards"), 3)
+        marked = accent_at("accentCardIndex")
+        body = "".join(
+            f'<div class="pf-tri-card{" lib-accent" if index == marked else ""}"><i>{index + 1:02d}</i>'
+            f'<span data-semantic-path="parameters.cards.{index}">{html.escape(card)}</span></div>'
+            for index, card in enumerate(cards)
+        )
+        return f'{open_tag}<div class="pf-triptych">{kick}<div class="pf-tri-row">{body}</div></div></section>'
+
+    if module_id == "speaker-rise-callouts":
+        thesis = html.escape(str(params.get("thesis") or ""))
+        callouts = _strings(params.get("callouts"), 4)
+        marked = accent_at("accentCalloutIndex")
+        body = "".join(
+            f'<div class="pf-rise-item{" lib-accent" if index == marked else ""}" '
+            f'data-semantic-path="parameters.callouts.{index}">{html.escape(call)}</div>'
+            for index, call in enumerate(callouts)
+        )
+        return (f'{open_tag}<div class="pf-rise-thesis" data-semantic-path="parameters.thesis">{thesis}</div>'
+                f'<div class="pf-rise">{body}</div></section>')
+
+    if module_id == "conversation-bubble-sequence":
+        bubbles = _strings(params.get("bubbles"), 4)
+        marked = accent_at("accentBubbleIndex")
+        body = "".join(
+            f'<div class="pf-bubble pf-b-{"right" if index % 2 else "left"}{" lib-accent" if index == marked else ""}" '
+            f'data-semantic-path="parameters.bubbles.{index}">{html.escape(bubble)}</div>'
+            for index, bubble in enumerate(bubbles)
+        )
+        return f'{open_tag}<div class="pf-card pf-{side}">{kick}<div class="pf-bubbles">{body}</div></div></section>'
+
+    if module_id == "tradeoff-meter":
+        left_label = html.escape(str(params.get("leftLabel") or "EASY"))
+        right_label = html.escape(str(params.get("rightLabel") or "CONTROL"))
+        verdict = html.escape(str(params.get("verdict") or ""))
+        value = _number(params.get("value"), 0.5, 0, 1) * 100
+        return (f'{open_tag}<div class="pf-card pf-{side}">{kick}'
+                f'<div class="pf-meter"><div class="pf-meter-fill" style="width:{value:.1f}%"></div>'
+                f'<div class="pf-meter-knob" style="left:{value:.1f}%"></div></div>'
+                f'<div class="pf-meter-labels"><span data-semantic-path="parameters.leftLabel">{left_label}</span>'
+                f'<span data-semantic-path="parameters.rightLabel">{right_label}</span></div>'
+                f'<div class="pf-verdict" data-semantic-path="parameters.verdict">{verdict}</div></div></section>')
+
+    if module_id == "rank-medal-hit":
+        rank = html.escape(str(params.get("rank") or "#1"))
+        verdict = html.escape(str(params.get("verdict") or ""))
+        medal = html.escape(str(params.get("medal") or "★"))
+        return (f'{open_tag}<div class="pf-card pf-medal pf-{side}"><div class="pf-medal-disc">{medal}</div>'
+                f'<div class="pf-rank" data-semantic-path="parameters.rank">{rank}</div>'
+                f'<div class="pf-verdict" data-semantic-path="parameters.verdict">{verdict}</div></div></section>')
+
+    if module_id == "brand-cta-lockup":
+        logo = html.escape(str(params.get("logoText") or "VCG"))
+        logo_asset_id = str(params.get("logoAssetId") or "")
+        staged_logo = (staged_assets or {}).get(logo_asset_id)
+        if logo_asset_id and not staged_logo:
+            raise ValueError(f"brand-cta-lockup references unknown logoAssetId: {logo_asset_id}")
+        action = html.escape(str(params.get("action") or ""))
+        destination = html.escape(str(params.get("destination") or ""))
+        logo_markup = (
+            f'<img class="pf-logo-image" src="assets/{html.escape(staged_logo)}" alt="{logo}" '
+            f'data-semantic-path="parameters.logoText"/>'
+            if staged_logo else
+            f'<div class="pf-logo" data-semantic-path="parameters.logoText">{logo}</div>'
+        )
+        community_class = " pf-community" if staged_logo else ""
+        return (f'{open_tag}<div class="pf-card pf-cta{community_class} pf-{side}">'
+                f'{logo_markup}'
+                f'<div class="pf-action" data-semantic-path="parameters.action">{action}</div>'
+                f'<div class="pf-dest" data-semantic-path="parameters.destination">{destination}</div></div></section>')
+
+    if module_id == "command-popup-stack":
+        commands = _strings(params.get("commands"), 5)
+        purposes = _strings(params.get("purposes"), 5)
+        marked = accent_at("accentCommandIndex")
+        body = "".join(
+            f'<div class="pf-cmd{" lib-accent" if index == marked else ""}">'
+            f'<b data-semantic-path="parameters.commands.{index}">{html.escape(command)}</b>'
+            + (f'<span data-semantic-path="parameters.purposes.{index}">{html.escape(purposes[index])}</span>'
+               if index < len(purposes) else "")
+            + '</div>'
+            for index, command in enumerate(commands)
+        )
+        return f'{open_tag}<div class="pf-card pf-{side}">{kick}<div class="pf-cmds">{body}</div></div></section>'
+
+    if module_id == "windows-prompt-typing":
+        app_name = html.escape(str(params.get("appName") or "PowerPoint"))
+        prompt_text = html.escape(str(params.get("prompt") or ""))
+        return (f'{open_tag}<div class="pf-window pf-{side}">'
+                f'<div class="pf-titlebar"><span data-semantic-path="parameters.appName">{app_name}</span>'
+                f'<i></i><i></i><i></i></div>'
+                f'<div class="pf-prompt" data-semantic-path="parameters.prompt">{prompt_text}</div></div></section>')
+
+    claim = html.escape(str(params.get("claim") or ""))
+    action = html.escape(str(params.get("action") or ""))
+    return (f'{open_tag}<div class="pf-sunrise"><div class="pf-sun"></div>{kick}'
+            f'<div class="pf-claim" data-semantic-path="parameters.claim">{claim}</div>'
+            f'<div class="pf-final-action" data-semantic-path="parameters.action">{action}</div></div></section>')
+
+
+def _strings(value: object, limit: int) -> list[str]:
+    return [str(item) for item in value[:limit]] if isinstance(value, list) else []
+
+
+def _library_markup(module_id: str, params: dict, common: str, accent: str, kicker: str, text: str) -> str:
+    """Markup for the families ported from the creator's built library.
+
+    Each anchors to one edge of the frame so a software demonstration stays readable behind it,
+    which is why these were the ones that worked in the July-22 video.
+    """
+    side = str(params.get("side")) if str(params.get("side")) in SIDE_ANCHORS else "right"
+    accent_index = int(_number(params.get("accentRowIndex", params.get("accentLineIndex", params.get("accentWordIndex", params.get("accentStopIndex", params.get("accentItemIndex", -1))))), -1, -1, 9))
+    open_tag = f'<section {common} style="--cue-accent:{accent}">'
+
+    if module_id == "side-list-panel":
+        rows = _strings(params.get("rows"), 6)
+        numbered = str(params.get("rowStyle")) != "plain"
+        body = "".join(
+            f'<div class="lib-row{" lib-accent" if index == accent_index else ""}">'
+            f'{f"<i>{index + 1:02d}</i>" if numbered else "<i></i>"}'
+            f'<b data-semantic-path="parameters.rows.{index}">{html.escape(row)}</b></div>'
+            for index, row in enumerate(rows)
+        )
+        title = f'<div class="lib-title" data-semantic-path="parameters.text">{text}</div>' if params.get("text") else ""
+        return (f'{open_tag}<div class="lib-panel lib-{side}">'
+                f'<div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+                f'{title}<div class="lib-rows">{body}</div></div></section>')
+
+    if module_id == "result-badge":
+        lines = _strings(params.get("lines"), 4)
+        mark = html.escape(str(params.get("mark") or "✓"))
+        body = "".join(
+            f'<div class="lib-result-line{" lib-accent" if index == accent_index else ""}" '
+            f'data-semantic-path="parameters.lines.{index}">{html.escape(line)}</div>'
+            for index, line in enumerate(lines)
+        )
+        return (f'{open_tag}<div class="lib-badge lib-{side}"><span class="lib-check">{mark}</span>'
+                f'<div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+                f'{body}</div></section>')
+
+    if module_id == "link-chip":
+        words = _strings(params.get("words"), 6)
+        glyph = html.escape(str(params.get("glyph") or "→"))
+        body = "".join(
+            f'<span class="{"lib-accent" if index == accent_index else ""}" '
+            f'data-semantic-path="parameters.words.{index}">{html.escape(word)}</span>'
+            for index, word in enumerate(words)
+        )
+        return (f'{open_tag}<div class="lib-chip lib-{side}"><div class="lib-glyph">{glyph}</div>'
+                f'<div><div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+                f'<div class="lib-words">{body}</div></div></div></section>')
+
+    if module_id == "milestone-path":
+        stops = _strings(params.get("stops"), 5)
+        body = "".join(
+            f'<div class="lib-stop{" lib-accent" if index == accent_index else ""}"><i></i>'
+            f'<span data-semantic-path="parameters.stops.{index}">{html.escape(stop)}</span></div>'
+            for index, stop in enumerate(stops)
+        )
+        title = f'<div class="lib-title" data-semantic-path="parameters.text">{text}</div>' if params.get("text") else ""
+        return (f'{open_tag}<div class="lib-path lib-{side}"><div class="lib-spine"></div>'
+                f'<div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+                f'{title}{body}</div></section>')
+
+    if module_id == "before-after-grade":
+        before_raw = str(params.get("before") or "C")
+        after_raw = str(params.get("after") or "A")
+        before = html.escape(before_raw)
+        after = html.escape(after_raw)
+        before_class = " lib-long" if len(before_raw) > 3 else ""
+        after_class = " lib-long" if len(after_raw) > 3 else ""
+        arrow = html.escape(str(params.get("arrow") or "→"))
+        footer_left = html.escape(str(params.get("footerLeft") or ""))
+        footer_right = html.escape(str(params.get("footerRight") or ""))
+        return (f'{open_tag}<div class="lib-grade lib-{side}">'
+                f'<div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+                f'<div class="lib-track"><span class="lib-before{before_class}" data-semantic-path="parameters.before">{before}</span>'
+                f'<i>{arrow}</i><span class="lib-after{after_class}" data-semantic-path="parameters.after">{after}</span></div>'
+                f'<div class="lib-grade-foot"><span data-semantic-path="parameters.footerLeft">{footer_left}</span>'
+                f'<b data-semantic-path="parameters.footerRight">{footer_right}</b></div></div></section>')
+
+    items = _strings(params.get("items"), 6)
+    variant = str(params.get("variant")) if str(params.get("variant")) in {"flow", "stack", "celebrate"} else "flow"
+    body = "".join(
+        f'<span class="lib-flow-item{" lib-accent" if index == accent_index else ""}" '
+        f'data-semantic-path="parameters.items.{index}">{html.escape(item)}</span>'
+        for index, item in enumerate(items)
+    )
+    return (f'{open_tag}<div class="lib-lower lib-{variant}"><div class="lib-lower-rail"></div>'
+            f'<div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+            f'<div class="lib-flow">{body}</div></div></section>')
+
+
+def _speaker_safe_overlay_style(params: dict) -> str:
+    """Place an opaque graphic inside the exact region approved by speaker safety."""
+    safety = params.get("speakerSafety") if isinstance(params.get("speakerSafety"), dict) else {}
+    overlays = safety.get("overlayOcclusionBounds")
+    overlay_items = overlays if isinstance(overlays, list) else [overlays] if isinstance(overlays, dict) else []
+    valid = [
+        bounds
+        for item in overlay_items
+        if (bounds := normalized_bounds(item)) is not None
+    ]
+    bounds = max(valid, key=lambda item: item["width"] * item["height"]) if valid else {
+        "x": .18, "y": .02, "width": .78, "height": .62,
+    }
+    return (
+        f'left:{bounds["x"] * 100:.3f}%;top:{bounds["y"] * 100:.3f}%;'
+        f'width:{bounds["width"] * 100:.3f}%;height:{bounds["height"] * 100:.3f}%;'
+        "right:auto;bottom:auto;border:3px solid var(--ink);"
+        "box-shadow:14px 16px 0 rgba(0,124,125,.24)"
+    )
+
+
+def _module_markup(
+    cue: dict,
+    element_id: str,
+    start: float,
+    duration: float,
+    track: int,
+    staged_assets: dict[str, str] | None = None,
+) -> str:
     params = cue.get("parameters") or {}
     module_id = cue["moduleId"]
     text = html.escape(str(params.get("text") or "EDIT THIS TEXT"))
@@ -1406,16 +2029,44 @@ def _module_markup(cue: dict, element_id: str, start: float, duration: float, tr
         f'id="{element_id}" class="clip module module-{module_id}" '
         f'data-start="{start:.4f}" data-duration="{duration:.4f}" data-track-index="{track}"'
     )
+    safe_overlay_style = _speaker_safe_overlay_style(params)
     if module_id == "source-footage-hold":
         return ""
     if module_id == "punchline-reveal":
-        return f'<section {common} style="--cue-accent:{accent_color}"><div class="module-fill"><div class="grid"></div><div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div><div class="punchline" data-semantic-path="parameters.text">{text}</div><div class="rule"></div></div></section>'
+        image_asset_id = str(params.get("imageAssetId") or "")
+        staged_image = (staged_assets or {}).get(image_asset_id)
+        if image_asset_id and not staged_image:
+            raise ValueError(f"punchline-reveal references unknown imageAssetId: {image_asset_id}")
+        if staged_image:
+            return (
+                f'<section {common} style="--cue-accent:{accent_color}">'
+                f'<div class="joke-card-approved">'
+                f'<img class="joke-image-approved" src="assets/{html.escape(staged_image)}" alt="" />'
+                f'<div class="joke-copy-approved">'
+                f'<div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+                f'<div class="joke-line-approved" data-semantic-path="parameters.text">{text}</div>'
+                f'</div></div></section>'
+            )
+        return f'<section {common} style="--cue-accent:{accent_color}"><div class="module-fill" style="{safe_overlay_style}"><div class="grid"></div><div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div><div class="punchline" data-semantic-path="parameters.text">{text}</div><div class="rule"></div></div></section>'
     if module_id == "speaker-side-panel":
         return f'<section {common} style="--cue-accent:{accent_color}"><div class="side-copy"><div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div><div class="side-title" data-semantic-path="parameters.text">{text}</div></div><div class="video-outline"></div></section>'
     if module_id == "progress-scale":
         start_label = html.escape(str(params.get("startLabel") or "START"))
         target_label = html.escape(str(params.get("targetLabel") or "TARGET"))
-        return f'<section {common}><div class="module-fill"><div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div><div class="stat-title" data-semantic-path="parameters.text">{text}</div><div class="scale"><div class="scale-fill"></div><div class="scale-marker"></div><div class="scale-labels"><span data-semantic-path="parameters.startLabel">{start_label}</span><span data-semantic-path="parameters.targetLabel">{target_label}</span></div></div><div class="stat-video-outline"></div></div></section>'
+        milestones = params.get("milestones") if isinstance(params.get("milestones"), list) else []
+        milestone_markup = "".join(
+            f'<span data-semantic-path="parameters.milestones.{index}" '
+            f'style="border-left:5px solid var(--teal);padding:8px 10px;color:var(--ink);'
+            f'font-size:18px;font-weight:800;line-height:1.05">{html.escape(str(item))}</span>'
+            for index, item in enumerate(milestones[:4])
+        )
+        milestones_markup = (
+            f'<div class="scale-milestones" style="position:absolute;left:7%;right:7%;bottom:24%;'
+            f'display:grid;grid-template-columns:repeat({len(milestones[:4])},minmax(0,1fr));'
+            f'gap:12px">{milestone_markup}</div>'
+            if milestone_markup else ""
+        )
+        return f'<section {common}><div class="module-fill" style="{safe_overlay_style}"><div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div><div class="stat-title" data-semantic-path="parameters.text">{text}</div>{milestones_markup}<div class="scale"><div class="scale-fill"></div><div class="scale-marker"></div><div class="scale-labels"><span data-semantic-path="parameters.startLabel">{start_label}</span><span data-semantic-path="parameters.targetLabel">{target_label}</span></div></div></div></section>'
     if module_id == "dual-comparison":
         left_title = html.escape(str(params.get("leftTitle") or "OPTION A"))
         right_title = html.escape(str(params.get("rightTitle") or "OPTION B"))
@@ -1427,11 +2078,68 @@ def _module_markup(cue: dict, element_id: str, start: float, duration: float, tr
         right_markup = "".join(f'<li data-semantic-path="parameters.rightItems.{index}">{html.escape(str(item))}</li>' for index, item in enumerate(right_items[:5]))
         return (
             f'<section {common} style="--left-accent:{left_color};--right-accent:{right_color}">'
-            f'<div class="comparison-canvas"><div class="comparison-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+            f'<div class="comparison-canvas" style="{safe_overlay_style};grid-template-columns:repeat(2,minmax(0,1fr));padding:76px 28px 24px">'
+            f'<div class="comparison-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
             f'<div class="comparison-column comparison-left"><h2 data-semantic-path="parameters.leftTitle">{left_title}</h2><ul>{left_markup}</ul></div>'
-            f'<div class="comparison-speaker-outline"></div>'
             f'<div class="comparison-column comparison-right"><h2 data-semantic-path="parameters.rightTitle">{right_title}</h2><ul>{right_markup}</ul></div>'
             f'</div></section>'
+        )
+    if module_id == "source-punch-zoom":
+        # Pure camera move on the source. It renders no overlay at all, which is what makes it
+        # usable over a demonstration that must stay readable.
+        return f'<section {common}></section>'
+    if module_id in LIBRARY_MODULE_IDS:
+        return _library_markup(module_id, params, common, accent_color, kicker, text)
+    if module_id in PORTED_MODULE_IDS:
+        return _ported_markup(module_id, params, common, accent_color, kicker, staged_assets)
+    if module_id == "ui-callout":
+        label = html.escape(str(params.get("label") or "THIS"))
+        detail = html.escape(str(params.get("detail") or ""))
+        target = normalized_bounds(params.get("targetBounds")) or {"x": .55, "y": .12, "width": .35, "height": .18}
+        pointer = "above" if str(params.get("pointer")) == "above" else "below"
+        left, top = target["x"] * 100, target["y"] * 100
+        wide, tall = target["width"] * 100, target["height"] * 100
+        label_top = (target["y"] + target["height"]) * 100 if pointer == "below" else target["y"] * 100
+        align_right = target["x"] + target["width"] > .78
+        label_left = (target["x"] + target["width"]) * 100 if align_right else left
+        alignment_class = " callout-align-right" if align_right else ""
+        detail_markup = (
+            f'<span class="callout-detail" data-semantic-path="parameters.detail">{detail}</span>' if detail else ""
+        )
+        return (
+            f'<section {common} style="--cue-accent:{accent_color}">'
+            f'<div class="callout-ring" style="left:{left:.3f}%;top:{top:.3f}%;width:{wide:.3f}%;height:{tall:.3f}%"></div>'
+            f'<div class="callout-label callout-{pointer}{alignment_class}" style="left:{label_left:.3f}%;top:{label_top:.3f}%">'
+            f'<span class="callout-text" data-semantic-path="parameters.label">{label}</span>{detail_markup}</div>'
+            f'</section>'
+        )
+    if module_id == "numbered-example-card":
+        number = int(_number(params.get("exampleNumber"), 1, 1, 99))
+        total = int(_number(params.get("totalExamples"), 10, 1, 99))
+        accent_index = int(_number(params.get("accentLineIndex"), -1, -1, 4))
+        lines = params.get("titleLines") if isinstance(params.get("titleLines"), list) else []
+        tags = params.get("tags") if isinstance(params.get("tags"), list) else []
+        line_markup = "".join(
+            f'<div class="example-line{" example-line-accent" if index == accent_index else ""}" '
+            f'data-semantic-path="parameters.titleLines.{index}">{html.escape(str(line))}</div>'
+            for index, line in enumerate(lines[:3])
+        )
+        tag_markup = html.escape(" • ".join(str(tag) for tag in tags[:4]))
+        pips = "".join(
+            f'<span class="example-pip{" example-pip-filled" if index < number else ""}"></span>'
+            for index in range(total)
+        )
+        return (
+            f'<section {common} style="--cue-accent:{accent_color}">'
+            f'<div class="example-card">'
+            f'<div class="example-rail"><div class="example-number">{number:02d}</div><div class="example-rail-label">EXAMPLE</div></div>'
+            f'<div class="example-body">'
+            f'<div class="example-head"><span class="kicker" data-semantic-path="parameters.kicker">{kicker}</span>'
+            f'<span class="example-count">{number:02d} / {total:02d}</span></div>'
+            f'<div class="example-rule"></div>'
+            f'<div class="example-lines">{line_markup}</div>'
+            f'<div class="example-foot"><span class="example-tags">{tag_markup}</span><span class="example-pips">{pips}</span></div>'
+            f'</div></div></section>'
         )
     nodes = params.get("nodes") if isinstance(params.get("nodes"), list) else ["YOUR PRODUCT", "PLATFORM", "DEPENDENCY"]
     node_markup = "".join(f'<div class="node" data-semantic-path="parameters.nodes.{index}">{html.escape(str(node))}</div>' for index, node in enumerate(nodes[:5]))
@@ -1490,6 +2198,30 @@ def _semantic_timeline_lines(cue: dict, element_id: str, range_start: float, ran
         lines.append(f'tl.set(\'{selector}\', {{opacity:0,y:12}}, {clip_start:.4f});')
         lines.append(f'tl.fromTo(\'{selector}\', {{opacity:0,y:12}}, {{opacity:1,y:0,duration:{reveal_duration:.4f},ease:"power2.out",immediateRender:false}}, {reveal_at:.4f});')
     return lines
+
+
+def _wrap_module_motion(markup: str) -> str:
+    """Keep authored motion off the framework-owned clip element.
+
+    HyperFrames owns visibility for ``.clip`` nodes. Animating a clip directly makes
+    non-linear seeking ambiguous, so every module gets one inner wrapper for entrance
+    and exit motion while the registered clip remains untouched.
+    """
+    if not markup:
+        return markup
+    opening_end = markup.find(">")
+    closing_start = markup.rfind("</section>")
+    if opening_end < 0 or closing_start < 0:
+        raise ValueError("Visual module markup must be a section element.")
+    return (
+        f'{markup[:opening_end + 1]}<div class="cue-motion">'
+        f'{markup[opening_end + 1:closing_start]}</div>{markup[closing_start:]}'
+    )
+
+
+def _entry_preroll_time(start: float, fps: int) -> float:
+    """Advance entrance motion one frame without changing clip visibility timing."""
+    return max(0.0, start - (1.0 / max(1, fps)))
 
 
 def build_hyperframes_composition(
@@ -1569,46 +2301,85 @@ def build_hyperframes_composition(
         track = 20 + cue_index
         cue_index += 1
         if cue["kind"] == "module":
-            markup = _module_markup(cue, element_id, start, duration, track)
+            markup = _wrap_module_motion(
+                _module_markup(cue, element_id, start, duration, track, staged_assets)
+            )
             if markup:
                 clip_markup.append(markup)
             module_id = cue["moduleId"]
             params = cue.get("parameters") or {}
+            motion_selector = f"#{element_id} > .cue-motion"
             transition_in = params.get("transitionIn", "editorial-snap")
             transition_out = params.get("transitionOut", "fade")
             enter = min(0.45, duration / 3)
             exit_duration = min(0.35, duration / 4)
+            entry_start = _entry_preroll_time(start, fps)
             if markup:
                 if transition_in == "none":
-                    timeline_lines.append(f'tl.set("#{element_id}", {{opacity:1,x:0}}, {start:.4f});')
+                    timeline_lines.append(f'tl.set("{motion_selector}", {{opacity:1,x:0}}, {start:.4f});')
                 elif transition_in == "fade":
-                    timeline_lines.append(f'tl.fromTo("#{element_id}", {{opacity:0}}, {{opacity:1,duration:{enter:.3f},ease:"power2.out"}}, {start:.4f});')
+                    timeline_lines.append(f'tl.fromTo("{motion_selector}", {{opacity:0}}, {{opacity:1,duration:{enter:.3f},ease:"power2.out"}}, {entry_start:.4f});')
                 else:
                     distance = -70 if transition_in == "editorial-snap" else -35
-                    timeline_lines.append(f'tl.fromTo("#{element_id}", {{opacity:0,x:{distance}}}, {{opacity:1,x:0,duration:{enter:.3f},ease:"power3.out"}}, {start:.4f});')
+                    timeline_lines.append(f'tl.fromTo("{motion_selector}", {{opacity:0,x:{distance}}}, {{opacity:1,x:0,duration:{enter:.3f},ease:"power3.out"}}, {entry_start:.4f});')
                 if transition_out != "none" and duration > exit_duration + enter:
                     exit_x = 35 if transition_out == "slide" else 0
-                    timeline_lines.append(f'tl.to("#{element_id}", {{opacity:0,x:{exit_x},duration:{exit_duration:.3f},ease:"power2.in"}}, {(start + duration - exit_duration):.4f});')
+                    timeline_lines.append(f'tl.to("{motion_selector}", {{opacity:0,x:{exit_x},duration:{exit_duration:.3f},ease:"power2.in"}}, {(start + duration - exit_duration):.4f});')
+                    timeline_lines.append(f'tl.set("{motion_selector}", {{opacity:0}}, {(start + duration):.4f});')
                 timeline_lines.extend(_semantic_timeline_lines(cue, element_id, range_start, range_end, start))
             if module_id == "punchline-reveal":
-                timeline_lines.append(f'tl.to("#main-video", {{opacity:0,duration:0.12}}, {start:.4f});')
-                timeline_lines.append(f'tl.to("#main-video", {{opacity:1,duration:0.18}}, {(start + duration - 0.18):.4f});')
+                # The graphic occupies only its audited overlay region. The source speaker remains
+                # visible continuously; the canonical contract forbids full-frame takeovers.
+                pass
             elif module_id == "speaker-side-panel":
                 timeline_lines.append(f'tl.to("#main-video", {{scale:0.48,x:{width * .48:.2f},y:{height * .26:.2f},duration:0.5,ease:"power3.inOut"}}, {start:.4f});')
                 timeline_lines.append(f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:0.45,ease:"power3.inOut"}}, {(start + duration - 0.45):.4f});')
             elif module_id == "progress-scale":
-                timeline_lines.append(f'tl.to("#main-video", {{scale:0.365,x:{width * .5625:.2f},y:{height * .1574:.2f},duration:0.5,ease:"power3.inOut"}}, {start:.4f});')
                 timeline_lines.append(f'tl.fromTo("#{element_id} .scale-fill", {{scaleX:0}}, {{scaleX:1,duration:{max(.2, duration - .8):.3f},ease:"power2.inOut"}}, {(start + .4):.4f});')
-                timeline_lines.append(f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:0.45,ease:"power3.inOut"}}, {(start + duration - 0.45):.4f});')
             elif module_id == "dual-comparison":
-                square_size = min(width * .25, height * .445)
-                speaker_scale = .68
-                pre_transform_square = square_size / speaker_scale
-                inset_x = (width - pre_transform_square) / 2
-                inset_y = (height - pre_transform_square) / 2
-                timeline_lines.append(f'tl.to("#main-video", {{clipPath:"inset({inset_y:.2f}px {inset_x:.2f}px {inset_y:.2f}px {inset_x:.2f}px)",scale:{speaker_scale},transformOrigin:"center center",zIndex:4,duration:0.5,ease:"power3.inOut"}}, {start:.4f});')
                 timeline_lines.append(f'tl.fromTo("#{element_id} .comparison-column", {{opacity:0,y:24}}, {{opacity:1,y:0,duration:0.38,stagger:0.08,ease:"power2.out"}}, {(start + .28):.4f});')
-                timeline_lines.append(f'tl.to("#main-video", {{clipPath:"inset(0px 0px 0px 0px)",scale:1,transformOrigin:"center center",zIndex:1,duration:0.45,ease:"power3.inOut"}}, {(start + duration - 0.45):.4f});')
+            elif module_id == "source-punch-zoom":
+                focus_x = _number(params.get("focusX"), 0.5, 0, 1) * 100
+                focus_y = _number(params.get("focusY"), 0.5, 0, 1) * 100
+                zoom = _number(params.get("zoom"), 1.25, 1.02, MAX_PUNCH_ZOOM)
+                settle = _number(params.get("settleSec"), 0.6, 0.2, max(0.3, duration / 2))
+                timeline_lines.append(f'tl.to("#main-video", {{scale:{zoom:.4f},transformOrigin:"{focus_x:.2f}% {focus_y:.2f}%",duration:{settle:.3f},ease:"power2.inOut"}}, {start:.4f});')
+                timeline_lines.append(f'tl.to("#main-video", {{scale:1,transformOrigin:"{focus_x:.2f}% {focus_y:.2f}%",duration:{settle:.3f},ease:"power2.inOut"}}, {(start + duration - settle):.4f});')
+            elif module_id in PORTED_MODULE_IDS:
+                shell = ".pf-card, #%s .pf-triptych, #%s .pf-window, #%s .pf-sunrise, #%s .pf-kinetic, #%s .pf-rise-thesis" % ((element_id,) * 5)
+                kids = (".pf-step, #%s .pf-path-row, #%s .pf-pin-row, #%s .pf-tri-card, #%s .pf-rise-item, "
+                        "#%s .pf-bubble, #%s .pf-cmd, #%s .pf-payoff, #%s .pf-verdict, #%s .pf-final-action") % ((element_id,) * 9)
+                drift = 44 if str(params.get("side")) == "right" else -44
+                timeline_lines.append(f'tl.fromTo("#{element_id} {shell}", {{opacity:0,x:{drift},scale:0.97}}, {{opacity:1,x:0,scale:1,duration:0.44,ease:"power3.out"}}, {entry_start:.4f});')
+                timeline_lines.append(f'tl.fromTo("#{element_id} {kids}", {{opacity:0,y:18}}, {{opacity:1,y:0,duration:0.3,stagger:0.1,ease:"power2.out"}}, {(start + .24):.4f});')
+                if module_id == "tradeoff-meter":
+                    timeline_lines.append(f'tl.fromTo("#{element_id} .pf-meter-fill", {{scaleX:0}}, {{scaleX:1,duration:0.6,ease:"power2.inOut"}}, {(start + .3):.4f});')
+                if module_id == "three-step-celebration":
+                    timeline_lines.append(f'tl.fromTo("#{element_id} .pf-spark", {{opacity:0,scale:0}}, {{opacity:1,scale:1,y:-90,rotation:180,duration:0.7,stagger:0.03,ease:"power2.out"}}, {(start + duration - 1.1):.4f});')
+                timeline_lines.append(f'tl.to("#{element_id} {shell}", {{opacity:0,duration:0.28,ease:"power2.in"}}, {(start + duration - 0.28):.4f});')
+                timeline_lines.append(f'tl.set("#{element_id} {shell}", {{opacity:0}}, {(start + duration):.4f});')
+            elif module_id in LIBRARY_MODULE_IDS:
+                card = ".lib-panel, #%s .lib-badge, #%s .lib-chip, #%s .lib-path, #%s .lib-grade, #%s .lib-lower" % ((element_id,) * 5)
+                rows = ".lib-row, #%s .lib-result-line, #%s .lib-stop, #%s .lib-words span, #%s .lib-flow-item" % ((element_id,) * 4)
+                offset = -40 if str(params.get("side")) != "right" else 40
+                timeline_lines.append(f'tl.fromTo("#{element_id} {card}", {{opacity:0,x:{offset}}}, {{opacity:1,x:0,duration:0.42,ease:"power3.out"}}, {entry_start:.4f});')
+                timeline_lines.append(f'tl.fromTo("#{element_id} {rows}", {{opacity:0,y:16}}, {{opacity:1,y:0,duration:0.3,stagger:0.09,ease:"power2.out"}}, {(start + .22):.4f});')
+                timeline_lines.append(f'tl.to("#{element_id} {card}", {{opacity:0,x:{offset // 2},duration:0.28,ease:"power2.in"}}, {(start + duration - 0.28):.4f});')
+                timeline_lines.append(f'tl.set("#{element_id} {card}", {{opacity:0}}, {(start + duration):.4f});')
+            elif module_id == "ui-callout":
+                timeline_lines.append(f'tl.fromTo("#{element_id} .callout-ring", {{opacity:0,scale:1.12}}, {{opacity:1,scale:1,transformOrigin:"center center",duration:0.32,ease:"power3.out"}}, {entry_start:.4f});')
+                timeline_lines.append(f'tl.fromTo("#{element_id} .callout-label", {{opacity:0,y:10}}, {{opacity:1,y:0,duration:0.28,ease:"power2.out"}}, {(start + .16):.4f});')
+                timeline_lines.append(f'tl.to("#{element_id} .callout-ring, #{element_id} .callout-label", {{opacity:0,duration:0.24,ease:"power2.in"}}, {(start + duration - 0.24):.4f});')
+                timeline_lines.append(f'tl.set("#{element_id} .callout-ring, #{element_id} .callout-label", {{opacity:0}}, {(start + duration):.4f});')
+            elif module_id == "numbered-example-card":
+                # The card animates in place. The source footage is never moved or scaled, so the
+                # speaker stays exactly where the measured geometry says he is.
+                timeline_lines.append(f'tl.fromTo("#{element_id} .example-card", {{opacity:0,x:-40}}, {{opacity:1,x:0,duration:0.42,ease:"power3.out"}}, {entry_start:.4f});')
+                timeline_lines.append(f'tl.fromTo("#{element_id} .example-number", {{opacity:0,y:18}}, {{opacity:1,y:0,duration:0.3,ease:"power2.out"}}, {(start + .18):.4f});')
+                timeline_lines.append(f'tl.fromTo("#{element_id} .example-rule", {{scaleX:0}}, {{scaleX:1,transformOrigin:"left center",duration:0.34,ease:"power2.out"}}, {(start + .26):.4f});')
+                timeline_lines.append(f'tl.fromTo("#{element_id} .example-pip-filled", {{scale:0}}, {{scale:1,duration:0.22,stagger:0.04,ease:"back.out(2)"}}, {(start + .5):.4f});')
+                timeline_lines.append(f'tl.to("#{element_id} .example-card", {{opacity:0,x:-28,duration:0.3,ease:"power2.in"}}, {(start + duration - 0.3):.4f});')
+                timeline_lines.append(f'tl.set("#{element_id} .example-card", {{opacity:0}}, {(start + duration):.4f});')
             elif module_id == "source-footage-hold":
                 timeline_lines.append(f'tl.to("#main-video", {{opacity:1,scale:1,x:0,y:0,duration:0.2}}, {start:.4f});')
         else:
@@ -1623,12 +2394,13 @@ def build_hyperframes_composition(
             transition_in = params.get("transitionIn", "fade")
             transition_out = params.get("transitionOut", "fade")
             enter_duration = min(.4, duration / 3)
+            entry_start = _entry_preroll_time(start, fps)
             if transition_in == "none":
                 timeline_lines.append(f'tl.set("#{element_id}", {{opacity:{target_opacity:.3f},scale:{target_scale:.3f},x:0}}, {start:.4f});')
             elif transition_in == "slide":
-                timeline_lines.append(f'tl.fromTo("#{element_id}", {{opacity:0,x:-35,scale:{target_scale:.3f}}}, {{opacity:{target_opacity:.3f},x:0,duration:{enter_duration:.3f},ease:"power2.out"}}, {start:.4f});')
+                timeline_lines.append(f'tl.fromTo("#{element_id}", {{opacity:0,x:-35,scale:{target_scale:.3f}}}, {{opacity:{target_opacity:.3f},x:0,duration:{enter_duration:.3f},ease:"power2.out"}}, {entry_start:.4f});')
             else:
-                timeline_lines.append(f'tl.fromTo("#{element_id}", {{opacity:0,scale:{target_scale * .96:.3f}}}, {{opacity:{target_opacity:.3f},scale:{target_scale:.3f},duration:{enter_duration:.3f},ease:"power2.out"}}, {start:.4f});')
+                timeline_lines.append(f'tl.fromTo("#{element_id}", {{opacity:0,scale:{target_scale * .96:.3f}}}, {{opacity:{target_opacity:.3f},scale:{target_scale:.3f},duration:{enter_duration:.3f},ease:"power2.out"}}, {entry_start:.4f});')
             if transition_out != "none" and duration > .4:
                 exit_duration = min(.3, duration / 4)
                 exit_x = 35 if transition_out == "slide" else 0
@@ -1639,11 +2411,24 @@ def build_hyperframes_composition(
         for weight in (400, 600, 700, 800, 900)
         if (public / "fonts" / f"Montserrat-{weight}.woff2").is_file()
     )
+    runtime_css_path = repo / "visual-production" / "modules" / "runtime.css"
+    if not runtime_css_path.is_file():
+        raise RuntimeError("The registered module runtime stylesheet is missing.")
+    runtime_css = (
+        runtime_css_path.read_text(encoding="utf-8")
+        .replace("__WIDTH__", str(width))
+        .replace("__HEIGHT__", str(height))
+    )
     index_html = f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8" /><style>
 {font_faces}
 :root{{--white:#fff;--paper:#fbfbfd;--ink:#1a1a2e;--body:#4a4a5a;--line:#dedee6;--magenta:#ff00ce;--magenta-deep:#c700a1;--magenta-tint:#fff0fb;--teal:#007c7d;--teal-tint:#e6f5f5;}}
-*{{box-sizing:border-box}}html,body{{margin:0;width:{width}px;height:{height}px;overflow:hidden;background:#fff;font-family:"Montserrat",sans-serif}}#root{{position:relative;width:{width}px;height:{height}px;overflow:hidden}}[data-semantic-path]{{opacity:0}}.base{{position:absolute;inset:0;background:var(--white);z-index:0}}#main-video{{position:absolute;left:0;top:0;width:{width}px;height:{height}px;object-fit:cover;transform-origin:0 0;z-index:1}}#main-audio{{position:absolute;width:1px;height:1px;opacity:0}}.clip{{position:absolute;z-index:3;overflow:hidden}}.imported{{z-index:5}}.module{{inset:0}}.module-fill{{position:absolute;inset:0;background:var(--white);padding:7%}}.grid{{position:absolute;inset:0;opacity:.28;background-image:linear-gradient(rgba(26,26,46,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(26,26,46,.06) 1px,transparent 1px);background-size:96px 96px}}.kicker{{position:relative;color:var(--cue-accent,var(--teal));font-size:24px;font-weight:800;letter-spacing:.2em;text-transform:uppercase}}.punchline{{position:relative;margin-top:13%;max-width:78%;color:var(--cue-accent,var(--magenta));font-size:148px;font-weight:900;line-height:.88;letter-spacing:-.06em}}.rule{{position:relative;margin-top:36px;width:38%;height:10px;background:var(--ink)}}.module-speaker-side-panel{{background:transparent}}.side-copy{{position:absolute;left:0;top:0;width:43%;height:100%;background:var(--white);padding:10% 4%;border-top:12px solid var(--cue-accent,var(--teal))}}.side-title{{margin-top:28px;color:var(--ink);font-size:76px;font-weight:900;line-height:.95;letter-spacing:-.05em}}.video-outline{{position:absolute;left:48%;top:26%;width:48%;height:48%;border:4px solid var(--ink);box-shadow:20px 20px 0 color-mix(in srgb,var(--cue-accent,var(--magenta)) 18%,white)}}.stat-title{{position:relative;margin-top:8%;max-width:48%;color:var(--ink);font-size:118px;font-weight:900;line-height:.9;letter-spacing:-.06em}}.scale{{position:absolute;left:7%;right:7%;bottom:11%;height:70px}}.scale::before{{content:"";position:absolute;left:0;right:0;top:0;height:16px;background:var(--line)}}.scale-fill{{position:absolute;left:0;right:0;top:0;height:16px;background:linear-gradient(90deg,var(--teal),var(--magenta));transform-origin:left center}}.scale-marker{{position:absolute;right:0;top:-15px;width:7px;height:48px;background:var(--ink)}}.scale-labels{{display:flex;justify-content:space-between;padding-top:28px;color:var(--body);font-size:18px;font-weight:700}}.stat-video-outline{{position:absolute;left:56.25%;top:15.74%;width:36.5%;height:36.5%;border:4px solid var(--ink);box-shadow:18px 18px 0 var(--magenta-tint)}}.dependency-panel{{position:absolute;left:0;top:0;width:38%;height:100%;background:rgba(255,255,255,.98);border-right:3px solid var(--ink);padding:6% 3%}}.dependency-title{{margin-top:24px;color:var(--ink);font-size:58px;font-weight:900;line-height:.95;letter-spacing:-.05em}}.nodes{{display:grid;gap:22px;margin-top:48px}}.node{{border:3px solid var(--ink);background:#fff;padding:22px 26px;color:var(--ink);font-size:25px;font-weight:800}}.comparison-canvas{{position:absolute;inset:0;background:var(--white);display:grid;grid-template-columns:1fr 520px 1fr;gap:30px;padding:92px 70px 60px}}.comparison-kicker{{position:absolute;top:38px;left:0;right:0;text-align:center;color:var(--body);font-size:22px;font-weight:800;letter-spacing:.18em;text-transform:uppercase}}.comparison-column{{padding:48px 28px 26px;border-top:12px solid var(--left-accent);background:linear-gradient(180deg,color-mix(in srgb,var(--left-accent) 12%,white),white 40%)}}.comparison-right{{border-color:var(--right-accent);background:linear-gradient(180deg,color-mix(in srgb,var(--right-accent) 12%,white),white 40%)}}.comparison-column h2{{margin:0 0 34px;color:var(--left-accent);font-size:70px;font-weight:900;line-height:.9;letter-spacing:-.05em}}.comparison-right h2{{color:var(--right-accent)}}.comparison-column ul{{list-style:none;margin:0;padding:0;display:grid;gap:20px}}.comparison-column li{{border-left:7px solid var(--left-accent);padding:13px 14px;color:var(--ink);font-size:28px;font-weight:750;line-height:1.08}}.comparison-right li{{border-color:var(--right-accent)}}.comparison-speaker-outline{{width:480px;height:480px;align-self:center;justify-self:center;border:5px solid var(--ink);box-shadow:0 20px 48px rgba(26,26,46,.2);z-index:4;pointer-events:none}}
+.cue-motion{{position:absolute;inset:0;width:100%;height:100%;}}
+{runtime_css}
+.module-progress-scale .stat-title{{font-size:94px;line-height:.88;}}
+.lib-grade-foot{{min-height:52px;padding-bottom:12px;align-items:flex-start;}}
+.joke-card-approved{{position:absolute;left:3.96%;top:12.41%;width:39.58%;height:48.15%;background:var(--paper);border:4px solid var(--ink);box-shadow:18px 20px 0 rgba(255,0,206,.22);overflow:hidden}}.joke-image-approved{{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}}.joke-copy-approved{{position:absolute;left:24px;right:24px;bottom:24px;padding:18px 22px;background:rgba(251,251,253,.95);border:3px solid var(--ink)}}.joke-copy-approved .kicker{{font-size:17px;color:var(--teal)}}.joke-line-approved{{margin-top:10px;color:var(--magenta);font-size:42px;font-weight:900;line-height:.92;letter-spacing:-.045em}}.pf-step-no-num{{padding-top:38px}}.pf-step-no-num .pf-step-title{{margin-top:0}}.pf-community{{top:7.2%;width:33.85%;min-height:48.15%;padding:46px;text-align:left;border-width:4px;box-shadow:18px 20px 0 rgba(0,124,125,.3)}}.pf-community::before{{content:"";position:absolute;left:0;top:0;bottom:0;width:22px;background:var(--teal)}}.pf-logo-image{{display:block;width:min(330px,82%);height:110px;object-fit:contain;object-position:left center}}.pf-community .pf-action{{margin-top:44px;font-size:43px}}.pf-community .pf-dest{{font-size:18px}}.lib-track span.lib-long{{font-size:54px;letter-spacing:-.055em;padding:0 8px}}
+.callout-align-right.callout-below{{transform:translate(-100%,14px)}}.callout-align-right.callout-above{{transform:translate(-100%,calc(-100% - 14px))}}
 </style></head><body><div id="root" data-composition-id="vcg-visual-plan" data-start="0" data-width="{width}" data-height="{height}" data-duration="{render_duration:.4f}" data-fps="{fps}"><div class="base"></div><video id="main-video" class="clip" src="source.mp4" muted playsinline data-start="0" data-duration="{render_duration:.4f}" data-track-index="0"></video><audio id="main-audio" src="source.mp4" data-start="0" data-duration="{render_duration:.4f}" data-track-index="10" data-volume="1"></audio>{''.join(clip_markup)}{''.join(audio_markup)}<script src="vendor/gsap.min.js"></script><script>(function(){{window.__timelines=window.__timelines||{{}};var tl=gsap.timeline({{paused:true}});{''.join(timeline_lines)}window.__timelines["vcg-visual-plan"]=tl;}})();</script></div></body></html>'''
     (public / "index.html").write_text(index_html, encoding="utf-8")
     return public, render_duration
@@ -1783,10 +2568,15 @@ def render_visual_plan(
         try:
             from app.core.story_assets import record_treatment_usage
 
-            recorded_treatments = record_treatment_usage(plan_path, published_path)
-            library_curation = {"status": "complete", "treatmentsRecorded": recorded_treatments}
+            library_curation = {"status": "complete", **record_treatment_usage(plan_path, published_path)}
         except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
-            library_curation = {"status": "failed", "treatmentsRecorded": 0, "error": str(exc)}
+            library_curation = {
+                "status": "failed",
+                "treatmentsRecorded": 0,
+                "candidates": 0,
+                "introducedTreatmentIds": [],
+                "error": str(exc),
+            }
         write_delivery_manifest(
             plan_path,
             published_path,

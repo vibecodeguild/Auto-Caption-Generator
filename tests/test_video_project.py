@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from app.core import video_project
+from app.core import video_project, visual_production
 
 
 def _create(tmp_path: Path, monkeypatch) -> tuple[Path, dict]:
@@ -47,6 +48,74 @@ def test_video_project_paths_cannot_escape_private_root(tmp_path: Path, monkeypa
         video_project.save_video_project(manifest_path, manifest)
 
 
+def test_visual_prompt_geometry_agrees_with_the_measured_scene_file() -> None:
+    """The prompt restates measured geometry rather than a hand-written copy that can drift."""
+    geometry = visual_production.scene_geometry()
+    frame = geometry["frame"]
+    text = video_project._scene_geometry_text()
+
+    for layout, entry in geometry["layouts"].items():
+        assert layout in text
+        bounds = entry.get("speakerBounds")
+        if bounds is None:
+            assert "no speaker on screen" in text
+            continue
+        x0 = round(bounds["x"] * frame["width"])
+        y0 = round(bounds["y"] * frame["height"])
+        x1 = round((bounds["x"] + bounds["width"]) * frame["width"])
+        y1 = round((bounds["y"] + bounds["height"]) * frame["height"])
+        assert f"({x0},{y0})-({x1},{y1})px" in text
+
+
+def test_visual_prompt_offers_exactly_the_treatments_the_catalog_holds(tmp_path: Path, monkeypatch) -> None:
+    """The prompt used to name treatments by hand, so it drifted away from the catalogs."""
+    from app.core.story_assets import load_visual_catalog
+
+    manifest_path, manifest = _create(tmp_path, monkeypatch)
+    prompt = video_project.build_visual_plan_prompt(manifest_path, manifest)
+    catalog = load_visual_catalog()
+
+    for item in [*catalog["modules"], *catalog["recipes"]]:
+        assert item["id"] in prompt, f"{item['id']} is in the catalog but not offered to Cook"
+
+    repository = Path(__file__).resolve().parents[1]
+    archived = json.loads(
+        (repository / "visual-production" / "recipes" / "archive-never-built.json").read_text(encoding="utf-8")
+    )["recipes"]
+    active_ids = {item["id"] for item in [*catalog["modules"], *catalog["recipes"]]}
+    for item in archived:
+        if item["id"] not in active_ids:
+            assert item["id"] not in prompt, f"{item['id']} was archived but is still offered to Cook"
+
+
+def test_visual_prompt_locked_defaults_come_from_the_catalog_not_from_prose(tmp_path: Path, monkeypatch) -> None:
+    """The prompt used to hard-code a locked first choice that the catalog did not agree with."""
+    from app.core.story_assets import load_visual_catalog
+
+    text = video_project._treatment_vocabulary_text()
+    catalog = load_visual_catalog()
+    locked = {item["id"] for item in [*catalog["modules"], *catalog["recipes"]] if item.get("lockedDefault")}
+
+    if locked:
+        assert "Locked defaults must be your first choice" in text
+        for treatment_id in locked:
+            assert f"{treatment_id} (" in text.split("Locked defaults must be your first choice")[1]
+    else:
+        assert "No treatment is currently locked as a default" in text
+    for item in [*catalog["modules"], *catalog["recipes"]]:
+        if not item.get("lockedDefault"):
+            assert "LOCKED DEFAULT" not in f"- {item['id']} —"
+
+
+def test_visual_prompt_does_not_offer_a_full_frame_takeover(tmp_path: Path, monkeypatch) -> None:
+    manifest_path, manifest = _create(tmp_path, monkeypatch)
+
+    prompt = video_project.build_visual_plan_prompt(manifest_path, manifest)
+
+    assert "brief-full-frame-hit" not in prompt
+    assert "maxSpeakerAbsenceSec of exactly 0" in prompt
+
+
 def test_visual_prompt_contains_exact_paths_rules_and_approval_gate(tmp_path: Path, monkeypatch) -> None:
     manifest_path, manifest = _create(tmp_path, monkeypatch)
     prompt = video_project.build_visual_plan_prompt(manifest_path, manifest)
@@ -65,7 +134,8 @@ def test_visual_prompt_contains_exact_paths_rules_and_approval_gate(tmp_path: Pa
     assert "Single Cook operation" in prompt
     assert "every rolling five-second interval" in prompt
     assert "meaningfulChanges" in prompt
-    assert "exactly one representative sample frame" in prompt
+    assert "a picture of the treatment is not the treatment" in prompt
+    assert "Do not set approvalEvidence.status by hand" in prompt
     assert "Wait for creator approval" in prompt
     assert "must remain inside the private project root" in prompt
 

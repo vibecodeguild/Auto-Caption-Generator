@@ -1,28 +1,90 @@
 # Visual Production Workflow
 
-Status: schema-v2 canonical revision, exact-runtime preview, and blocking
-production gates implemented in the working tree, July 16, 2026.
+Status: one contract, enforced in code and covered by tests, July 25, 2026.
 
 This document is the product contract for the separate Visual Production
-workflow. It consolidates the decisions made while testing a 60-second segment
-of a previously published video. That video is development material only; the
-published 14-minute video does not need to be processed or republished.
+workflow. **The Current Contract section below is the only authority.** Four
+earlier dated contracts are preserved verbatim in the History appendix at the
+end; they describe how the system used to behave and must not be followed.
 
 The approved Creator Library, B-roll, Pexels, candidate-review, and stock
 provenance expansion is specified in
 [Visual Storytelling Assets](visual-storytelling-assets.md).
 
-## Canonical Cook and Approval Contract - July 24, 2026
+## The Current Contract
 
-This section is the single product authority for cooking, previewing, approving,
-and building a VCG visual plan. It extends Approval Contract Three; it does not
-create a new contract version, schema family, planning file, review surface, or
-render path.
+Everything in this section is enforced by code. Where prose and code disagree,
+the code is right and the prose is a bug.
 
-When another prompt, skill summary, historical addendum, UI label, or agent
-instruction conflicts with this section, this section controls. Preserve the
-non-conflicting speaker, spoken-timing, privacy, runtime-preview, and final-export
-gates elsewhere in this document.
+**One document per role.** `visual-suggestions.json` is the decision record:
+what was proposed, why, and what the creator approved. `visual-plan.json` is the
+execution record: what renders. The plan is never authored directly. Every
+enabled cue carries `planningSuggestionId` naming the approved suggestion that
+authorised it, and a cue without one blocks delivery.
+
+**One contract version.** `coverage.reuseAudit.contractVersion` must be `3`.
+Lowering it used to switch off the approval contract, the planning gate, and the
+library harvest at once; it is now rejected outright. `coverage.reuseAudit.reviewed`
+must be `true`. A plan containing authored graphics without a coverage block is
+rejected.
+
+**Loop A gates the review render.** Cook proposes; the creator reviews one
+representative still frame per graphic and approves it or rejects it with notes.
+Notes route back through the revision prompt. When every scene is approved,
+`canRenderReview` opens.
+
+**Loop B gates delivery.** The approved plan renders as a review pass, is
+watched against the full cut, and is approved or noted. `canDeliver` requires
+`fullReviewApproved`, and any edit to the plan invalidates that approval, so a
+fix made in response to a note is reviewed again rather than inheriting the
+sign-off. There is no route to a delivered render that skips either loop.
+
+**Treatment swaps are re-approved.** A Loop B note may replace the treatment
+entirely. An approved decision whose `selectedTreatmentId` no longer matches the
+suggestion's `moduleId`/`recipeId` is rejected: the swap needs its own approval.
+
+**Speaker geometry is measured, not declared.**
+`visual-production/layouts/scene-geometry.json` records the speaker rectangle for
+all eight recording layouts. Seven are computed from the OBS scene collection;
+`full-screen-talking` is measured from delivered footage because its camera
+source is uncropped. A suggestion reporting a `speakerBounds` that disagrees with
+the measured value is rejected, and overlay collision is arithmetic against the
+measured rectangle. The Cook prompt renders the same table from the same file.
+
+**Every graphic is an overlay.** `maxSpeakerAbsenceSec` must be exactly `0`.
+There is no full-frame takeover mode. The speaker-safety rules have exactly one
+implementation, shared by the suggestion validator and the production gate.
+
+**Namespaces do not cross.** `moduleId` names something the renderer executes
+today; `recipeId` names a catalog entry that still needs realizing. An
+unrecognised treatment raises an error naming it; it is never substituted with a
+generic side panel.
+
+**The plan is bound to its cut.** The plan records the SHA-256 of the locked cut
+its cue times were authored against. A re-cut is reported as an explicit
+mismatch naming the affected cue count, and blocks rendering.
+
+**The schemas are executable.** `visual-plan.schema.json` and
+`visual-suggestions.schema.json` run on every read and write. Domain rules run
+first so errors name the rule; the schema runs second so nothing escapes.
+Suggestion items reject invented fields.
+
+**The library compounds from production outcomes.** A treatment is harvested
+only when it rendered as an enabled cue with no unresolved review note against
+it — the Loop B outcome, not the Loop A approval. The canonical preview Cook
+ranks against is the highest-rated use, not the most recent. After delivery the
+creator is prompted to rate exactly the treatments this video introduced. A
+harvest that fails is reported as a failure and never folded into a zero.
+
+## Cook Operating Detail
+
+Operating detail for cooking, previewing, approving, and building a VCG visual
+plan. This section elaborates The Current Contract above; it is not a separate
+authority and does not create a contract version, schema family, planning file,
+review surface, or render path.
+
+Where this section conflicts with The Current Contract, The Current Contract
+controls.
 
 ### Fixed terminology and counts
 
@@ -348,129 +410,6 @@ composition without creating another preview path. Automatic transcript
 suggestion UI and a generalized user-authored module builder remain future
 evolution.
 
-## Canonical Revision and Production Contract - July 16, 2026
-
-The blocking review-build sequence in this section was superseded by the
-July 20 export contract below. The schema-v2 revision model, exact-runtime
-preview, voice timing, and automated layout requirements remain in force.
-
-`visual-plan.json` is the one source of truth for authoring, review, reopening,
-and delivery. Schema version two records:
-
-- registered custom HyperFrames compositions and their source hash;
-- plan-backed composition scene cues with stable scene IDs;
-- every visible semantic item's `spokenStartSec`, `fullyVisibleSec`, phrase,
-  and anchor type;
-- numbered revisions containing the active HyperFrames source, entry file,
-  review render, final render, plan hash, and artifact checksums; and
-- representative approval, full-review approval, strict layout inspection, and
-  delivered-revision reopen verification.
-
-The Visual Production preview embeds the registered HyperFrames player and
-composition. The MP4 review render is a separately labeled comparison view; it
-does not replace or imitate the authoring runtime. Preview and render therefore
-resolve the same composition directory and entry file.
-
-Production gates are blocking. A full review build requires representative
-scene approval for the current plan hash, no unanchored visible text, and no
-composition-root overflow exemption. Final delivery additionally requires a
-current full review render, explicit full-review approval, and successful
-HyperFrames lint, validation, and strict layout inspection at every semantic
-item's `fullyVisibleSec` voice anchor (plus ordinary timeline samples). This
-checks readable states instead of hidden outgoing DOM at hard cuts. A custom
-composition cue may have an empty semantic list only when it has no visible
-text, such as a clean tail hold. Delivery is incomplete until reopening Visual
-Production displays the delivered runtime and records the matching revision
-number and plan hash.
-
-## Direct Final Export Contract - July 20, 2026
-
-The live registered HyperFrames composition is the creator's full review
-surface. Once all active review notes are accepted or resolved, **Export final**
-is the only required export action. Representative approval, a separate full
-review MP4, full-review approval, and a post-delivery approval are no longer
-prerequisites for final export.
-
-One click now saves the current plan and performs the complete delivery job:
-
-- prevents a second render from starting for the same project and reconnects
-  the UI to the existing job;
-- persists stage, percentage, elapsed time, estimated remaining time, failure,
-  and output path so a browser reload keeps the export visible;
-- runs HyperFrames lint, validation, and strict layout inspection at the
-  voice-anchored readable states before rendering;
-- renders the registered composition once at final quality;
-- stream-copies the locked cut's audio into the rendered video;
-- verifies encoded video, duration, frame rate, frame count, audio presence,
-  audio format, and full-length audio packet identity before publication; and
-- atomically publishes `exports/final-video.mp4`, or uses a timestamped final
-  filename when Windows has the existing target open.
-
-The export is rejected if active review notes remain, visible semantic items
-are unanchored, composition-root overflow suppression is present, the plan
-changes during rendering, or the completed media fails verification. Legacy
-gate and review-render fields remain readable for existing projects but no
-longer block **Export final**.
-
-## Approved Review and Sync Expansion - July 14, 2026
-
-The Visual Production workspace is the shared source of truth between the
-creator and Codex while a visual pass is being revised. The approved expansion
-adds these behaviors without changing locked-cut timing or redesigning the
-renderer:
-
-- Dock a review-note editor below the right-hand Inspector for the selected
-  timeline item.
-- Provide a note field plus **Leave everything else** and **Replace all of it**
-  checkboxes. The two checkboxes are mutually exclusive. With neither checked,
-  the note requests a targeted change to the selected item.
-- Treat a non-empty note as **Changes requested**. After Codex writes the next
-  revision back to the project, the item becomes **Ready for review**.
-- Provide an **Accept** action that removes the active review marker while
-  preserving an immutable accepted-note record in project history. Editing or
-  adding another note starts a new review round.
-- **Copy All Notes** includes only items with non-empty active notes. It includes
-  project and plan paths, exact timestamps, stable item IDs, item types, notes,
-  and preservation scope. It explicitly protects every unnoted scene.
-- Save plan edits back to the private project automatically and provide a clear
-  reload path for changes written by Codex or HyperFrames. The browser editor
-  and the files Codex reads must not become parallel sources of truth.
-- Show B-roll opportunities and AI-footage briefs as distinct colored timeline
-  lanes even before media is attached. These are planning items, not fake
-  rendered clips.
-- Let imported images and video overlays be dragged and resized directly on the
-  preview while retaining the existing numeric controls.
-
-Review records live with the private visual plan. An active record identifies
-one cue or suggestion, contains its exact timing and directive, and has status
-`changes-requested` or `ready-for-review`. Accepted records move to durable
-review history so end-of-project analysis can separate universal editorial
-rules, reusable treatment improvements, brand preferences, and one-video
-exceptions.
-
-The Generated panel has two explicit meanings:
-
-- **Ready** contains implemented modules that can be inserted and rendered now.
-- **Reusable recipes** contains proven content-neutral treatments that are not
-  installed render modules yet. Each recipe is labeled **Needs Build**. Hovering
-  shows a visual preview; **Build with Codex** creates an exact timestamped
-  planning item, creates a scoped review note, and copies its build/reuse prompt.
-  It does not silently switch the user to another panel.
-
-Successful new treatments move from **Needs Build** to **Ready** only after a
-real generalized implementation exists. This distinction keeps the reusable
-animation library discoverable without weakening the renderer contract.
-
-Clarification approved July 14, 2026: the earlier whole-card click that created
-a suggestion and jumped directly to Review was confusing and is superseded.
-Recipe cards must explain their state and expose an explicit build action. A
-library-browsing preview may use the most recent private production thumbnail
-when one is available; otherwise it may use a content-neutral illustrative
-fallback so every recipe remains understandable without creator media in Git.
-That illustrative fallback is browsing help only. Under the canonical Cook and
-Approval Contract, it is not valid approval evidence; a proposal without
-historical evidence requires one representative sample frame.
-
 ## Inspector and Render Ownership
 
 The Inspector edits or reviews plan-backed objects only:
@@ -767,7 +706,170 @@ artifacts, personal absolute paths, and oversized tracked files. It also scans
 historical paths because deleting a private file in a later commit does not make
 the earlier commit safe to publish.
 
-## Approval contract three
+## Library curation and canonical defaults
+
+Treatment records include purpose, family, exact allowed layouts, content
+capacity, motion profile, reuse policy, private preview availability, creator
+rating, default-lock state, lock scopes, and use history. The Rate tab presents
+each unique approved or built treatment once after a video.
+
+Ratings and locks are separate:
+
+- 5: excellent/default candidate;
+- 4: preferred;
+- 3: usable;
+- 2: needs refinement and is not normally suggested;
+- 1: retained in history but excluded from normal reuse; and
+- **Lock as default**: canonical first choice for a compatible intent/scope.
+
+`numbered-step-intro` is the initial five-star locked default for the intent
+“Example number and title.” It uses intentional-series reuse when multiple
+examples appear in one video. A future variant may challenge a locked default,
+but it becomes canonical only through explicit promotion; the previous version
+remains in history.
+
+## Delivery audio evidence
+
+Stage 5 records whether normalization actually ran. When it did, the record
+includes preset, target loudness, measured source loudness, and the measurement
+point. Final Visual Production export stream-copies the locked-cut audio,
+verifies packet identity, and writes `visual-production/delivery-manifest.json`
+with audio normalization evidence, source and delivered packet hashes, channel
+and sample-rate details, plus delivered video metadata. The UI calls this
+“locked-cut audio” unless normalization or mastering is proven by that record.
+
+---
+
+# History: superseded contracts
+
+The sections below are kept for provenance only. Each was the authority on its
+date and has been superseded by The Current Contract above. **Do not follow
+them.** Where they conflict with the current contract, they are wrong.
+
+## SUPERSEDED — Canonical Revision and Production Contract - July 16, 2026
+
+The blocking review-build sequence in this section was superseded by the
+July 20 export contract below. The schema-v2 revision model, exact-runtime
+preview, voice timing, and automated layout requirements remain in force.
+
+`visual-plan.json` is the one source of truth for authoring, review, reopening,
+and delivery. Schema version two records:
+
+- registered custom HyperFrames compositions and their source hash;
+- plan-backed composition scene cues with stable scene IDs;
+- every visible semantic item's `spokenStartSec`, `fullyVisibleSec`, phrase,
+  and anchor type;
+- numbered revisions containing the active HyperFrames source, entry file,
+  review render, final render, plan hash, and artifact checksums; and
+- representative approval, full-review approval, strict layout inspection, and
+  delivered-revision reopen verification.
+
+The Visual Production preview embeds the registered HyperFrames player and
+composition. The MP4 review render is a separately labeled comparison view; it
+does not replace or imitate the authoring runtime. Preview and render therefore
+resolve the same composition directory and entry file.
+
+Production gates are blocking. A full review build requires representative
+scene approval for the current plan hash, no unanchored visible text, and no
+composition-root overflow exemption. Final delivery additionally requires a
+current full review render, explicit full-review approval, and successful
+HyperFrames lint, validation, and strict layout inspection at every semantic
+item's `fullyVisibleSec` voice anchor (plus ordinary timeline samples). This
+checks readable states instead of hidden outgoing DOM at hard cuts. A custom
+composition cue may have an empty semantic list only when it has no visible
+text, such as a clean tail hold. Delivery is incomplete until reopening Visual
+Production displays the delivered runtime and records the matching revision
+number and plan hash.
+
+## SUPERSEDED — Direct Final Export Contract - July 20, 2026
+
+The live registered HyperFrames composition is the creator's full review
+surface. Once all active review notes are accepted or resolved, **Export final**
+is the only required export action. Representative approval, a separate full
+review MP4, full-review approval, and a post-delivery approval are no longer
+prerequisites for final export.
+
+One click now saves the current plan and performs the complete delivery job:
+
+- prevents a second render from starting for the same project and reconnects
+  the UI to the existing job;
+- persists stage, percentage, elapsed time, estimated remaining time, failure,
+  and output path so a browser reload keeps the export visible;
+- runs HyperFrames lint, validation, and strict layout inspection at the
+  voice-anchored readable states before rendering;
+- renders the registered composition once at final quality;
+- stream-copies the locked cut's audio into the rendered video;
+- verifies encoded video, duration, frame rate, frame count, audio presence,
+  audio format, and full-length audio packet identity before publication; and
+- atomically publishes `exports/final-video.mp4`, or uses a timestamped final
+  filename when Windows has the existing target open.
+
+The export is rejected if active review notes remain, visible semantic items
+are unanchored, composition-root overflow suppression is present, the plan
+changes during rendering, or the completed media fails verification. Legacy
+gate and review-render fields remain readable for existing projects but no
+longer block **Export final**.
+
+## SUPERSEDED — Approved Review and Sync Expansion - July 14, 2026
+
+The Visual Production workspace is the shared source of truth between the
+creator and Codex while a visual pass is being revised. The approved expansion
+adds these behaviors without changing locked-cut timing or redesigning the
+renderer:
+
+- Dock a review-note editor below the right-hand Inspector for the selected
+  timeline item.
+- Provide a note field plus **Leave everything else** and **Replace all of it**
+  checkboxes. The two checkboxes are mutually exclusive. With neither checked,
+  the note requests a targeted change to the selected item.
+- Treat a non-empty note as **Changes requested**. After Codex writes the next
+  revision back to the project, the item becomes **Ready for review**.
+- Provide an **Accept** action that removes the active review marker while
+  preserving an immutable accepted-note record in project history. Editing or
+  adding another note starts a new review round.
+- **Copy All Notes** includes only items with non-empty active notes. It includes
+  project and plan paths, exact timestamps, stable item IDs, item types, notes,
+  and preservation scope. It explicitly protects every unnoted scene.
+- Save plan edits back to the private project automatically and provide a clear
+  reload path for changes written by Codex or HyperFrames. The browser editor
+  and the files Codex reads must not become parallel sources of truth.
+- Show B-roll opportunities and AI-footage briefs as distinct colored timeline
+  lanes even before media is attached. These are planning items, not fake
+  rendered clips.
+- Let imported images and video overlays be dragged and resized directly on the
+  preview while retaining the existing numeric controls.
+
+Review records live with the private visual plan. An active record identifies
+one cue or suggestion, contains its exact timing and directive, and has status
+`changes-requested` or `ready-for-review`. Accepted records move to durable
+review history so end-of-project analysis can separate universal editorial
+rules, reusable treatment improvements, brand preferences, and one-video
+exceptions.
+
+The Generated panel has two explicit meanings:
+
+- **Ready** contains implemented modules that can be inserted and rendered now.
+- **Reusable recipes** contains proven content-neutral treatments that are not
+  installed render modules yet. Each recipe is labeled **Needs Build**. Hovering
+  shows a visual preview; **Build with Codex** creates an exact timestamped
+  planning item, creates a scoped review note, and copies its build/reuse prompt.
+  It does not silently switch the user to another panel.
+
+Successful new treatments move from **Needs Build** to **Ready** only after a
+real generalized implementation exists. This distinction keeps the reusable
+animation library discoverable without weakening the renderer contract.
+
+Clarification approved July 14, 2026: the earlier whole-card click that created
+a suggestion and jumped directly to Review was confusing and is superseded.
+Recipe cards must explain their state and expose an explicit build action. A
+library-browsing preview may use the most recent private production thumbnail
+when one is available; otherwise it may use a content-neutral illustrative
+fallback so every recipe remains understandable without creator media in Git.
+That illustrative fallback is browsing help only. Under the canonical Cook and
+Approval Contract, it is not valid approval evidence; a proposal without
+historical evidence requires one representative sample frame.
+
+## SUPERSEDED — Approval contract three
 
 The Canonical Cook and Approval Contract above defines the controlling cadence,
 evidence, counting, sequential-responsibility, and build-through rules for this
@@ -800,35 +902,3 @@ The built cue must retain `planningSuggestionId`, `approvedTreatmentId`, the
 speaker-safety record, selected family, compared candidates, and selection
 rationale. A changed treatment reopens the decision; production may not
 silently substitute another family.
-
-## Library curation and canonical defaults
-
-Treatment records include purpose, family, exact allowed layouts, content
-capacity, motion profile, reuse policy, private preview availability, creator
-rating, default-lock state, lock scopes, and use history. The Rate tab presents
-each unique approved or built treatment once after a video.
-
-Ratings and locks are separate:
-
-- 5: excellent/default candidate;
-- 4: preferred;
-- 3: usable;
-- 2: needs refinement and is not normally suggested;
-- 1: retained in history but excluded from normal reuse; and
-- **Lock as default**: canonical first choice for a compatible intent/scope.
-
-`numbered-step-intro` is the initial five-star locked default for the intent
-“Example number and title.” It uses intentional-series reuse when multiple
-examples appear in one video. A future variant may challenge a locked default,
-but it becomes canonical only through explicit promotion; the previous version
-remains in history.
-
-## Delivery audio evidence
-
-Stage 5 records whether normalization actually ran. When it did, the record
-includes preset, target loudness, measured source loudness, and the measurement
-point. Final Visual Production export stream-copies the locked-cut audio,
-verifies packet identity, and writes `visual-production/delivery-manifest.json`
-with audio normalization evidence, source and delivered packet hashes, channel
-and sample-rate details, plus delivered video metadata. The UI calls this
-“locked-cut audio” unless normalization or mastering is proven by that record.

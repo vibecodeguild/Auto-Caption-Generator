@@ -401,59 +401,131 @@ the successful cut. The standalone Audio Normalizer remains available.
 
 ## API Inventory
 
-### Health and project editing
+Generated from `app/web_api.py` by `scripts/generate_api_inventory.py`. 93 routes.
+Edit the route or its docstring, then regenerate; do not edit this section by hand.
+
+### Visual Production
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| GET | `/api/health` | Process health check |
-| POST | `/api/projects/open` | Open a `.vcg.json` by supplied path |
-| POST | `/api/projects/open-dialog` | Open a project through a Windows dialog |
-| GET | `/api/projects/current` | Return active project, tokens, edits, splices, and kept ranges |
-| POST | `/api/projects/choose-video` | Select a transcript source video |
-| POST | `/api/projects/transcribe` | Synchronous transcription compatibility route |
-| POST | `/api/projects/transcribe/start` | Start a background transcription job |
-| GET | `/api/projects/transcribe/jobs/{job_id}` | Poll transcription status/result |
-| POST | `/api/projects/current/delete` | Delete selected word/silence tokens |
-| POST | `/api/projects/current/restore` | Restore selected word/silence tokens |
-| POST | `/api/projects/current/delete-dead-space` | Delete undeleted silence ranges meeting the project threshold |
-| POST | `/api/projects/current/settings` | Update the bulk-pause threshold setting |
-| POST | `/api/projects/current/analyze-pauses` | Measure threshold-qualified Whisper gap candidates and reject false long pauses |
-| POST | `/api/projects/current/analyze-boundaries` | Analyze and persist assisted word-end suggestions for the current project |
-| POST | `/api/projects/current/splices/adjust` | Nudge splice OUT/IN frames |
-| POST | `/api/projects/current/splices/review` | Set reviewed state |
-| POST | `/api/projects/current/render-preview` | Render the complete current cut and return its splice timeline |
-| GET | `/api/projects/current/render-preview/{preview_id}` | Stream the active complete-cut review draft |
-| POST | `/api/projects/current/save` | Save active project, prompting if necessary |
-| GET | `/api/projects/current/document` | Return the serializable project document |
-| POST | `/api/projects/current/export` | Export adjusted kept ranges, with optional sequential audio normalization |
-| GET | `/api/projects/current/source-video` | Stream active source with byte-range support |
-| GET | `/api/projects/current/frame` | Extract and return one source frame |
+| POST | `/api/visual/assets/import-dialog` | Import visual asset dialog |
+| GET | `/api/visual/assets/{asset_id}` | Visual asset |
+| GET | `/api/visual/catalog` | Visual catalog |
+| GET | `/api/visual/catalog/recipes/{recipe_id}/preview` | Visual recipe preview |
+| PATCH | `/api/visual/catalog/treatments/{treatment_id}` | Patch visual treatment |
+| GET | `/api/visual/catalog/treatments/{treatment_id}/motion-preview` | Visual treatment motion preview |
+| GET | `/api/visual/catalog/treatments/{treatment_id}/preview` | Visual treatment preview |
+| POST | `/api/visual/create-dialog` | Create visual project dialog |
+| GET | `/api/visual/credits` | Visual credits |
+| GET | `/api/visual/current` | Current visual project |
+| POST | `/api/visual/ensure` | Ensure visual project |
+| GET | `/api/visual/final` | Visual final video |
+| POST | `/api/visual/gates/full-review` | Approve visual full review |
+| POST | `/api/visual/gates/reopen` | Verify visual delivery reopened |
+| POST | `/api/visual/gates/representative` | Approve visual representative |
+| POST | `/api/visual/open-dialog` | Open visual project dialog |
+| GET | `/api/visual/pexels/settings` | Pexels configuration |
+| POST | `/api/visual/pexels/settings` | Save pexels configuration |
+| POST | `/api/visual/render` | Start visual render |
+| GET | `/api/visual/render/active` | Active visual render job |
+| GET | `/api/visual/render/jobs/{job_id}` | Visual render job |
+| GET | `/api/visual/render/jobs/{job_id}/video` | Visual render video |
+| POST | `/api/visual/review-prompt` | Visual review prompt |
+| GET | `/api/visual/runtime/composition/{relative_path:path}` | Visual runtime composition file |
+| GET | `/api/visual/runtime/core.js` | Visual runtime core |
+| GET | `/api/visual/runtime/player.js` | Visual runtime player |
+| POST | `/api/visual/save` | Save current visual plan |
+| GET | `/api/visual/source` | Visual source video |
+| GET | `/api/visual/source-frame` | Visual source frame |
+| GET | `/api/visual/suggestions` | Visual suggestions |
+| POST | `/api/visual/suggestions/recipe` | Add recipe suggestion |
+| PATCH | `/api/visual/suggestions/{suggestion_id}` | Patch visual suggestion |
+| POST | `/api/visual/suggestions/{suggestion_id}/approval-evidence/prepare` | Prepare visual suggestion approval evidence |
+| GET | `/api/visual/suggestions/{suggestion_id}/approval-frame` | Visual suggestion approval frame |
+| POST | `/api/visual/suggestions/{suggestion_id}/build` | Build visual suggestion |
+| POST | `/api/visual/suggestions/{suggestion_id}/decision` | Decide visual suggestion |
+| POST | `/api/visual/suggestions/{suggestion_id}/pexels/search` | Search suggestion stock |
+| POST | `/api/visual/suggestions/{suggestion_id}/pexels/select` | Select suggestion stock |
 
-### Captions
+### Creator Library
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| GET | `/api/caption/options` | Models, compute options, presets, styles, source, and output folder |
-| POST | `/api/caption/choose-video` | Select caption source |
-| POST | `/api/caption/choose-output-folder` | Select caption destination |
-| POST | `/api/caption/preview` | Return/reuse timed words and caption groups |
-| POST | `/api/caption/generate` | Render burned-in captions |
-| POST | `/api/caption/styles` | Save a user style |
-| DELETE | `/api/caption/styles/{name}` | Delete a non-built-in style |
-| GET | `/api/caption/source-video` | Stream selected caption source |
+| GET | `/api/creator-library` | Creator library |
+| POST | `/api/creator-library/import-dialog` | Import creator library asset |
+| PATCH | `/api/creator-library/{asset_id}` | Patch creator library asset |
+| GET | `/api/creator-library/{asset_id}/media` | Creator library media |
+| POST | `/api/creator-library/{asset_id}/use` | Use creator library asset |
+
+### Video projects
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| POST | `/api/video-project/clips/add-dialog` | Add video project clips |
+| POST | `/api/video-project/clips/reorder` | Reorder video project clips |
+| DELETE | `/api/video-project/clips/{clip_id}` | Delete video project clip |
+| POST | `/api/video-project/create-dialog` | Create video project dialog |
+| GET | `/api/video-project/current` | Current video project |
+| POST | `/api/video-project/open-dialog` | Open video project dialog |
+| GET | `/api/video-project/visual-prompt` | Video project visual prompt |
 
 ### Audio
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| GET | `/api/audio/options` | Presets, targets, source, and output folder |
-| POST | `/api/audio/choose-video` | Select audio source |
-| POST | `/api/audio/choose-output-folder` | Select audio destination |
-| POST | `/api/audio/analyze` | Measure audio and recommend speech regions |
-| POST | `/api/audio/preview` | Generate matched Original/Corrected clips |
-| POST | `/api/audio/normalize` | Export normalized audio/video |
-| GET | `/api/audio/source-video` | Stream selected source |
-| GET | `/api/audio/preview/{preview_id}/{mode}` | Stream original or corrected preview |
+| POST | `/api/audio/analyze` | Analyze video audio |
+| POST | `/api/audio/choose-output-folder` | Choose audio output folder |
+| POST | `/api/audio/choose-video` | Choose audio video |
+| POST | `/api/audio/normalize` | Normalize audio |
+| GET | `/api/audio/options` | Audio options |
+| POST | `/api/audio/preview` | Generate audio preview |
+| GET | `/api/audio/preview/{preview_id}/{mode}` | Audio preview media |
+| GET | `/api/audio/source-video` | Audio source video |
+
+### Transcript projects
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| POST | `/api/projects/choose-video` | Choose transcript video |
+| GET | `/api/projects/current` | Current project |
+| POST | `/api/projects/current/analyze-boundaries` | Analyze current boundaries |
+| POST | `/api/projects/current/analyze-pauses` | Analyze current pauses |
+| POST | `/api/projects/current/delete` | Delete selection |
+| POST | `/api/projects/current/delete-dead-space` | Delete dead space |
+| GET | `/api/projects/current/document` | Project document |
+| POST | `/api/projects/current/export` | Export cut |
+| POST | `/api/projects/current/final-out-frame` | Set final out frame |
+| GET | `/api/projects/current/frame` | Frame image |
+| POST | `/api/projects/current/manual-cuts` | Add manual cut |
+| POST | `/api/projects/current/manual-cuts/adjust` | Adjust manual cut |
+| DELETE | `/api/projects/current/manual-cuts/{cut_id}` | Remove manual cut |
+| POST | `/api/projects/current/render-preview` | Render cut preview |
+| GET | `/api/projects/current/render-preview/{preview_id}` | Rendered cut preview |
+| POST | `/api/projects/current/restore` | Restore selection |
+| POST | `/api/projects/current/save` | Save project |
+| POST | `/api/projects/current/settings` | Update editor settings |
+| GET | `/api/projects/current/source-video` | Source video |
+| POST | `/api/projects/current/splices/adjust` | Adjust splice |
+| POST | `/api/projects/current/splices/review` | Review splice |
+| POST | `/api/projects/open` | Open project |
+| POST | `/api/projects/open-dialog` | Open project dialog |
+| POST | `/api/projects/transcribe` | Transcribe project |
+| GET | `/api/projects/transcribe/jobs/{job_id}` | Transcribe job status |
+| POST | `/api/projects/transcribe/start` | Start transcribe project |
+
+### Other
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| POST | `/api/caption/choose-output-folder` | Choose caption output folder |
+| POST | `/api/caption/choose-video` | Choose caption video |
+| POST | `/api/caption/generate` | Generate caption video |
+| GET | `/api/caption/options` | Caption options |
+| POST | `/api/caption/preview` | Caption preview |
+| GET | `/api/caption/source-video` | Caption source video |
+| POST | `/api/caption/styles` | Save caption style |
+| DELETE | `/api/caption/styles/{name}` | Delete caption style |
+| GET | `/api/health` | Health |
 
 ## Storage and State
 

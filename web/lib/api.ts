@@ -459,6 +459,9 @@ export type VisualProductionReport = {
   speakerSafetyIssues: string[];
   planningApprovalPassed: boolean;
   planningApprovalIssues: string[];
+  /** False when the locked cut changed after the plan was authored, so cue times refer to old footage. */
+  lockedCutMatches: boolean;
+  lockedCutIssues: string[];
   canRenderReview: boolean;
   canDeliver: boolean;
   canExportFinal: boolean;
@@ -531,6 +534,17 @@ export type VisualProjectResponse = {
   };
   activeRevision: VisualRevision | null;
   production: VisualProductionReport;
+  /** Outcome of the last delivery's library harvest. Null until a final export has run. */
+  libraryCuration: LibraryCuration | null;
+};
+
+export type LibraryCuration = {
+  status: "complete" | "failed" | "not-run";
+  treatmentsRecorded: number;
+  candidates?: number;
+  /** Treatments this video introduced. These are the ones worth rating. */
+  introducedTreatmentIds?: string[];
+  error?: string;
 };
 
 export type VisualRenderJob = {
@@ -609,7 +623,6 @@ export type VisualSuggestion = {
   intentionalRepeat?: boolean;
   repeatRationale?: string;
   meaningfulChanges?: VisualMeaningfulChange[];
-  intentionalHold?: { reason: string; representativeTimeSec: number };
   approvalEvidence?: VisualApprovalEvidence;
   scenePacket?: {
     layout: VisualSceneLayout;
@@ -635,7 +648,7 @@ export type VisualSuggestion = {
   reusePolicy?: "limited" | "repeat-safe" | "intentional-series" | "callback-only";
   speakerSafety?: {
     checked: boolean;
-    mode: "full-frame-speaker" | "left-container" | "right-container" | "bottom-container" | "corner-container" | "brief-full-frame-hit";
+    mode: "full-frame-speaker" | "left-container" | "right-container" | "bottom-container" | "corner-container";
     speakerBounds: { x: number; y: number; width: number; height: number } | null;
     overlayOcclusionBounds: { x: number; y: number; width: number; height: number }[];
     verifiedAtSec: number[];

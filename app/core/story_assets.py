@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -13,23 +12,32 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.ffmpeg_locator import find_ffmpeg
+from app.core.file_utils import is_within, sha256_file, slug
 from app.core.process_utils import hidden_subprocess_flags
 from app.core.settings import project_root, user_data_root
 from app.core.visual_production import (
     ASSET_EXTENSIONS,
     MODULE_IDS,
+    MODULE_PARAMETER_KEYS,
     VIDEO_EXTENSIONS,
     build_hyperframes_composition,
     find_visual_root,
     load_visual_plan,
+    is_screen_share_layout,
+    measured_speaker_bounds,
     probe_visual_source,
     resolve_project_path,
     save_visual_plan,
+    speaker_safety_issues,
+    validate_document_schema,
 )
 
 
 CREATOR_LIBRARY_VERSION = 1
 SUGGESTIONS_VERSION = 1
+# One contract. Earlier versions existed as a migration ramp and became an opt-out: lowering this
+# field switched off the approval contract, the planning gate, and the library harvest at once.
+SUGGESTIONS_CONTRACT_VERSION = 3
 SUGGESTION_STATUSES = {"proposed", "prepared", "approved", "rejected", "built", "needs-alternatives"}
 SUGGESTION_CATEGORIES = {"clean-speaker", "protected-footage", "graphic", "creator-library", "project-asset", "stock", "ai-brief"}
 SCENE_LAYOUTS = {
@@ -42,17 +50,33 @@ SCENE_LAYOUTS = {
     "talking-top-right",
     "computer-screen-only",
 }
-SPEAKER_SAFETY_MODES = {
-    "full-frame-speaker",
-    "left-container",
-    "right-container",
-    "bottom-container",
-    "corner-container",
-    "brief-full-frame-hit",
-}
 PEXELS_LICENSE_URL = "https://www.pexels.com/license/"
 TREATMENT_LIBRARY_VERSION = 1
 MAX_MEANINGFUL_CHANGE_GAP_SEC = 5.0
+# Changes that carry a protected span without putting a graphic over the footage. There is no
+# "hold" concept: protected-footage means no overlay may cover the demonstration, and the
+# five-second cadence is met with source-level motion instead.
+# A protected span renders nothing, so it is a moment the footage carries alone: a click, a
+# punchline, a reaction. Beyond this it stops being a protected moment and becomes an unplanned
+# chapter, which is how one video ended up 83% empty. To keep a demonstration readable for longer,
+# name the region with scenePacket.protectedRegions and put a treatment beside it.
+MAX_PROTECTED_SPAN_SEC = 8.0
+# Variety ceilings. These hold whatever the plan declares: intentionalRepeat and seriesId can
+# excuse a deliberate callback, but they cannot make one device carry the video. A pass that was
+# 46% punch zooms and 38% callouts satisfied every per-scene rule because both were marked
+# intentional, so the limits that matter are proportions of the whole plan.
+MAX_TREATMENT_SHARE = 0.25
+MAX_TOP_TWO_SHARE = 0.45
+MIN_GRAPHIC_DURATION_SEC = 1.0
+SOURCE_LEVEL_CHANGE_KINDS = {
+    "punch-zoom",
+    "speaker-reframe",
+    "composition-change",
+    "emphasis-change",
+    "ui-action",
+    "internal-reveal",
+    "chart-change",
+}
 MEANINGFUL_CHANGE_KINDS = {
     "treatment-enter",
     "internal-reveal",
@@ -264,7 +288,90 @@ def creator_asset_path(asset_id: str) -> Path:
     return path
 
 
-def freeze_creator_asset(plan_path: Path, asset_id: str, *, start_sec: float, end_sec: float) -> tuple[dict, dict]:
+def _direct_placement_suggestion(
+    plan_path: Path,
+    *,
+    category: str,
+    start_sec: float,
+    end_sec: float,
+    treatment_id: str,
+    purpose: str,
+) -> dict:
+    """Record media the creator placed by hand as an approved decision.
+
+    The creator dragging an asset onto the timeline *is* the approval, so the decision record
+    says so explicitly rather than leaving a cue with no authorising suggestion behind it.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    start = round(float(start_sec), 3)
+    end = round(float(end_sec), 3)
+    suggestion = {
+        "id": f"placed-{uuid.uuid4().hex[:12]}",
+        "status": "built",
+        "category": category,
+        "timelineLane": "b-roll",
+        "startSec": start,
+        "endSec": end,
+        "editorialPurpose": purpose,
+        "scenePacket": {
+            "screenshotTimeSec": round((start + end) / 2, 3),
+            "purpose": purpose,
+            "contentDensity": "creator-selected media",
+            "bRollFit": "Chosen by the creator directly against the locked cut.",
+            "motionOpportunities": [],
+            "spokenBeats": [],
+            "protectedRegions": [],
+        },
+        "meaningfulChanges": [],
+        "decision": {
+            "status": "approved",
+            "selectedTreatmentId": treatment_id,
+            "notes": "Placed directly on the timeline by the creator.",
+            "decidedBy": "creator-direct-placement",
+            "decidedAt": now,
+        },
+        "rejectionHistory": [],
+    }
+    data = load_visual_suggestions(plan_path)
+    data["suggestions"].append(suggestion)
+    save_visual_suggestions(plan_path, data)
+    return suggestion
+
+
+def _authorising_suggestion(
+    plan_path: Path,
+    suggestion_id: str | None,
+    *,
+    category: str,
+    start_sec: float,
+    end_sec: float,
+    treatment_id: str,
+    purpose: str,
+) -> dict:
+    if suggestion_id:
+        data = load_visual_suggestions(plan_path)
+        suggestion = next((item for item in data["suggestions"] if item.get("id") == suggestion_id), None)
+        if suggestion is None:
+            raise ValueError("Visual suggestion not found.")
+        return suggestion
+    return _direct_placement_suggestion(
+        plan_path,
+        category=category,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        treatment_id=treatment_id,
+        purpose=purpose,
+    )
+
+
+def freeze_creator_asset(
+    plan_path: Path,
+    asset_id: str,
+    *,
+    start_sec: float,
+    end_sec: float,
+    suggestion_id: str | None = None,
+) -> tuple[dict, dict]:
     library = load_creator_library()
     creator = next((item for item in library["assets"] if item.get("id") == asset_id), None)
     if creator is None:
@@ -290,9 +397,19 @@ def freeze_creator_asset(plan_path: Path, asset_id: str, *, start_sec: float, en
             "origin": {"type": "creator-library", "assetId": creator["id"], "sha256": creator["sha256"]},
         }
         plan["assets"].append(asset)
-    cue = _asset_cue(asset, start_sec, end_sec)
+    suggestion = _authorising_suggestion(
+        plan_path,
+        suggestion_id,
+        category="creator-library",
+        start_sec=start_sec,
+        end_sec=end_sec,
+        treatment_id=project_asset_id,
+        purpose=f"Creator Library asset: {creator['name']}",
+    )
+    cue = _asset_cue(asset, start_sec, end_sec, suggestion)
     plan["cues"].append(cue)
     save_visual_plan(plan_path, plan)
+    update_suggestion(plan_path, suggestion["id"], {"status": "built", "cueId": cue["id"]})
     now = datetime.now(timezone.utc).isoformat()
     usage = {"projectId": plan["project"]["id"], "timelineStartSec": start_sec, "timelineEndSec": end_sec, "usedAt": now}
     creator["usage"].append(usage)
@@ -316,7 +433,7 @@ def load_visual_suggestions(plan_path: Path) -> dict:
     _refresh_suggestion_contract(plan_path, data)
     validate_visual_suggestions(data)
     if json.dumps(data, sort_keys=True, ensure_ascii=False) != original:
-        _write_visual_suggestions(path, data)
+        _write_visual_suggestions(path, data, refreshed=True)
     return data
 
 
@@ -324,11 +441,42 @@ def save_visual_suggestions(plan_path: Path, data: dict) -> dict:
     _refresh_suggestion_contract(plan_path, data)
     validate_visual_suggestions(data)
     path = suggestions_path(plan_path)
-    _write_visual_suggestions(path, data)
+    _write_visual_suggestions(path, data, refreshed=True)
     return data
 
 
-def _write_visual_suggestions(path: Path, data: dict) -> None:
+def _participates_in_timeline_contract(suggestion: dict) -> bool:
+    """True when a suggestion still occupies a slot in the reviewed visual plan.
+
+    A revision request rejects the selected treatment, not the editorial decision to cover that
+    interval. Keeping that unresolved slot in coverage and cadence calculations lets the creator
+    save a durable change request while the production gate continues to block rendering until a
+    replacement is approved. Bare ``needs-alternatives`` placeholders are not complete decisions
+    yet and remain outside the authored contract.
+    """
+    status = suggestion.get("status")
+    if status == "rejected":
+        return False
+    if status != "needs-alternatives":
+        return True
+    decision = suggestion.get("decision")
+    return isinstance(decision, dict) and decision.get("status") == "revision-requested"
+
+
+def _write_visual_suggestions(path: Path, data: dict, *, refreshed: bool = False) -> None:
+    """Write the decision record. Not a public entry point.
+
+    save_visual_suggestions is the supported way in: it refreshes the app-computed fields before
+    validating. Writing around it leaves derived values — approval evidence above all — reflecting
+    what the author claimed rather than what is true. Anything written this way is corrected on
+    the next load_visual_suggestions, but the guard makes the intent explicit rather than relying
+    on that.
+    """
+    if not refreshed:
+        raise RuntimeError(
+            "Use save_visual_suggestions to write visual-suggestions.json. It recomputes the "
+            "app-owned fields, including approval evidence, before validating."
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -336,25 +484,22 @@ def _write_visual_suggestions(path: Path, data: dict) -> None:
 
 
 def _refresh_suggestion_contract(plan_path: Path, data: dict) -> None:
-    coverage = data.get("coverage")
-    if not isinstance(coverage, dict):
-        return
-    reuse = coverage.get("reuseAudit")
-    if not isinstance(reuse, dict) or reuse.get("contractVersion") != 3:
-        return
-    plan = load_visual_plan(plan_path)
-    duration = float(plan["composition"]["durationSec"])
     suggestions = [
         item
         for item in data.get("suggestions", [])
-        if item.get("status") not in {"rejected", "needs-alternatives"}
+        if _participates_in_timeline_contract(item)
     ]
-    coverage["runtimeSec"] = duration
-    coverage["decisionCounts"] = _decision_counts(suggestions)
-    coverage["cadenceAudit"] = _cadence_audit(suggestions, duration)
     for suggestion in suggestions:
         if _is_graphic_suggestion(suggestion):
             _refresh_approval_evidence(plan_path, suggestion)
+    coverage = data.get("coverage")
+    if not isinstance(coverage, dict):
+        return
+    plan = load_visual_plan(plan_path)
+    duration = float(plan["composition"]["durationSec"])
+    coverage["runtimeSec"] = duration
+    coverage["decisionCounts"] = _decision_counts(suggestions)
+    coverage["cadenceAudit"] = _cadence_audit(suggestions, duration)
 
 
 def _decision_counts(suggestions: list[dict]) -> dict:
@@ -388,6 +533,41 @@ def _merged_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float,
     return [(start, end) for start, end in merged]
 
 
+def _uncovered_intervals(
+    start: float,
+    end: float,
+    covered_intervals: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Return the parts of one interval that no rendered treatment covers."""
+    covered = _merged_intervals([
+        (max(start, covered_start), min(end, covered_end))
+        for covered_start, covered_end in covered_intervals
+        if covered_end > start and covered_start < end
+    ])
+    uncovered: list[tuple[float, float]] = []
+    cursor = start
+    for covered_start, covered_end in covered:
+        if covered_start > cursor + 0.001:
+            uncovered.append((cursor, covered_start))
+        cursor = max(cursor, covered_end)
+    if cursor < end - 0.001:
+        uncovered.append((cursor, end))
+    return uncovered
+
+
+def _renders_something(suggestion: dict) -> bool:
+    """True when this scene puts an actual rendered treatment on screen.
+
+    A clean-speaker or protected-footage scene with no treatment renders bare source footage.
+    Whatever its meaningfulChanges say, nothing happens on screen during it.
+    """
+    if suggestion.get("moduleId") in (MODULE_IDS - {"source-footage-hold"}):
+        return True
+    if suggestion.get("recipeId"):
+        return True
+    return suggestion.get("category") in {"creator-library", "project-asset", "stock", "ai-brief"}
+
+
 def _cadence_audit(suggestions: list[dict], duration: float) -> dict:
     covered = _merged_intervals([
         (max(0.0, float(item["startSec"])), min(duration, float(item["endSec"])))
@@ -402,23 +582,19 @@ def _cadence_audit(suggestions: list[dict], duration: float) -> dict:
     if cursor < duration - 0.05:
         coverage_violations.append({"startSec": round(cursor, 3), "endSec": round(duration, 3), "reason": "No editorial visual decision covers this part of the locked cut."})
 
-    holds = _merged_intervals([
-        (float(item["startSec"]), float(item["endSec"]))
-        for item in suggestions
-        if isinstance(item.get("intentionalHold"), dict)
-    ])
-    cadence_segments: list[tuple[float, float]] = []
-    cursor = 0.0
-    for start, end in holds:
-        start, end = max(0.0, start), min(duration, end)
-        if start > cursor:
-            cadence_segments.append((cursor, start))
-        cursor = max(cursor, end)
-    if cursor < duration:
-        cadence_segments.append((cursor, duration))
+    # The cadence rule applies to the entire runtime, with no exemption anywhere. Protected
+    # footage means no overlay may cover it, not that nothing happens: it still earns a punch
+    # zoom, reframe, or callout every five seconds.
+    cadence_segments: list[tuple[float, float]] = [(0.0, duration)]
 
+    # Only events that actually render count. A meaningfulChange inside a scene with no treatment
+    # is a sentence in a JSON file: writing {"kind": "punch-zoom"} against bare source footage
+    # produces no movement. Counting those let a plan satisfy the pacing rule while leaving most
+    # of the video visually dead.
     events: set[float] = set()
     for item in suggestions:
+        if not _renders_something(item):
+            continue
         events.add(max(0.0, min(duration, float(item["startSec"]))))
         events.add(max(0.0, min(duration, float(item["endSec"]))))
         for change in item.get("meaningfulChanges", []):
@@ -438,7 +614,11 @@ def _cadence_audit(suggestions: list[dict], duration: float) -> dict:
                 cadence_violations.append({
                     "startSec": round(left, 3),
                     "endSec": round(right, 3),
-                    "reason": "No meaningful visual change is scheduled within five seconds.",
+                    "reason": (
+                        f"No meaningful visual change is scheduled between {left:.1f}s and "
+                        f"{right:.1f}s. Every five seconds needs a graphic, reveal, callout, "
+                        "punch zoom, or callout that actually renders."
+                    ),
                 })
     return {
         "maxAllowedGapSec": MAX_MEANINGFUL_CHANGE_GAP_SEC,
@@ -453,6 +633,54 @@ def approval_sample_path(plan_path: Path, suggestion_id: str, treatment_id: str)
     safe_suggestion = slug(suggestion_id)
     safe_treatment = slug(treatment_id)
     return find_visual_root(plan_path) / "previews" / "visual" / "approval-samples" / f"{safe_suggestion}-{safe_treatment}.png"
+
+
+def approval_sample_receipt_path(sample: Path) -> Path:
+    return sample.with_suffix(".receipt.json")
+
+
+def _write_sample_receipt(sample: Path, *, suggestion_id: str, treatment_id: str) -> None:
+    """Sign a sample frame the app rendered, so a drawing cannot stand in for a render."""
+    approval_sample_receipt_path(sample).write_text(
+        json.dumps({
+            "renderedBy": "hyperframes",
+            "suggestionId": suggestion_id,
+            "treatmentId": treatment_id,
+            "sha256": sha256_file(sample),
+            "renderedAt": datetime.now(timezone.utc).isoformat(),
+        }, indent=2),
+        encoding="utf-8",
+    )
+
+
+def sample_receipt_problem(sample: Path, *, suggestion_id: str, treatment_id: str) -> str | None:
+    """Return why this sample is not usable as evidence, or None when it is.
+
+    Approval evidence exists so the creator approves the thing that will actually render. A PNG
+    with no receipt was produced some other way — by hand, by another tool, or for another
+    treatment — and approving it approves nothing.
+    """
+    if not sample.is_file():
+        return "the sample frame is missing"
+    receipt_path = approval_sample_receipt_path(sample)
+    if not receipt_path.is_file():
+        return (
+            "the sample frame has no render receipt, so it was not produced by HyperFrames. "
+            "Register the treatment and let the app render the sample; a drawing is not evidence"
+        )
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "the sample frame's render receipt cannot be read"
+    if receipt.get("renderedBy") != "hyperframes":
+        return "the sample frame was not rendered by HyperFrames"
+    if receipt.get("treatmentId") != treatment_id:
+        return f"the sample frame was rendered for {receipt.get('treatmentId')}, not {treatment_id}"
+    if receipt.get("suggestionId") != suggestion_id:
+        return f"the sample frame was rendered for suggestion {receipt.get('suggestionId')}"
+    if receipt.get("sha256") != sha256_file(sample):
+        return "the sample frame changed after it was rendered"
+    return None
 
 
 def _refresh_approval_evidence(plan_path: Path, suggestion: dict) -> None:
@@ -476,20 +704,22 @@ def _refresh_approval_evidence(plan_path: Path, suggestion: dict) -> None:
             supplied = resolve_project_path(find_visual_root(plan_path), supplied_ref)
         except ValueError:
             supplied = None
-    if existing.get("selectedTreatmentId") == selected and existing.get("status") == "historical-ready" and historical is not None:
-        status = "historical-ready"
-        sample_ref = None
-    elif existing.get("selectedTreatmentId") == selected and existing.get("status") == "sample-ready" and supplied is not None and supplied.is_file():
+    # A sample only counts when the app rendered it and signed it. Existence of a PNG proves
+    # nothing: a hand-drawn mockup at the expected path used to be accepted as evidence.
+    expected = approval_sample_path(plan_path, suggestion["id"], selected)
+    candidate = supplied if supplied is not None else expected
+    receipt_problem = sample_receipt_problem(candidate, suggestion_id=str(suggestion["id"]), treatment_id=selected)
+    # A signed exact sample is stronger evidence than a generic historical example. Keeping the
+    # historical frame first made scene-specific comparisons look like they still contained the
+    # old project's labels even after their parameters were corrected.
+    if receipt_problem is None:
         status = "sample-ready"
-        sample_ref = supplied.relative_to(find_visual_root(plan_path)).as_posix()
+        sample_ref = candidate.relative_to(find_visual_root(plan_path)).as_posix()
+        problem = None
     elif historical is not None:
-        status = "historical-ready"
-        sample_ref = None
+        status, sample_ref, problem = "historical-ready", None, None
     else:
-        expected = approval_sample_path(plan_path, suggestion["id"], selected)
-        ready_sample = supplied if supplied is not None and supplied.is_file() else expected if expected.is_file() else None
-        status = "sample-ready" if ready_sample is not None else "sample-required"
-        sample_ref = ready_sample.relative_to(find_visual_root(plan_path)).as_posix() if ready_sample is not None else None
+        status, sample_ref, problem = "sample-required", None, receipt_problem
     evidence = {
         "status": status,
         "selectedTreatmentId": selected,
@@ -499,13 +729,31 @@ def _refresh_approval_evidence(plan_path: Path, suggestion: dict) -> None:
     }
     if sample_ref:
         evidence["sampleFramePath"] = sample_ref
+    if problem:
+        evidence["blockedReason"] = problem
     suggestion["approvalEvidence"] = evidence
 
 
 def validate_visual_suggestions(data: dict) -> None:
+    _validate_visual_suggestion_rules(data)
+    # The schema runs after the domain rules so that a rule violation reports the rule rather
+    # than a generic path, and still cannot be skipped.
+    validate_document_schema("visual-suggestions", data, label="visual-suggestions.json")
+
+
+def _validate_visual_suggestion_rules(data: dict) -> None:
     if data.get("schemaVersion") != SUGGESTIONS_VERSION:
         raise ValueError("Unsupported visual-suggestions version.")
     coverage = data.get("coverage")
+    graphics_present = any(
+        _is_graphic_suggestion(item) and _participates_in_timeline_contract(item)
+        for item in data.get("suggestions", [])
+    )
+    if graphics_present and not isinstance(coverage, dict):
+        raise ValueError(
+            "A plan containing authored graphics needs a coverage block with reuseAudit and bRollAudit. "
+            "The audit is how the reuse and B-roll decisions are recorded; it is not optional."
+        )
     if coverage is not None:
         if not isinstance(coverage, dict):
             raise ValueError("Visual suggestion coverage must be an object.")
@@ -519,8 +767,12 @@ def validate_visual_suggestions(data: dict) -> None:
                 raise ValueError(f"Visual suggestion reuseAudit {key} must be a list of non-empty strings.")
         if not isinstance(reuse.get("reviewed"), bool) or not isinstance(b_roll.get("reviewed"), bool):
             raise ValueError("Visual suggestion coverage reviewed flags must be booleans.")
-        if reuse.get("contractVersion") not in {None, 2, 3}:
-            raise ValueError("Unknown visual suggestion reuseAudit contractVersion.")
+        if reuse.get("contractVersion") != SUGGESTIONS_CONTRACT_VERSION:
+            raise ValueError(
+                f"Visual suggestion reuseAudit contractVersion must be {SUGGESTIONS_CONTRACT_VERSION}. "
+                "Lowering it used to disable the approval contract, the planning gate, and the "
+                "library harvest; there is only one contract now."
+            )
         if b_roll.get("decision") not in {"planned", "not-suitable"} or not str(b_roll.get("rationale") or "").strip():
             raise ValueError("Visual suggestion bRollAudit needs a decision and rationale.")
     ids = set()
@@ -537,20 +789,23 @@ def validate_visual_suggestions(data: dict) -> None:
             raise ValueError("Unknown visual suggestion timeline lane.")
         if float(suggestion.get("endSec") or 0) <= float(suggestion.get("startSec") or 0):
             raise ValueError("Visual suggestion end must be after start.")
-        if suggestion.get("status", "proposed") not in {"rejected", "needs-alternatives"} and _is_graphic_suggestion(suggestion):
+        if _participates_in_timeline_contract(suggestion) and _is_graphic_suggestion(suggestion):
             graphic_suggestions.append(suggestion)
     if coverage is not None and coverage["bRollAudit"]["decision"] == "planned":
         if not any(item.get("timelineLane") == "b-roll" or item.get("category") == "stock" for item in data.get("suggestions", [])):
             raise ValueError("A planned B-roll audit requires at least one B-roll suggestion.")
-    if coverage is not None and coverage["reuseAudit"]["reviewed"]:
+    if coverage is not None:
+        if not coverage["reuseAudit"]["reviewed"]:
+            raise ValueError(
+                "The reuse audit must be completed before the plan is saved. "
+                "Marking it unreviewed used to skip every graphic-treatment check."
+            )
         has_graphics = bool(graphic_suggestions)
         reused = any(coverage["reuseAudit"][key] for key in ("reusedModuleIds", "reusedRecipeIds", "creatorLibraryQueries"))
         if has_graphics and not reused and not coverage["reuseAudit"]["bespokeRationales"]:
             raise ValueError("A reuse audit with graphic suggestions must record a reused source or a bespoke rationale.")
-        if coverage["reuseAudit"].get("contractVersion") in {2, 3}:
-            _validate_graphic_suggestion_contract(graphic_suggestions, coverage["reuseAudit"])
-        if coverage["reuseAudit"].get("contractVersion") == 3:
-            _validate_approval_contract(data)
+        _validate_graphic_suggestion_contract(graphic_suggestions, coverage["reuseAudit"])
+        _validate_approval_contract(data)
 
 
 def _is_graphic_suggestion(suggestion: dict) -> bool:
@@ -563,6 +818,7 @@ def _validate_graphic_suggestion_contract(suggestions: list[dict], reuse_audit: 
     recipe_ids = {item["id"] for item in catalog["recipes"]}
     valid_treatment_ids = module_ids | recipe_ids
     selected_counts: dict[str, int] = {}
+    family_counts: dict[str, int] = {}
     previous: dict | None = None
 
     for suggestion in sorted(suggestions, key=lambda item: (float(item["startSec"]), float(item["endSec"]))):
@@ -573,6 +829,12 @@ def _validate_graphic_suggestion_contract(suggestions: list[dict], reuse_audit: 
         selected_id = str(selected_ids[0])
         if selected_id not in valid_treatment_ids:
             raise ValueError(f"Graphic suggestion {suggestion_id} selects an unknown treatment: {selected_id}.")
+        # moduleId names something the renderer can execute; recipeId names a catalog entry that
+        # still needs realizing. Crossing them made an unbuildable recipe look renderable.
+        if suggestion.get("moduleId") and selected_id not in module_ids:
+            raise ValueError(f"Graphic suggestion {suggestion_id} puts recipe {selected_id} in moduleId; recipes belong in recipeId.")
+        if suggestion.get("recipeId") and selected_id not in recipe_ids:
+            raise ValueError(f"Graphic suggestion {suggestion_id} puts module {selected_id} in recipeId; modules belong in moduleId.")
 
         candidates = suggestion.get("candidateTreatmentIds")
         if not isinstance(candidates, list) or any(not isinstance(value, str) or value not in valid_treatment_ids for value in candidates) or len(set(candidates)) < 3:
@@ -594,16 +856,62 @@ def _validate_graphic_suggestion_contract(suggestions: list[dict], reuse_audit: 
                 "choose another family or document an intentional repeat."
             )
         selected_counts[selected_id] = selected_counts.get(selected_id, 0) + 1
+        family_counts[family] = family_counts.get(family, 0) + 1
         if selected_counts[selected_id] > 2 and not intentional_repeat:
             raise ValueError(f"Treatment {selected_id} is used more than twice; later uses must be documented intentional callbacks.")
         if intentional_repeat and not str(suggestion.get("repeatRationale") or "").strip():
             raise ValueError(f"Graphic suggestion {suggestion_id} marks an intentional repeat but has no repeatRationale.")
+
+        if float(suggestion["endSec"]) - float(suggestion["startSec"]) < MIN_GRAPHIC_DURATION_SEC:
+            raise ValueError(
+                f"Graphic suggestion {suggestion_id} runs for "
+                f"{float(suggestion['endSec']) - float(suggestion['startSec']):.2f}s. A graphic that flashes "
+                f"for less than {MIN_GRAPHIC_DURATION_SEC:.0f}s reads as a glitch, not a visual event."
+            )
 
         if suggestion.get("moduleId") and selected_id not in reuse_audit["reusedModuleIds"]:
             raise ValueError(f"Graphic suggestion {suggestion_id} module {selected_id} is missing from coverage.reuseAudit.reusedModuleIds.")
         if suggestion.get("recipeId") and selected_id not in reuse_audit["reusedRecipeIds"]:
             raise ValueError(f"Graphic suggestion {suggestion_id} recipe {selected_id} is missing from coverage.reuseAudit.reusedRecipeIds.")
         previous = {"id": suggestion_id, "visualFamily": family}
+
+    _validate_treatment_variety(selected_counts, family_counts)
+
+
+def _validate_treatment_variety(selected_counts: dict[str, int], family_counts: dict[str, int]) -> None:
+    """Bound how much of a plan any one device may carry.
+
+    The per-scene rules are all escapable by declaring intentionalRepeat, which is correct for a
+    genuine callback and useless as a variety control: one pass marked 154 of 165 graphics
+    intentional and became 46% punch zooms and 38% callouts. These ceilings are proportions of the
+    finished plan, so no per-scene flag reaches them.
+    """
+    total = sum(selected_counts.values())
+    if total < 8:
+        return
+    ranked = sorted(selected_counts.items(), key=lambda item: -item[1])
+    worst_id, worst_count = ranked[0]
+    if worst_count / total > MAX_TREATMENT_SHARE:
+        raise ValueError(
+            f"{worst_id} carries {worst_count} of {total} graphics ({worst_count / total * 100:.0f}%). "
+            f"No treatment may exceed {MAX_TREATMENT_SHARE * 100:.0f}% of the plan. "
+            "Vary the device, not just the copy inside it."
+        )
+    if len(ranked) >= 2:
+        top_two = ranked[0][1] + ranked[1][1]
+        if top_two / total > MAX_TOP_TWO_SHARE:
+            raise ValueError(
+                f"{ranked[0][0]} and {ranked[1][0]} together carry {top_two} of {total} graphics "
+                f"({top_two / total * 100:.0f}%). Two devices may not exceed "
+                f"{MAX_TOP_TWO_SHARE * 100:.0f}% of the plan; the video reads as the same beat repeating."
+            )
+    families = sorted(family_counts.items(), key=lambda item: -item[1])
+    if families and families[0][1] / total > MAX_TREATMENT_SHARE:
+        raise ValueError(
+            f"The {families[0][0]} family carries {families[0][1]} of {total} graphics "
+            f"({families[0][1] / total * 100:.0f}%). Renaming the treatment does not create variety; "
+            f"no visual family may exceed {MAX_TREATMENT_SHARE * 100:.0f}% of the plan."
+        )
 
 
 def _validate_approval_contract(data: dict) -> None:
@@ -629,13 +937,24 @@ def _validate_approval_contract(data: dict) -> None:
 
     catalog = load_visual_catalog()
     treatments = {item["id"]: item for item in [*catalog["modules"], *catalog["recipes"]]}
+    rendered_intervals = [
+        (float(item["startSec"]), float(item["endSec"]))
+        for item in data.get("suggestions", [])
+        if _participates_in_timeline_contract(item) and _renders_something(item)
+    ]
     for suggestion in data.get("suggestions", []):
         suggestion_id = str(suggestion.get("id") or "unnamed suggestion")
+        is_graphic = _is_graphic_suggestion(suggestion)
         packet = suggestion.get("scenePacket")
         if not isinstance(packet, dict):
             raise ValueError(f"Suggestion {suggestion_id} needs a complete scenePacket.")
         layout = packet.get("layout")
-        if layout not in SCENE_LAYOUTS:
+        # Layout drives speaker-geometry lookup and ranked-candidate compatibility, both of which
+        # only apply to graphics. Media suggestions must still describe the scene, but the app
+        # places b-roll and library assets itself and cannot measure a recording layout.
+        if is_graphic and layout not in SCENE_LAYOUTS:
+            raise ValueError(f"Suggestion {suggestion_id} uses an unknown scene layout.")
+        if not is_graphic and layout is not None and layout not in SCENE_LAYOUTS:
             raise ValueError(f"Suggestion {suggestion_id} uses an unknown scene layout.")
         screenshot_time = _finite_number(packet.get("screenshotTimeSec"), f"Suggestion {suggestion_id} screenshotTimeSec")
         if screenshot_time < float(suggestion["startSec"]) or screenshot_time > float(suggestion["endSec"]):
@@ -651,6 +970,31 @@ def _validate_approval_contract(data: dict) -> None:
             continue
         start = float(suggestion["startSec"])
         end = float(suggestion["endSec"])
+
+        # Protected/clean decisions describe what the source must preserve; they do not prohibit
+        # a treatment beside that region. Bound only the portions that truly remain bare.
+        if suggestion.get("category") in {"protected-footage", "clean-speaker"}:
+            uncovered = _uncovered_intervals(start, end, rendered_intervals)
+            longest_uncovered = max((gap_end - gap_start for gap_start, gap_end in uncovered), default=0.0)
+            if longest_uncovered > MAX_PROTECTED_SPAN_SEC + 0.001:
+                raise ValueError(
+                    f"Suggestion {suggestion_id} leaves {longest_uncovered:.1f}s of the video with nothing "
+                    f"on screen. A protected moment may run at most {MAX_PROTECTED_SPAN_SEC:.0f}s. "
+                    "To keep a demonstration readable for longer, put a treatment beside it and list "
+                    "the exact area that must stay visible in scenePacket.protectedRegions."
+                )
+
+        # On a screen-share layout the frame is mostly application. A graphic there must say which
+        # part of the screen has to stay readable, so it can sit beside the demonstration instead
+        # of the demonstration being declared off-limits.
+        if is_graphic and layout in SCENE_LAYOUTS and is_screen_share_layout(layout):
+            if not packet.get("protectedRegions"):
+                raise ValueError(
+                    f"Graphic suggestion {suggestion_id} runs over {layout}, where the frame is mostly "
+                    "application. List the screen area that must stay readable in "
+                    "scenePacket.protectedRegions so the graphic can be placed clear of it."
+                )
+
         changes = suggestion.get("meaningfulChanges")
         if not isinstance(changes, list):
             raise ValueError(f"Suggestion {suggestion_id} needs meaningfulChanges, even when the list is empty.")
@@ -662,16 +1006,6 @@ def _validate_approval_contract(data: dict) -> None:
                 raise ValueError(f"Suggestion {suggestion_id} meaningful changes must stay inside the scene.")
             if change.get("kind") not in MEANINGFUL_CHANGE_KINDS or not str(change.get("description") or "").strip():
                 raise ValueError(f"Suggestion {suggestion_id} meaningful changes need a supported kind and description.")
-        hold = suggestion.get("intentionalHold")
-        if hold is not None:
-            if suggestion.get("category") not in {"clean-speaker", "protected-footage"}:
-                raise ValueError(f"Suggestion {suggestion_id} may use intentionalHold only for clean performance or protected footage.")
-            if not isinstance(hold, dict) or not str(hold.get("reason") or "").strip():
-                raise ValueError(f"Suggestion {suggestion_id} intentionalHold needs a concrete reason.")
-            hold_time = _finite_number(hold.get("representativeTimeSec"), f"Suggestion {suggestion_id} intentional hold representativeTimeSec")
-            if hold_time < start or hold_time > end:
-                raise ValueError(f"Suggestion {suggestion_id} intentionalHold representative time must stay inside the scene.")
-        is_graphic = _is_graphic_suggestion(suggestion)
         if is_graphic:
             ranked = suggestion.get("rankedCandidates")
             if not isinstance(ranked, list) or len(ranked) < 3:
@@ -710,6 +1044,14 @@ def _validate_approval_contract(data: dict) -> None:
             raise ValueError(f"Suggestion {suggestion_id} needs a planning decision.")
         if decision.get("status") == "approved":
             selected = str(decision.get("selectedTreatmentId") or suggestion.get("moduleId") or suggestion.get("recipeId") or "")
+            current = str(suggestion.get("moduleId") or suggestion.get("recipeId") or "")
+            # A Loop B note may swap the treatment. The swap must be re-approved rather than
+            # inheriting the approval that was granted for the treatment it replaced.
+            if is_graphic and current and selected != current:
+                raise ValueError(
+                    f"Suggestion {suggestion_id} now selects {current} but still carries an approval for {selected}. "
+                    "Re-approve the scene after swapping its treatment."
+                )
             if is_graphic and selected not in treatments:
                 raise ValueError(f"Suggestion {suggestion_id} approval needs a registered selected treatment.")
             if is_graphic and selected not in {item.get("treatmentId") for item in suggestion.get("rankedCandidates", [])}:
@@ -737,68 +1079,20 @@ def _finite_number(value: object, label: str) -> float:
 
 
 def _validate_speaker_safety(suggestion: dict) -> None:
-    suggestion_id = suggestion["id"]
-    safety = suggestion.get("speakerSafety")
-    if not isinstance(safety, dict) or safety.get("checked") is not True:
-        raise ValueError(f"Graphic suggestion {suggestion_id} needs a completed speakerSafety check.")
-    mode = safety.get("mode")
-    if mode not in SPEAKER_SAFETY_MODES:
-        raise ValueError(f"Graphic suggestion {suggestion_id} has an unknown speakerSafety mode.")
-    try:
-        max_absence = float(safety.get("maxSpeakerAbsenceSec"))
-    except (TypeError, ValueError):
-        raise ValueError(f"Graphic suggestion {suggestion_id} needs maxSpeakerAbsenceSec.") from None
-    if max_absence < 0 or max_absence > 2:
-        raise ValueError(f"Graphic suggestion {suggestion_id} may not hide the speaker for more than two seconds.")
+    """Raise on the first speaker-safety problem.
 
-    start = float(suggestion["startSec"])
-    end = float(suggestion["endSec"])
-    verified = safety.get("verifiedAtSec")
-    if not isinstance(verified, list):
-        raise ValueError(f"Graphic suggestion {suggestion_id} must verify speaker safety at least three scene states.")
-    try:
-        verified_times = [float(value) for value in verified]
-    except (TypeError, ValueError):
-        raise ValueError(f"Graphic suggestion {suggestion_id} has invalid speakerSafety verifiedAtSec values.") from None
-    if len(set(verified_times)) < 3:
-        raise ValueError(f"Graphic suggestion {suggestion_id} must verify speaker safety at least three scene states.")
-    if any(value < start or value > end for value in verified_times):
-        raise ValueError(f"Graphic suggestion {suggestion_id} speakerSafety checks must stay inside the suggestion range.")
-
-    if mode == "brief-full-frame-hit":
-        if end - start > 2.01 or max_absence > end - start + 0.01:
-            raise ValueError(f"Graphic suggestion {suggestion_id} full-frame hit may not exceed two seconds.")
-        return
-
-    speaker_bounds = _normalized_bounds(safety.get("speakerBounds"), f"Graphic suggestion {suggestion_id} speakerBounds")
-    overlay_bounds = safety.get("overlayOcclusionBounds")
-    if not isinstance(overlay_bounds, list):
-        raise ValueError(f"Graphic suggestion {suggestion_id} needs overlayOcclusionBounds.")
-    for index, bounds in enumerate(overlay_bounds):
-        overlay = _normalized_bounds(bounds, f"Graphic suggestion {suggestion_id} overlayOcclusionBounds[{index}]")
-        if _bounds_intersect(speaker_bounds, overlay):
-            raise ValueError(f"Graphic suggestion {suggestion_id} places an overlay over the protected speaker bounds.")
-
-
-def _normalized_bounds(value: object, label: str) -> dict[str, float]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{label} must be normalized frame bounds.")
-    try:
-        bounds = {key: float(value[key]) for key in ("x", "y", "width", "height")}
-    except (KeyError, TypeError, ValueError):
-        raise ValueError(f"{label} must contain numeric x, y, width, and height.") from None
-    if bounds["x"] < 0 or bounds["y"] < 0 or bounds["width"] <= 0 or bounds["height"] <= 0 or bounds["x"] + bounds["width"] > 1 or bounds["y"] + bounds["height"] > 1:
-        raise ValueError(f"{label} must stay within the normalized 0-1 frame.")
-    return bounds
-
-
-def _bounds_intersect(left: dict[str, float], right: dict[str, float]) -> bool:
-    return not (
-        left["x"] + left["width"] <= right["x"]
-        or right["x"] + right["width"] <= left["x"]
-        or left["y"] + left["height"] <= right["y"]
-        or right["y"] + right["height"] <= left["y"]
+    The rules themselves live in visual_production.speaker_safety_issues so that the suggestion
+    validator and the production gate cannot disagree about what is safe.
+    """
+    issues = speaker_safety_issues(
+        f"Graphic suggestion {suggestion['id']}",
+        suggestion.get("speakerSafety"),
+        (suggestion.get("scenePacket") or {}).get("layout"),
+        start_sec=float(suggestion["startSec"]),
+        end_sec=float(suggestion["endSec"]),
     )
+    if issues:
+        raise ValueError(issues[0])
 
 
 def update_suggestion(plan_path: Path, suggestion_id: str, updates: dict) -> dict:
@@ -808,7 +1102,7 @@ def update_suggestion(plan_path: Path, suggestion_id: str, updates: dict) -> dic
         raise ValueError("Visual suggestion not found.")
     suggestion.update(updates)
     reuse = ((data.get("coverage") or {}).get("reuseAudit") or {})
-    if reuse.get("contractVersion") == 3:
+    if reuse:
         active_graphics = [
             item
             for item in data["suggestions"]
@@ -985,20 +1279,56 @@ def load_visual_catalog(*, include_private: bool = True) -> dict:
     }
 
 
-def record_treatment_usage(plan_path: Path, final_render: Path) -> int:
-    data = load_visual_suggestions(plan_path)
-    if (((data.get("coverage") or {}).get("reuseAudit") or {}).get("contractVersion")) != 3:
-        return 0
-    plan = load_visual_plan(plan_path)
-    project_id = str(plan["project"]["id"])
-    selected = {}
+def _delivered_suggestions(data: dict, plan: dict) -> list[dict]:
+    """Select the suggestions that actually survived production, not the ones approved on paper.
+
+    Loop A approves a still frame; Loop B reviews the render. A treatment that was approved from a
+    frame and then noted in the full review must not be filed as a good example, so qualification
+    is tied to the cue that rendered and to the absence of an unresolved note against it.
+    """
+    enabled_cues = {cue.get("id") for cue in plan.get("cues", []) if cue.get("enabled", True)}
+    noted = {
+        (str(review.get("itemType")), str(review.get("itemId")))
+        for review in plan.get("reviews", [])
+        if str(review.get("note") or "").strip()
+    }
+    delivered = []
     for suggestion in data.get("suggestions", []):
         decision = suggestion.get("decision") if isinstance(suggestion.get("decision"), dict) else {}
+        cue_id = suggestion.get("cueId")
+        if decision.get("status") != "approved" or suggestion.get("status") != "built":
+            continue
+        if cue_id not in enabled_cues:
+            continue
+        if ("suggestion", str(suggestion.get("id"))) in noted or ("cue", str(cue_id)) in noted:
+            continue
+        delivered.append(suggestion)
+    return delivered
+
+
+def record_treatment_usage(plan_path: Path, final_render: Path) -> dict:
+    """Harvest each delivered treatment into the Creator Library.
+
+    Returns a report rather than a bare count so that "this project introduced nothing new" is
+    distinguishable from "the harvest could not run". A harvest that fails is reported as a
+    failure; it is never folded into a zero.
+    """
+    data = load_visual_suggestions(plan_path)
+    plan = load_visual_plan(plan_path)
+    project_id = str(plan["project"]["id"])
+    known_treatments = {
+        item["id"] for item in [*load_visual_catalog(include_private=False)["modules"], *load_visual_catalog(include_private=False)["recipes"]]
+    }
+    selected = {}
+    for suggestion in _delivered_suggestions(data, plan):
+        decision = suggestion.get("decision") if isinstance(suggestion.get("decision"), dict) else {}
         treatment_id = decision.get("selectedTreatmentId")
-        if decision.get("status") == "approved" and treatment_id and treatment_id not in selected:
+        if treatment_id and str(treatment_id) in known_treatments and str(treatment_id) not in selected:
             selected[str(treatment_id)] = suggestion
+    existing_ids = {item.get("id") for item in load_treatment_library().get("treatments", [])}
+    introduced = sorted(set(selected) - existing_ids)
     if not selected:
-        return 0
+        return {"treatmentsRecorded": 0, "candidates": 0, "introducedTreatmentIds": [], "failures": []}
 
     root = default_creator_library()
     preview_root = root / "recipe-previews"
@@ -1007,8 +1337,13 @@ def record_treatment_usage(plan_path: Path, final_render: Path) -> int:
     for directory in (preview_root, history_root, motion_root):
         directory.mkdir(parents=True, exist_ok=True)
     library = load_treatment_library()
+    ratings = {
+        str(item.get("id")): int(item.get("creatorRating") or 0)
+        for item in library.get("treatments", [])
+    }
     now = datetime.now(timezone.utc).isoformat()
     recorded = 0
+    failures: list[str] = []
     for treatment_id, suggestion in selected.items():
         moment = float((suggestion.get("scenePacket") or {}).get("screenshotTimeSec") or suggestion["startSec"])
         history_preview = history_root / f"{slug(treatment_id)}-{round(moment * 1000):010d}.png"
@@ -1025,8 +1360,12 @@ def record_treatment_usage(plan_path: Path, final_render: Path) -> int:
             creationflags=hidden_subprocess_flags(),
         )
         if screenshot.returncode != 0 or not history_preview.is_file():
+            failures.append(f"{treatment_id}: could not capture a still frame at {moment:.3f}s.")
             continue
-        shutil.copy2(history_preview, latest_preview)
+        # The canonical preview Cook ranks against should be the best use, not the newest one.
+        # An unrated reuse never displaces a frame the creator already rated.
+        if ratings.get(treatment_id, 0) == 0 or not latest_preview.is_file():
+            shutil.copy2(history_preview, latest_preview)
         motion_start = max(float(suggestion["startSec"]), min(moment - 0.5, float(suggestion["endSec"]) - 0.1))
         motion_duration = min(2.0, float(suggestion["endSec"]) - motion_start)
         latest_motion = motion_root / f"{treatment_id}.mp4"
@@ -1065,12 +1404,22 @@ def record_treatment_usage(plan_path: Path, final_render: Path) -> int:
         record["usageCount"] = len(record["usage"])
         record["lastUsedAt"] = now
         record["updatedAt"] = now
+        record["lastProjectId"] = project_id
         recorded += 1
     save_treatment_library(library)
-    return recorded
+    if failures:
+        raise RuntimeError(
+            f"Recorded {recorded} of {len(selected)} delivered treatments. " + " ".join(failures)
+        )
+    return {
+        "treatmentsRecorded": recorded,
+        "candidates": len(selected),
+        "introducedTreatmentIds": introduced,
+        "failures": [],
+    }
 
 
-def recipe_preview_path(recipe_id: str, *, require_recipe: bool = True) -> Path | None:
+def recipe_preview_path(recipe_id: str, *, require_recipe: bool = False) -> Path | None:
     catalog_path = project_root() / "visual-production" / "recipes" / "catalog.json"
     recipes = json.loads(catalog_path.read_text(encoding="utf-8")).get("recipes", [])
     known = {item.get("id") for item in recipes}
@@ -1081,7 +1430,7 @@ def recipe_preview_path(recipe_id: str, *, require_recipe: bool = True) -> Path 
             for item in json.loads(module_path.read_text(encoding="utf-8")).get("modules", [])
         }
     if recipe_id not in known:
-        raise ValueError("Unknown visual treatment recipe.")
+        raise ValueError(f"Unknown visual treatment: {recipe_id}.")
     directory = default_creator_library() / "recipe-previews"
     if not directory.is_dir():
         return None
@@ -1117,14 +1466,23 @@ def prepare_suggestion_approval_evidence(plan_path: Path, suggestion_id: str) ->
         save_visual_suggestions(plan_path, data)
         return suggestion, data
     selected = str(suggestion.get("moduleId") or suggestion.get("recipeId") or "")
-    if selected not in MODULE_IDS:
-        expected = approval_sample_path(plan_path, suggestion_id, selected)
+    composition = _registered_composition_for(plan_path, selected)
+    if selected in MODULE_IDS:
+        destination = _render_registered_module_sample(plan_path, suggestion)
+    elif composition is not None:
+        destination = _render_registered_composition_sample(plan_path, suggestion, composition)
+    else:
         raise ValueError(
-            "This selected recipe has no historical render and no registered renderer. "
-            f"Cook must create exactly one representative sample frame at {expected}; "
-            "the app will not substitute a generic graphic."
+            f"{selected} has no historical render and no registered renderer, so no sample frame "
+            "can be produced for it. Build it as a HyperFrames composition inside this project and "
+            "register it in visual-plan.json under customCompositions with treatmentId "
+            f"\"{selected}\" and the real sourceHash, then ask for evidence again. Drawing an "
+            "approximation is not evidence: the creator would be approving something other than "
+            "what renders."
         )
-    destination = _render_registered_module_sample(plan_path, suggestion)
+    # Signed here rather than inside the renderer: the receipt attests that *the app* produced
+    # this frame, which is the claim the creator's approval rests on.
+    _write_sample_receipt(destination, suggestion_id=str(suggestion_id), treatment_id=selected)
     root = find_visual_root(plan_path)
     suggestion["approvalEvidence"] = {
         **evidence,
@@ -1136,6 +1494,58 @@ def prepare_suggestion_approval_evidence(plan_path: Path, suggestion_id: str) ->
     return suggestion, data
 
 
+def _registered_composition_for(plan_path: Path, treatment_id: str) -> dict | None:
+    """Find the HyperFrames composition this project registered for a new treatment.
+
+    This is how a treatment that does not exist yet becomes proposable: build it, register it,
+    and the app renders its evidence from the same source that will render the video.
+    """
+    if not treatment_id:
+        return None
+    plan = load_visual_plan(plan_path)
+    return next(
+        (item for item in plan.get("customCompositions", []) if item.get("treatmentId") == treatment_id),
+        None,
+    )
+
+
+def _render_registered_composition_sample(plan_path: Path, suggestion: dict, composition: dict) -> Path:
+    """Snapshot one frame from a registered custom composition."""
+    root = find_visual_root(plan_path)
+    selected = str(suggestion.get("moduleId") or suggestion.get("recipeId") or "")
+    start = float(suggestion["startSec"])
+    end = float(suggestion["endSec"])
+    evidence = suggestion.get("approvalEvidence") or {}
+    representative = max(start, min(end, float(evidence.get("representativeTimeSec") or start + 0.5)))
+    runtime_root = resolve_project_path(root, str(composition.get("projectPath") or ""))
+    workspace = root / "working" / "approval-samples" / f"{slug(suggestion['id'])}-{slug(selected)}"
+    snapshot_dir = workspace / "single-frame"
+    destination = approval_sample_path(plan_path, suggestion["id"], selected)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    cli = project_root() / "node_modules" / ".bin" / ("hyperframes.cmd" if os.name == "nt" else "hyperframes")
+    if not cli.is_file():
+        raise RuntimeError("HyperFrames is not installed. Run npm install before preparing approval samples.")
+    result = subprocess.run(
+        [str(cli), "snapshot", str(runtime_root), "--at", f"{max(0.0, representative - start):.4f}",
+         "--no-end", "--output", str(snapshot_dir)],
+        cwd=project_root(),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        creationflags=hidden_subprocess_flags(),
+    )
+    if result.returncode != 0:
+        details = (result.stdout or result.stderr or "").strip()
+        raise RuntimeError(f"Could not render a sample from composition {composition.get('id')}. {details[-1500:]}")
+    frames = sorted(snapshot_dir.glob("*.png"), key=lambda path: path.stat().st_mtime)
+    if not frames:
+        raise RuntimeError(f"Composition {composition.get('id')} produced no sample frame.")
+    shutil.copy2(frames[-1], destination)
+    return destination
+
+
 def _render_registered_module_sample(plan_path: Path, suggestion: dict) -> Path:
     root = find_visual_root(plan_path)
     plan = load_visual_plan(plan_path)
@@ -1144,14 +1554,30 @@ def _render_registered_module_sample(plan_path: Path, suggestion: dict) -> Path:
     end = float(suggestion["endSec"])
     evidence = suggestion.get("approvalEvidence") or {}
     representative = max(start, min(end, float(evidence.get("representativeTimeSec") or start + 0.5)))
+    allowed = MODULE_PARAMETER_KEYS.get(selected, set())
+    supplied = suggestion.get("moduleParameters") or {}
+    unsupported = sorted(set(supplied) - allowed)
+    if unsupported:
+        raise ValueError(
+            f"{selected} does not accept {', '.join(unsupported)}. "
+            f"It accepts: {', '.join(sorted(allowed))}. "
+            "Put scene geometry in speakerSafety, not in moduleParameters."
+        )
     parameters = {
         "opacity": 1,
         "transitionIn": "editorial-snap",
         "transitionOut": "fade",
-        **(suggestion.get("moduleParameters") or {}),
+        **supplied,
     }
-    if selected != "source-footage-hold":
+    if isinstance(suggestion.get("speakerSafety"), dict):
+        # Approval evidence must use the same measured safe region that the eventual cue carries.
+        # Omitting it made the sample renderer fall back to full-frame module geometry.
+        parameters["speakerSafety"] = suggestion["speakerSafety"]
+    # Only fill defaults the module actually declares; injecting text into a module without a
+    # text parameter made its own sample render fail validation.
+    if "text" in allowed:
         parameters.setdefault("text", suggestion.get("proposedText") or suggestion.get("editorialPurpose") or "REPRESENTATIVE GRAPHIC")
+    if "kicker" in allowed:
         parameters.setdefault("kicker", "VCG / VISUAL")
     cue = {
         "id": f"approval-sample-{slug(suggestion['id'])}",
@@ -1220,9 +1646,16 @@ def create_recipe_suggestion(plan_path: Path, recipe_id: str, *, start_sec: floa
     duration = float(plan["composition"]["durationSec"])
     start = max(0.0, min(float(start_sec), duration - 0.01))
     end = max(start + 0.01, min(float(end_sec), duration))
-    recipe = next((item for item in load_visual_catalog()["recipes"] if item.get("id") == recipe_id), None)
+    catalog = load_visual_catalog()
+    recipe = next(
+        (item for item in [*catalog["modules"], *catalog["recipes"]] if item.get("id") == recipe_id),
+        None,
+    )
     if recipe is None:
-        raise ValueError("Unknown visual treatment recipe.")
+        raise ValueError(f"Unknown visual treatment: {recipe_id}.")
+    # Every catalog family is a registered module now, so the id lands in moduleId. recipeId
+    # remains only for a treatment that still needs realizing.
+    id_field = "moduleId" if recipe["kind"] == "module" else "recipeId"
     suggestion = {
         "id": f"recipe-{uuid.uuid4().hex[:12]}",
         "status": "needs-alternatives",
@@ -1230,13 +1663,13 @@ def create_recipe_suggestion(plan_path: Path, recipe_id: str, *, start_sec: floa
         "timelineLane": "graphics",
         "startSec": round(start, 3),
         "endSec": round(end, 3),
-        "editorialPurpose": recipe["description"],
-        "recipeId": recipe_id,
+        "editorialPurpose": recipe.get("description") or recipe.get("purpose") or recipe_id,
+        id_field: recipe_id,
         "transcriptContext": "Add the exact transcript context and spoken reveal beats during the build.",
         "generationBrief": {
-            "recipeName": recipe["name"],
-            "speakerMode": recipe["speakerMode"],
-            "implementationState": "needs-build",
+            "recipeName": recipe.get("name") or recipe_id,
+            "speakerMode": recipe.get("speakerMode") or recipe.get("family") or "measured container",
+            "implementationState": "registered" if recipe["kind"] == "module" else "needs-build",
         },
         "decision": {"status": "pending", "selectedTreatmentId": recipe_id, "notes": ""},
         "rejectionHistory": [],
@@ -1320,10 +1753,9 @@ def build_nonmedia_suggestion(plan_path: Path, suggestion_id: str) -> tuple[dict
     category = suggestion["category"]
     if category not in {"graphic", "clean-speaker", "protected-footage"}:
         raise ValueError("This suggestion needs a media selection before it can be built.")
-    contract_version = ((data.get("coverage") or {}).get("reuseAudit") or {}).get("contractVersion")
-    if contract_version == 3 and (suggestion.get("decision") or {}).get("status") != "approved":
+    if (suggestion.get("decision") or {}).get("status") != "approved":
         raise ValueError("Approve this scene and treatment before building it.")
-    if contract_version == 3 and category == "graphic":
+    if category == "graphic":
         evidence = suggestion.get("approvalEvidence") if isinstance(suggestion.get("approvalEvidence"), dict) else {}
         if evidence.get("status") not in APPROVAL_EVIDENCE_READY:
             raise ValueError("This graphic has no approved historical example or exact sample frame.")
@@ -1338,16 +1770,23 @@ def build_nonmedia_suggestion(plan_path: Path, suggestion_id: str) -> tuple[dict
             "it cannot be replaced with a generic module."
         )
     if module_id not in registered_modules:
-        module_id = "speaker-side-panel"
+        raise ValueError(
+            f"Treatment {module_id} is not a registered module, so this scene cannot be built. "
+            "Substituting a generic side panel used to hide the mistake inside a rendered video."
+        )
     module_parameters = {
         "opacity": 1, "transitionIn": "editorial-snap", "transitionOut": "fade",
         **(suggestion.get("moduleParameters") or {}),
     }
     if module_id != "source-footage-hold":
-        module_parameters.update({
-            "text": suggestion.get("proposedText") or suggestion.get("editorialPurpose") or "EDIT THIS MESSAGE",
-            "kicker": "VCG / VISUAL",
-        })
+        allowed = MODULE_PARAMETER_KEYS.get(module_id, set())
+        if "text" in allowed:
+            module_parameters.setdefault(
+                "text",
+                suggestion.get("proposedText") or suggestion.get("editorialPurpose") or "EDIT THIS MESSAGE",
+            )
+        if "kicker" in allowed:
+            module_parameters.setdefault("kicker", "VCG / VISUAL")
         module_parameters.update({
             key: suggestion[key]
             for key in (
@@ -1483,10 +1922,19 @@ def select_pexels_candidate(plan_path: Path, suggestion_id: str, candidate: dict
     if asset is None:
         asset = {"id": asset_id, "name": evidence["attribution"], "path": destination.relative_to(root).as_posix(), "mediaType": "video", "durationSec": candidate.get("durationSec"), "hasTransparency": False, "origin": evidence}
         plan["assets"].append(asset)
-    cue = _asset_cue(asset, start_sec, end_sec)
+    suggestion = _authorising_suggestion(
+        plan_path,
+        suggestion_id,
+        category="stock",
+        start_sec=start_sec,
+        end_sec=end_sec,
+        treatment_id=asset_id,
+        purpose=evidence["attribution"],
+    )
+    cue = _asset_cue(asset, start_sec, end_sec, suggestion)
     plan["cues"].append(cue)
     save_visual_plan(plan_path, plan)
-    update_suggestion(plan_path, suggestion_id, {"status": "built", "selectedCandidate": candidate["id"], "cueId": cue["id"]})
+    update_suggestion(plan_path, suggestion["id"], {"status": "built", "selectedCandidate": candidate["id"], "cueId": cue["id"]})
     return cue, plan
 
 
@@ -1498,24 +1946,24 @@ def credits_text(plan_path: Path) -> str:
     return "\n".join(dict.fromkeys(f"{item['attribution']} — {item.get('assetPage', '')}" for item in assets))
 
 
-def _asset_cue(asset: dict, start_sec: float, end_sec: float) -> dict:
+def _asset_cue(asset: dict, start_sec: float, end_sec: float, suggestion: dict) -> dict:
+    """Build an asset cue carrying the receipt that names the suggestion which authorised it.
+
+    Every enabled cue must trace back to an approved planning decision, so the suggestion is
+    required rather than optional. Callers that place media directly record the placement as a
+    suggestion first; see _direct_placement_suggestion.
+    """
     return {
         "id": f"asset-{uuid.uuid4().hex[:12]}", "kind": "asset", "assetId": asset["id"],
         "startSec": start_sec, "endSec": end_sec, "enabled": True,
-        "parameters": {"x": 0, "y": 0, "width": 100, "height": 100, "opacity": 1, "scale": 1, "rotation": 0, "fit": "cover", "muted": True, "volume": 1, "sourceStartSec": 0, "playbackRate": 1, "loop": False, "transitionIn": "fade", "transitionOut": "fade"},
+        "parameters": {
+            "x": 0, "y": 0, "width": 100, "height": 100, "opacity": 1, "scale": 1, "rotation": 0,
+            "fit": "cover", "muted": True, "volume": 1, "sourceStartSec": 0, "playbackRate": 1,
+            "loop": False, "transitionIn": "fade", "transitionOut": "fade",
+            "planningSuggestionId": suggestion["id"],
+            "approvedTreatmentId": (suggestion.get("decision") or {}).get("selectedTreatmentId") or asset["id"],
+        },
     }
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def slug(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "asset"
 
 
 def _tokens(value: str) -> list[str]:
@@ -1526,9 +1974,4 @@ def _filename_tags(value: str) -> list[str]:
     return sorted(set(_tokens(value)))
 
 
-def _inside(path: Path, parent: Path) -> bool:
-    try:
-        path.resolve().relative_to(parent.resolve())
-        return True
-    except ValueError:
-        return False
+_inside = is_within

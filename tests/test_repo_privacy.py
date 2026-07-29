@@ -27,12 +27,19 @@ def test_private_paths_are_rejected(path: str) -> None:
         "app/exports/.gitkeep",
         "app/temp/.gitkeep",
         "projects/.gitkeep",
-        "visual-production/modules/catalog.json",
+        "app/core/visual_production.py",
         "docs/assets/sanitized-example.png",
     ],
 )
 def test_public_paths_are_allowed(path: str) -> None:
     assert forbidden_path_reason(path) is None
+
+
+def test_visual_production_is_ignored_so_a_blanket_add_cannot_publish_it() -> None:
+    """It holds brand geometry and treatment work that stays private."""
+    ignore_rules = (Path(__file__).resolve().parents[1] / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    assert "visual-production/" in {line.strip() for line in ignore_rules}
 
 
 def test_scan_rejects_personal_absolute_path(tmp_path: Path) -> None:

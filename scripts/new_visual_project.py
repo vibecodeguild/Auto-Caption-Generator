@@ -4,7 +4,12 @@ import argparse
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.core.file_utils import is_within  # noqa: E402
 
 
 PROJECT_DIRECTORIES = ("source", "transcript", "assets", "plans", "working", "renders")
@@ -38,12 +43,7 @@ def repository_root(start: Path) -> Path | None:
     return Path(completed.stdout.strip()).resolve()
 
 
-def _is_within(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
+_is_within = is_within
 
 
 def create_project(name: str, root: Path, repo_root: Path | None) -> Path:
