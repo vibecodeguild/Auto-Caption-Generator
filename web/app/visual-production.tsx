@@ -52,6 +52,8 @@ import {
   visualRuntimeCompositionUrl,
   visualRuntimePlayerUrl,
   verifyVisualDeliveryReopened,
+  approveVisualFullReview,
+  approveVisualRepresentative,
   getCreatorLibrary,
   getPexelsSettings,
   getVisualSuggestions,
@@ -282,12 +284,19 @@ export default function VisualProductionWorkspace() {
   const unresolvedSuggestionCount = decisionCounts?.unresolvedApprovals
     ?? suggestions.filter((item) => item.status !== "rejected" && item.decision?.status !== "approved").length;
   const approvalCount = Math.max(0, (decisionCounts?.timelineDecisions ?? suggestions.length) - unresolvedSuggestionCount);
-  const curatedTreatmentIds = [...new Set(
+  // Treatments this video introduced, reported by the delivery harvest. Rating everything the
+  // project touched buries the handful that are actually new, and an unrated library cannot rank
+  // candidates for the next Cook.
+  const introducedTreatmentIds = project?.libraryCuration?.introducedTreatmentIds ?? [];
+  const curatedTreatmentIds = introducedTreatmentIds.length ? introducedTreatmentIds : [...new Set(
     suggestions
       .filter((item) => item.status === "built" || item.decision?.status === "approved")
       .map((item) => item.decision?.selectedTreatmentId ?? item.moduleId ?? item.recipeId)
       .filter((value): value is string => Boolean(value)),
   )];
+  const unratedIntroducedIds = introducedTreatmentIds.filter(
+    (id) => !(treatments.find((item) => item.id === id)?.creatorRating),
+  );
 
   const updatePlayheadFromPlayback = useCallback((next: number) => {
     playheadRef.current = next;
@@ -409,9 +418,10 @@ export default function VisualProductionWorkspace() {
     void getVisualSuggestions().then((data) => {
       setSuggestions(data.suggestions);
       setSuggestionCoverage(data.coverage ?? null);
-    }).catch(() => {
+    }).catch((error: Error) => {
       setSuggestions([]);
       setSuggestionCoverage(null);
+      setStatus(`Could not load visual suggestions: ${error.message}`);
     });
   }, []);
 
@@ -1035,7 +1045,7 @@ export default function VisualProductionWorkspace() {
     setSelectedCueId(null);
   }
 
-  async function exportFinal() {
+  async function runRender(purpose: "review" | "final", startedMessage: string) {
     if (!plan) return;
     setBusy(true);
     setRenderVideo(null);
@@ -1043,10 +1053,39 @@ export default function VisualProductionWorkspace() {
       setStatus("Saving the latest visual plan before rendering...");
       const saved = await saveVisualProject(plan);
       applyProject(saved);
-      const result = await startVisualRender({ quality: "high", purpose: "final" });
+      const result = await startVisualRender({ quality: purpose === "final" ? "high" : "standard", purpose });
       const active = await getVisualRenderJob(result.job_id);
       setRenderJob(active);
-      setStatus(result.reused ? "Export already running. Reconnected to its progress." : active.message);
+      setStatus(result.reused ? `${startedMessage} already running. Reconnected to its progress.` : active.message);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const exportFinal = () => runRender("final", "Export");
+  const renderReview = () => runRender("review", "Review render");
+
+  /** Loop B sign-off: the creator watched the review render against the full cut and accepted it. */
+  async function approveFullReview() {
+    setBusy(true);
+    try {
+      applyProject(await approveVisualFullReview());
+      setStatus("Full review approved. The final export is now unblocked.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function markRepresentativeScene() {
+    if (!selectedCue) return;
+    setBusy(true);
+    try {
+      applyProject(await approveVisualRepresentative(selectedCue.id));
+      setStatus("Recorded as the representative scene for this revision.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1163,6 +1202,16 @@ export default function VisualProductionWorkspace() {
               <button onClick={() => void copyAllNotes()} disabled={busy || !plan.reviews.some((item) => item.note.trim())}><Copy size={15} /> Copy all notes</button>
               <button onClick={() => void configurePexels()} disabled={busy}><Search size={15} /> {pexelsConfigured ? "Pexels connected" : "Connect Pexels"}</button>
               <button onClick={() => void copyCredits()} disabled={busy}><Copy size={15} /> Copy credits</button>
+              <button
+                onClick={() => void renderReview()}
+                disabled={busy || renderJob?.status === "running" || !project.production.canRenderReview}
+                title={project.production.canRenderReview ? "Render the full cut for review without exporting it" : project.production.messages.join(" ")}
+              ><Play size={15} /> Render review</button>
+              <button
+                onClick={() => void approveFullReview()}
+                disabled={busy || !project.production.reviewRenderAvailable || project.production.fullReviewApproved || project.production.activeReviewCount > 0}
+                title={project.production.activeReviewCount > 0 ? "Resolve the active review notes first" : "Approve the review render against the full cut"}
+              ><Check size={15} /> {project.production.fullReviewApproved ? "Review approved" : "Approve review"}</button>
               <button className="visual-primary" onClick={() => void exportFinal()} disabled={busy || renderJob?.status === "running" || !project.production.canExportFinal}><Upload size={15} /> {renderJob?.status === "running" ? `Exporting ${Math.round(renderJob.value)}%` : "Export final"}</button>
             </>
           )}
@@ -1370,7 +1419,8 @@ export default function VisualProductionWorkspace() {
           ) : libraryTab === "curate" ? (
             <div className="visual-library-list visual-curation-list">
               <div className="visual-library-section"><strong>Strengthen the library</strong><span>Rate each unique treatment used in this video and explicitly lock your defaults</span></div>
-              {!curatedTreatmentIds.length && <div className="visual-library-empty"><strong>Nothing to rate yet.</strong><span>Approved and built treatments appear here once per unique graphic.</span></div>}
+              {!curatedTreatmentIds.length && <div className="visual-library-empty"><strong>Nothing to rate yet.</strong><span>After a final export, the treatments this video introduced appear here.</span></div>}
+              {!!introducedTreatmentIds.length && <p className="visual-muted">Showing the {introducedTreatmentIds.length} treatment{introducedTreatmentIds.length === 1 ? "" : "s"} this video introduced.</p>}
               {curatedTreatmentIds.map((id) => treatments.find((item) => item.id === id)).filter((item): item is VisualTreatment => Boolean(item)).map((treatment) => (
                 <article key={treatment.id} className={`visual-curation-card ${treatment.lockedDefault ? "locked" : ""}`}>
                   {treatment.motionPreviewAvailable
@@ -1536,9 +1586,19 @@ export default function VisualProductionWorkspace() {
             <span className={project.production.timingAnchored ? "passed" : "blocked"}>Voice timing {project.production.timingAnchored ? "anchored" : `${project.production.unanchoredCount} missing`}</span>
             <span className={project.production.noBlanketOverflow ? "passed" : "blocked"}>Composition {project.production.noBlanketOverflow ? "ready" : "blocked"}</span>
             <span className={project.production.planningApprovalPassed ? "passed" : "blocked"}>Scene choices {project.production.planningApprovalPassed ? "approved" : `${project.production.planningApprovalIssues.length} unresolved`}</span>
+            <span className={project.production.lockedCutMatches ? "passed" : "blocked"}>Locked cut {project.production.lockedCutMatches ? "matches" : "changed"}</span>
+            <span className={project.production.fullReviewApproved ? "passed" : "blocked"}>Full review {project.production.fullReviewApproved ? "approved" : project.production.reviewRenderAvailable ? "awaiting approval" : "not rendered"}</span>
             <span className={project.production.layoutInspectionPassed ? "passed" : ""}>Automated checks {project.production.layoutInspectionPassed ? "last passed" : "run on export"}</span>
           </div>
           {!!project.production.messages.length && <div className="visual-gate-message">{project.production.messages.join(" ")}</div>}
+          {project.libraryCuration?.status === "failed" && <div className="visual-gate-message blocked">
+            The Creator Library harvest failed, so this video taught the library nothing. {project.libraryCuration.error}
+          </div>}
+          {!!unratedIntroducedIds.length && <div className="visual-gate-message">
+            <strong>{unratedIntroducedIds.length} new treatment{unratedIntroducedIds.length === 1 ? "" : "s"} to rate.</strong>{" "}
+            This video introduced {unratedIntroducedIds.join(", ")}. Ratings are what the next Cook ranks candidates by.{" "}
+            <button onClick={() => setLibraryTab("curate")}>Rate them now</button>
+          </div>}
           {renderJob && <div className={`visual-render-status ${renderJob.status}`}>
             <div><strong>{Math.round(renderJob.value)}% · {renderStageLabel(renderJob.stage)}</strong><span>{renderJob.message}</span><small>{formatRenderTiming(renderJob.elapsed_seconds, renderJob.eta_seconds, renderJob.status)}</small>{renderJob.output_path && <code>{renderJob.output_path}</code>}</div>
             <progress max={100} value={renderJob.value} />
@@ -1546,7 +1606,7 @@ export default function VisualProductionWorkspace() {
         </div>
 
         <aside className="visual-inspector">
-          <div className="visual-panel-title"><span>Inspector</span>{selectedCue && !selectedCompositionCue && <div><button className="visual-icon-button" onClick={duplicateCue} title="Duplicate"><Copy size={15} /></button><button className="visual-icon-button danger" onClick={deleteCue} title="Delete"><Trash2 size={15} /></button></div>}</div>
+          <div className="visual-panel-title"><span>Inspector</span>{selectedCue && !selectedCompositionCue && <div><button className="visual-icon-button" onClick={() => void markRepresentativeScene()} disabled={busy} title="Mark as the representative scene for this revision"><Check size={15} /></button><button className="visual-icon-button" onClick={duplicateCue} title="Duplicate"><Copy size={15} /></button><button className="visual-icon-button danger" onClick={deleteCue} title="Delete"><Trash2 size={15} /></button></div>}</div>
           {selectedCue ? (
             <div className="visual-inspector-fields">
               <div className="visual-selection-name"><Check size={15} /> {cueLabel(selectedCue, plan.assets)}</div>

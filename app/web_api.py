@@ -522,6 +522,7 @@ class CreatorAssetUpdateRequest(BaseModel):
 class CreatorAssetUseRequest(BaseModel):
     start_sec: float
     end_sec: float
+    suggestion_id: str | None = None
 
 
 class SuggestionUpdateRequest(BaseModel):
@@ -1415,7 +1416,13 @@ def patch_creator_library_asset(asset_id: str, payload: CreatorAssetUpdateReques
 def use_creator_library_asset(asset_id: str, payload: CreatorAssetUseRequest) -> dict:
     plan_path, _plan = _require_visual_plan()
     try:
-        _cue, plan = freeze_creator_asset(plan_path, asset_id, start_sec=payload.start_sec, end_sec=payload.end_sec)
+        _cue, plan = freeze_creator_asset(
+            plan_path,
+            asset_id,
+            start_sec=payload.start_sec,
+            end_sec=payload.end_sec,
+            suggestion_id=payload.suggestion_id,
+        )
         state.visual_plan = plan
         return visual_plan_response(plan_path, plan)
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
@@ -1611,6 +1618,10 @@ def ensure_visual_project() -> dict:
             )
         except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=400, detail=f"Could not initialize Visual Production: {exc}") from exc
+        # The plan is authored against this sequence revision. A later re-cut bumps the revision
+        # and this artifact stops being current, alongside the source hash recorded in the plan.
+        mark_artifact_current(manifest, "visualPlanRevision")
+        save_video_project(manifest_path, manifest)
     state.visual_plan_path = plan_path
     state.visual_plan = plan
     return visual_plan_response(plan_path, plan)
@@ -2518,7 +2529,11 @@ def _save_final_transcript(project: TranscriptProject, plan: SplicePlan, locked_
     remapped = replace(remap_transcript(project, plan.kept_ranges), source=str(locked_cut.resolve()))
     save_editor_project(destination, remapped, EditDecisionList())
     if state.video_project is not None:
-        mark_artifact_current(state.video_project, "lockedCutRevision")
+        # Only stamp the locked cut as current when the cut that was written is the one the
+        # manifest points at. Stamping unconditionally marked a stale path as fresh.
+        manifest_locked = _video_project_stage_path("lockedCut")
+        if manifest_locked is not None and manifest_locked.resolve() == locked_cut.resolve():
+            mark_artifact_current(state.video_project, "lockedCutRevision")
         mark_artifact_current(state.video_project, "finalReviewedProjectRevision")
         mark_artifact_current(state.video_project, "finalTranscriptRevision")
         mark_artifact_current(state.video_project, "editAnalysisRevision")

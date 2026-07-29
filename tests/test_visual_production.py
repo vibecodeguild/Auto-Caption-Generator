@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from app.core import visual_production
-from scripts import promote_frozen_visual_revision
 
 
 def _private_project(tmp_path: Path) -> tuple[Path, dict]:
@@ -150,17 +149,38 @@ def test_hyperframes_progress_parser_supports_percent_and_frame_counts() -> None
     assert visual_production._hyperframes_progress_percent("Preparing browser") is None
 
 
-def test_direct_final_export_does_not_require_legacy_review_gates(tmp_path: Path) -> None:
+def test_module_motion_wrapper_keeps_animation_off_framework_clip() -> None:
+    markup = (
+        '<section id="cue-1" class="clip module" data-start="1" data-duration="2">'
+        '<div class="card">Approved graphic</div></section>'
+    )
+
+    wrapped = visual_production._wrap_module_motion(markup)
+
+    assert wrapped.startswith('<section id="cue-1" class="clip module"')
+    assert '<div class="cue-motion"><div class="card">Approved graphic</div></div>' in wrapped
+    assert wrapped.endswith("</section>")
+
+
+def test_entry_preroll_advances_motion_one_frame_without_crossing_zero() -> None:
+    assert visual_production._entry_preroll_time(10, 30) == pytest.approx(10 - (1 / 30))
+    assert visual_production._entry_preroll_time(0, 30) == 0
+    assert visual_production._entry_preroll_time(0.01, 30) == 0
+
+
+def test_final_export_is_blocked_until_the_full_review_is_approved(tmp_path: Path) -> None:
+    """Loop B is the production pass. There is no route to a delivered render that skips it."""
     plan_path, plan = _private_project(tmp_path)
     saved = visual_production.save_visual_plan(plan_path, plan)
 
     report = visual_production.visual_production_gate_report(plan_path, saved)
 
-    assert report["representativeApproved"] is False
     assert report["fullReviewApproved"] is False
     assert report["reviewRenderAvailable"] is False
-    assert report["canExportFinal"] is True
-    assert report["canDeliver"] is True
+    assert report["canRenderReview"] is True
+    assert report["canExportFinal"] is False
+    assert report["canDeliver"] is False
+    assert any("review" in message for message in report["messages"])
 
 
 def test_direct_final_export_blocks_active_review_notes(tmp_path: Path) -> None:
@@ -260,6 +280,134 @@ def test_dual_comparison_module_renders_two_colored_sides() -> None:
     assert "Technical change" in markup
     assert "--left-accent:#4D7CFE" in markup
     assert "--right-accent:#6E56CF" in markup
+    assert "comparison-speaker-outline" not in markup
+
+
+@pytest.mark.parametrize("module_id", ["punchline-reveal", "progress-scale", "dual-comparison"])
+def test_sustained_modules_render_only_inside_the_audited_speaker_safe_region(module_id: str) -> None:
+    cue = {
+        "moduleId": module_id,
+        "parameters": {
+            "text": "Keep the speaker visible",
+            "speakerSafety": {
+                "overlayOcclusionBounds": [
+                    {"x": .18, "y": .02, "width": .78, "height": .62},
+                ],
+            },
+        },
+    }
+
+    markup = visual_production._module_markup(cue, "safe-overlay", 10, 8, 20)
+
+    assert "left:18.000%;top:2.000%;width:78.000%;height:62.000%" in markup
+    assert 'class="module-fill"' not in markup or 'style="left:18.000%' in markup
+
+
+def test_progress_scale_renders_its_planned_milestones() -> None:
+    cue = {
+        "moduleId": "progress-scale",
+        "parameters": {
+            "text": "Working result",
+            "milestones": ["Prompt again", "Add detail", "Verify"],
+        },
+    }
+
+    markup = visual_production._module_markup(cue, "progress", 10, 8, 20)
+
+    assert "scale-milestones" in markup
+    assert "Prompt again" in markup
+    assert "Add detail" in markup
+    assert "Verify" in markup
+    semantic_paths = [
+        item["parameterPath"]
+        for item in visual_production._unanchored_semantic_items({
+            "kind": "module",
+            "moduleId": "progress-scale",
+            "startSec": 10,
+            "endSec": 18,
+            "parameters": cue["parameters"],
+        })
+    ]
+    assert "parameters.milestones.0" in semantic_paths
+    assert "parameters.milestones.2" in semantic_paths
+
+
+def test_pinned_list_rows_mark_structural_parent_child_overlap_as_intentional() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "list-reveal-pinned-thesis",
+            "parameters": {
+                "kicker": "RULES",
+                "thesis": "Keep it readable",
+                "rows": ["First point", "Second point"],
+            },
+        },
+        "pinned-list",
+        10,
+        8,
+        20,
+    )
+
+    assert markup.count("data-layout-allow-overlap") == 2
+
+
+def test_approved_reuse_variants_render_frozen_media_and_can_hide_step_number() -> None:
+    joke = visual_production._module_markup(
+        {
+            "moduleId": "punchline-reveal",
+            "parameters": {
+                "imageAssetId": "joke-image",
+                "kicker": "THE PAYOFF",
+                "text": "GO PLAY PICKLEBALL",
+            },
+        },
+        "joke",
+        10,
+        5,
+        20,
+        {"joke-image": "joke-image.png"},
+    )
+    cta = visual_production._module_markup(
+        {
+            "moduleId": "brand-cta-lockup",
+            "parameters": {
+                "logoAssetId": "skool-logo",
+                "logoText": "SKOOL",
+                "action": "JOIN THE VIBE CODE GUILD",
+                "destination": "SKOOL.COM/VIBECODEGUILD",
+                "side": "left",
+            },
+        },
+        "cta",
+        20,
+        5,
+        21,
+        {"skool-logo": "skool-logo.svg"},
+    )
+    step = visual_production._module_markup(
+        {
+            "moduleId": "numbered-step-intro",
+            "parameters": {
+                "stepNumber": 2,
+                "showNumber": False,
+                "title": "TAKE THE CHANGES",
+                "action": "LET GROK REVISE IT",
+            },
+        },
+        "step",
+        30,
+        5,
+        22,
+    )
+
+    assert 'src="assets/joke-image.png"' in joke
+    assert "joke-card-approved" in joke
+    assert 'src="assets/skool-logo.svg"' in cta
+    assert "pf-community" in cta
+    assert 'data-semantic-path="parameters.logoText"' in cta
+    assert 'data-semantic-path="parameters.logoAssetId"' not in cta
+    assert "pf-step-no-num" in step
+    assert "pf-step-num" not in step
 
 
 def test_visual_plan_response_keeps_legacy_frozen_master_compatible_until_migration(tmp_path: Path) -> None:
@@ -293,60 +441,159 @@ def test_visual_plan_response_keeps_legacy_frozen_master_compatible_until_migrat
     assert response["finalVideo"]["cacheKey"]
 
 
-def test_promote_revision_registers_custom_composition_and_voice_timed_scene_cues(tmp_path: Path, monkeypatch) -> None:
+def _contract_suggestions(root: Path, suggestions: list[dict], **coverage_overrides) -> None:
+    (root / "visual-production").mkdir(exist_ok=True)
+    coverage = {
+        "reuseAudit": {
+            "contractVersion": 3, "reviewed": True, "reusedModuleIds": [], "reusedRecipeIds": [],
+            "creatorLibraryQueries": [], "bespokeRationales": [],
+        },
+        "bRollAudit": {"reviewed": True, "decision": "planned", "rationale": "One cutaway."},
+        "cadenceAudit": {"completeCoverage": True, "violations": []},
+        **coverage_overrides,
+    }
+    (root / "visual-production" / "visual-suggestions.json").write_text(
+        json.dumps({"schemaVersion": 1, "coverage": coverage, "suggestions": suggestions}), encoding="utf-8"
+    )
+
+
+def test_asset_cue_backed_by_an_approved_placement_passes_the_planning_gate(tmp_path: Path) -> None:
+    """B-roll and library assets used to make canDeliver permanently false (F5)."""
     plan_path, plan = _private_project(tmp_path)
     root = plan_path.parents[1]
-    manifest = {
-        "paths": {
-            "visualPlan": plan_path.relative_to(root).as_posix(),
-            "finalVideo": "exports/final-video.mp4",
-        },
-    }
-    (root / "project.vcg-project.json").write_text(json.dumps(manifest), encoding="utf-8")
-    master = root / "visual-production" / "renders" / "approved-v5.mp4"
-    master.parent.mkdir(parents=True)
-    master.write_bytes(b"approved-v5")
-    project_directory = root / "working" / "hyperframes-v5" / "public"
-    project_directory.mkdir(parents=True)
-    (project_directory / "index.html").write_text('<div data-composition-id="v5-root"></div>', encoding="utf-8")
-    storyboard = root / "working" / "hyperframes-v5" / "storyboard.json"
-    storyboard.write_text(json.dumps({"representativeApprovalSet": ["scene-one"], "scenes": [
-        {"id": "scene-one", "startSec": 0, "renderEndSec": 30, "purpose": "First", "recipe": "one", "copy": {"kicker": "FIRST SCENE"}},
-        {"id": "scene-two", "startSec": 30, "renderEndSec": 60, "purpose": "Second", "recipe": "two", "copy": {"kicker": "SECOND SCENE"}},
-    ]}), encoding="utf-8")
-    timing_ledger = storyboard.parent / "timing-ledger.json"
-    timing_ledger.write_text(json.dumps({"fps": 30, "scenes": [
-        {"sceneId": "scene-one", "reveals": [{"label": "First reveal", "phrase": "first words", "absoluteSec": 2, "settledFrame": 75}]},
-        {"sceneId": "scene-two", "reveals": [{"label": "Second reveal", "phrase": "scene-relative", "absoluteSec": 30.1, "settledFrame": 918}]},
-    ]}), encoding="utf-8")
-    monkeypatch.setattr(promote_frozen_visual_revision, "probe_visual_source", lambda _path: {"width": 1920, "height": 1080, "fps": 30, "durationSec": 60})
+    (root / "assets" / "clip.mp4").write_bytes(b"clip")
+    plan["assets"] = [{"id": "pexels-1", "name": "Clip", "path": "assets/clip.mp4", "mediaType": "video", "durationSec": 5, "hasTransparency": False}]
+    plan["source"]["videoSha256"] = visual_production.sha256_file(root / "source" / "locked-cut.mp4")
+    plan["cues"] = [{
+        "id": "asset-1", "kind": "asset", "assetId": "pexels-1", "startSec": 4, "endSec": 9,
+        "enabled": True, "semanticItems": [],
+        "parameters": {"planningSuggestionId": "placed-1", "approvedTreatmentId": "pexels-1"},
+    }]
+    saved = visual_production.save_visual_plan(plan_path, plan)
+    _contract_suggestions(root, [{
+        "id": "placed-1", "status": "built", "cueId": "asset-1", "category": "stock",
+        "timelineLane": "b-roll", "startSec": 4, "endSec": 9,
+        "decision": {"status": "approved", "selectedTreatmentId": "pexels-1", "decidedAt": "now"},
+    }])
 
-    result = promote_frozen_visual_revision.promote(
-        root,
-        master,
-        storyboard,
-        revision_id="v5-final",
-        revision_name="V5 Final",
-        superseded_id="v1-generic",
-        skip_production_checks=True,
-    )
-    promoted = visual_production.load_visual_plan(plan_path)
+    report = visual_production.visual_production_gate_report(plan_path, saved)
 
-    assert result["sceneCount"] == 2
-    assert (root / "exports" / "final-video.mp4").read_bytes() == b"approved-v5"
-    assert len(list(plan_path.parent.glob("visual-plan.superseded-v1-generic-*.json"))) == 1
-    assert [cue["parameters"]["reviewLabel"] for cue in promoted["cues"]] == ["01 · FIRST SCENE", "02 · SECOND SCENE"]
-    assert all(cue["kind"] == "composition" for cue in promoted["cues"])
-    assert promoted["cues"][0]["semanticItems"][0]["spokenStartSec"] == 2
-    assert promoted["cues"][1]["semanticItems"][0]["anchorType"] == "scene-relative"
-    assert promoted["assets"] == []
-    assert promoted["customCompositions"][0]["projectPath"] == "working/hyperframes-v5/public"
-    assert promoted["revisions"]["activeRevision"] == 5
-    assert promoted["revisions"]["items"][0]["status"] == "delivered"
-    report = visual_production.visual_production_gate_report(plan_path, promoted)
-    assert report["timingAnchored"] is True
+    assert report["planningApprovalIssues"] == []
+    assert report["canRenderReview"] is True
+
+
+def test_a_plan_with_cues_and_no_decision_record_cannot_be_delivered(tmp_path: Path) -> None:
+    """Absence of visual-suggestions.json used to mean every gate silently passed."""
+    plan_path, plan = _private_project(tmp_path)
+    plan["cues"] = [{
+        "id": "cue-1", "kind": "module", "moduleId": "source-footage-hold",
+        "startSec": 1, "endSec": 4, "enabled": True, "parameters": {}, "semanticItems": [],
+    }]
+    saved = visual_production.save_visual_plan(plan_path, plan)
+
+    report = visual_production.visual_production_gate_report(plan_path, saved)
+
+    assert report["planningApprovalPassed"] is False
+    assert report["speakerSafetyPassed"] is False
+    assert report["canRenderReview"] is False
+    assert report["canDeliver"] is False
+    assert any("visual-suggestions.json is missing" in issue for issue in report["planningApprovalIssues"])
+
+
+def test_review_render_then_approval_unblocks_the_final_export(tmp_path: Path) -> None:
+    """The whole Loop B cycle: render for review, approve it, then delivery opens."""
+    plan_path, plan = _private_project(tmp_path)
+    root = plan_path.parents[1]
+    runtime = root / "working" / "runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "index.html").write_text("<div></div>", encoding="utf-8")
+    review_render = root / "renders" / "review.mp4"
+    review_render.write_bytes(b"review")
+    saved = visual_production.save_visual_plan(plan_path, plan)
+    assert visual_production.visual_production_gate_report(plan_path, saved)["canDeliver"] is False
+
+    visual_production.record_review_revision(plan_path, runtime, review_render)
+    approved = visual_production.approve_full_review(plan_path)
+
+    report = visual_production.visual_production_gate_report(plan_path, approved)
+    assert report["reviewRenderAvailable"] is True
+    assert report["fullReviewApproved"] is True
     assert report["canDeliver"] is True
-    assert report["deliveryReopenVerified"] is False
+
+
+def test_editing_a_cue_after_approval_reopens_the_full_review(tmp_path: Path) -> None:
+    """A fix made in response to a Loop B note must be reviewed again, not inherit the sign-off."""
+    plan_path, plan = _private_project(tmp_path)
+    root = plan_path.parents[1]
+    runtime = root / "working" / "runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "index.html").write_text("<div></div>", encoding="utf-8")
+    (root / "renders" / "review.mp4").write_bytes(b"review")
+    visual_production.save_visual_plan(plan_path, plan)
+    visual_production.record_review_revision(plan_path, runtime, root / "renders" / "review.mp4")
+    approved = visual_production.approve_full_review(plan_path)
+
+    approved["cues"] = [{
+        "id": "cue-1", "kind": "module", "moduleId": "source-footage-hold",
+        "startSec": 1, "endSec": 4, "enabled": True, "parameters": {}, "semanticItems": [],
+    }]
+    edited = visual_production.save_visual_plan(plan_path, approved)
+
+    assert visual_production.visual_production_gate_report(plan_path, edited)["fullReviewApproved"] is False
+
+
+def test_recutting_the_locked_cut_names_the_cues_that_must_be_retimed(tmp_path: Path) -> None:
+    """Cue times are seconds into a specific file; a re-cut used to drift silently."""
+    plan_path, plan = _private_project(tmp_path)
+    locked = plan_path.parents[1] / "source" / "locked-cut.mp4"
+    plan["source"]["videoSha256"] = visual_production.sha256_file(locked)
+    plan["cues"] = [{
+        "id": "cue-1", "kind": "module", "moduleId": "source-footage-hold",
+        "startSec": 1, "endSec": 4, "enabled": True, "parameters": {}, "semanticItems": [],
+    }]
+    saved = visual_production.save_visual_plan(plan_path, plan)
+    assert visual_production.locked_cut_drift_issues(plan_path, saved) == []
+
+    locked.write_bytes(b"a completely different cut")
+
+    issues = visual_production.locked_cut_drift_issues(plan_path, saved)
+    assert len(issues) == 1
+    assert "All 1 cue time(s) refer to the previous cut" in issues[0]
+    assert visual_production.visual_production_gate_report(plan_path, saved)["canRenderReview"] is False
+
+
+def test_a_custom_composition_cannot_declare_a_source_hash_it_does_not_have(tmp_path: Path) -> None:
+    """Realizing a recipe means registering real files; the hash must match what is there."""
+    plan_path, plan = _private_project(tmp_path)
+    root = plan_path.parents[1]
+    source = root / "working" / "recipe-build" / "public"
+    source.mkdir(parents=True)
+    (source / "index.html").write_text('<div data-composition-id="root"></div>', encoding="utf-8")
+    plan["customCompositions"] = [{
+        "id": "composition-1", "runtime": "hyperframes", "name": "Numbered example card",
+        "rootCompositionId": "root", "projectPath": "working/recipe-build/public",
+        "entryFile": "index.html", "sourceHash": "0" * 64,
+    }]
+
+    with pytest.raises(ValueError, match="Register the hash of the files that are actually there"):
+        visual_production.save_visual_plan(plan_path, plan)
+
+    plan["customCompositions"][0]["sourceHash"] = visual_production.sha256_directory(source)
+    assert visual_production.save_visual_plan(plan_path, plan)["customCompositions"][0]["id"] == "composition-1"
+
+
+def test_a_plan_that_does_not_record_its_locked_cut_cannot_render(tmp_path: Path) -> None:
+    plan_path, plan = _private_project(tmp_path)
+    plan["cues"] = [{
+        "id": "cue-1", "kind": "module", "moduleId": "source-footage-hold",
+        "startSec": 1, "endSec": 4, "enabled": True, "parameters": {}, "semanticItems": [],
+    }]
+    saved = visual_production.save_visual_plan(plan_path, plan)
+
+    report = visual_production.visual_production_gate_report(plan_path, saved)
+
+    assert report["lockedCutMatches"] is False
+    assert "does not record which locked cut" in report["lockedCutIssues"][0]
 
 
 def test_semantic_layout_inspection_times_use_fully_visible_voice_anchors() -> None:
@@ -360,16 +607,6 @@ def test_semantic_layout_inspection_times_use_fully_visible_voice_anchors() -> N
     ]}
 
     assert visual_production.semantic_layout_inspection_times(plan) == [2.5, 4.0]
-
-
-def test_custom_composition_tail_hold_can_have_no_visible_semantic_items() -> None:
-    assert promote_frozen_visual_revision._semantic_items(
-        {"id": "tail-hold"},
-        {"sceneId": "tail-hold", "reveals": []},
-        30,
-        57.4,
-        60,
-    ) == []
 
 
 def test_production_gate_blocks_unanchored_visible_text(tmp_path: Path) -> None:
