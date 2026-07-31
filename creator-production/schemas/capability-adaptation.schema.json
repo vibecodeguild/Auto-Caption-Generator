@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "id", "version", "episodeId", "sequenceId",
+    "sourceCapabilityId", "sourceResourceIds", "sourceHashes", "files",
+    "parameterSchema", "supportedEditorialJobs", "supportedSemanticForms",
+    "supportedTokenHooks", "supportedCanvasTopologies", "exactTimingInputs",
+    "maximumContentCapacity", "runtimeDependencies", "knownLimitations"
+    , "validationFixture"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "version": { "type": "integer", "minimum": 1 },
+    "episodeId": { "type": "string", "minLength": 1 },
+    "sequenceId": { "type": "string", "minLength": 1 },
+    "sourceCapabilityId": { "type": "string", "minLength": 1 },
+    "sourceResourceIds": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "sourceHashes": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sha" } },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "content"],
+        "properties": {
+          "path": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+          "content": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "parameterSchema": { "type": "object" },
+    "supportedEditorialJobs": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "supportedSemanticForms": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "supportedTokenHooks": { "type": "array", "items": { "type": "string" } },
+    "supportedCanvasTopologies": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "exactTimingInputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "enum": ["wordId", "sourceEventAnchorId", "absoluteFrame"] }
+    },
+    "maximumContentCapacity": { "type": "object" },
+    "runtimeDependencies": { "type": "array", "items": { "type": "string" } },
+    "knownLimitations": { "type": "array", "items": { "type": "string" } },
+    "validationFixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parameters", "tokens", "timing", "canvas", "sourceEvidence"],
+      "properties": {
+        "parameters": { "type": "object" },
+        "tokens": { "type": "object" },
+        "timing": { "type": "object" },
+        "canvas": { "type": "object" },
+        "sourceEvidence": { "type": "object" }
+      }
+    }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

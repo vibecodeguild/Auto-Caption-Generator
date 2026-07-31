@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "episodeId", "manifestRevision", "manifestHash", "workflowLockHash", "lockedCutSha256", "lockedAudioSha256", "transcriptSha256", "wordTimingSha256", "resolvedProfileHash", "runtime", "sequences", "chapters", "createdAt", "buildHash"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "episodeId": {"type": "string", "minLength": 1},
+    "manifestRevision": {"type": "integer", "minimum": 1},
+    "manifestHash": {"$ref": "#/$defs/sha"},
+    "workflowLockHash": {"$ref": "#/$defs/sha"},
+    "lockedCutSha256": {"$ref": "#/$defs/sha"},
+    "lockedAudioSha256": {"oneOf": [{"$ref": "#/$defs/sha"}, {"const": ""}]},
+    "transcriptSha256": {"$ref": "#/$defs/sha"},
+    "wordTimingSha256": {"$ref": "#/$defs/sha"},
+    "resolvedProfileHash": {"$ref": "#/$defs/sha"},
+    "runtime": {"type": "object"},
+    "sequences": {"type": "array", "items": {"type": "object"}, "minItems": 1},
+    "chapters": {"type": "array", "items": {"type": "object"}, "minItems": 1},
+    "createdAt": {"type": "string", "minLength": 1},
+    "buildHash": {"$ref": "#/$defs/sha"}
+  },
+  "$defs": {"sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

@@ -399,9 +399,84 @@ The cut is always written first as `<source>_cut.mp4`; enabled normalization
 writes `<source>_cut_normalized.mp4` without overwriting either the source or
 the successful cut. The standalone Audio Normalizer remains available.
 
+## Creator Video Production Platform
+
+New creator-video projects use the `creator-video-production` authority rather
+than ambient HyperFrames workflow routing. The platform freezes the locked cut,
+encoded audio packet stream, final transcript word timings, workflow resources,
+channel profile, complete native HyperFrames source catalog, runtime, and
+licenses into the private project before planning.
+
+The current implementation state, global-skill cleanup boundary, preserved
+renderer inventory, private WP8 fixture status, and fresh-task continuation
+prompt are recorded in
+[Creator Production Implementation Checkpoint](creator-production-checkpoint.md).
+
+The executable episode manifest is the single creative authority. Production
+creates an immutable, schema-bound file handoff for a normal user-visible Codex
+task. The application does not start or monitor a nested Codex process. A task
+claim records its visible startup skill inventory and rejects forbidden
+end-to-end video workflows. The application independently verifies the handoff,
+locked identities, output schema, capability bindings, and downstream gates
+before promotion. No `OPENAI_API_KEY` is used. Source-only native recipes remain
+visible as explicit adaptation debt and must pass restricted, deterministic
+fixture execution before they become selectable.
+
+Analysis groups transcript propositions into contiguous semantic units and
+records exact observed visual changes and continuous performance/demonstration
+carry spans. Planning receives sequence boundaries only at eligible
+semantic-unit starts. A sequence is one coherent visual treatment or source
+strategy, not a sentence or cadence slice. Whole-plan structure, evidence, and
+cadence validate before any decision is frozen; failed submissions retain
+nothing, while the three-submission correction limit remains in force.
+
+Materialized sequences are mounted only for their exact half-open frame ranges.
+Element IDs are sequence-namespaced, spoken reveals use immutable word frames,
+speaker/source framing comes from manifest geometry, and entry/change/hold/exit
+samples are checked against creator-confirmed subject and protected-content
+regions. Authored scenes expose multiple ranked options, unrelated completed
+visual signatures cannot be stamped repeatedly, and missing assets, rights,
+capabilities, transitions, or timing remain blocking instead of falling back.
+
+Review uses one moving final-quality composition with locked audio. Notes bind
+to build, sequence, optional element, and absolute frame; they autosave and
+remain active until a revised build is reviewed. The synchronized Studio
+handoff opens the exact chapter workspace and only allowlisted edits can return
+through a hashed `sourceOverrideRef`.
+
+Completed editorial chapters—not arbitrary duration buckets—render
+independently and persist in a content-addressed cache. Source extraction is
+cached separately from graphics revisions. Unchanged verified chapters are
+reused, video assembly is stream-copy only, decoded frames are compared on both
+sides of every seam, and the original encoded audio packet stream is attached
+once and verified. The approved review bytes become the delivery bytes.
+
+Renderer authority is also local and immutable. The ignored
+`app/private-renderer-assets/` store preserves the complete HyperFrames
+0.7.54 package (including Engine, Producer, Studio, runtime, and templates),
+GSAP 3.13.0, Chrome Headless Shell 152.0.7928.2, FFmpeg, and FFprobe. Its
+manifest records file and whole-tree hashes. Production validates those hashes,
+executes the preserved CLI, copies the preserved GSAP runtime into chapter
+compositions, and injects explicit browser and media-tool paths into both
+browser preflight and rendering. Missing or changed assets block rendering;
+Production does not fall back to a global HyperFrames skill or user browser
+cache.
+
+Channel identity is data. Packaged fixtures and private profiles are discovered
+dynamically by exact `id@version`; workflow and renderer code do not branch on
+channel IDs. Private profiles and matching grammars may be placed under
+`creator-production-inputs/profiles/` and
+`creator-production-inputs/reference-grammars/` in the private video project.
+
+The prior Visual Production implementation is read-only recovery only. Its
+persisted projects, status, final-output discovery, and independent safety
+checks remain available, but `POST /api/visual/render` returns HTTP 410 and
+cannot execute the retired `talking-head-recut` request. It is not an authority
+inside a new Creator Production project.
+
 ## API Inventory
 
-Generated from `app/web_api.py` by `scripts/generate_api_inventory.py`. 93 routes.
+Generated from `app/web_api.py` by `scripts/generate_api_inventory.py`. 119 routes.
 Edit the route or its docstring, then regenerate; do not edit this section by hand.
 
 ### Visual Production
@@ -426,7 +501,7 @@ Edit the route or its docstring, then regenerate; do not edit this section by ha
 | POST | `/api/visual/open-dialog` | Open visual project dialog |
 | GET | `/api/visual/pexels/settings` | Pexels configuration |
 | POST | `/api/visual/pexels/settings` | Save pexels configuration |
-| POST | `/api/visual/render` | Start visual render |
+| POST | `/api/visual/render` | Reject retired visual render execution |
 | GET | `/api/visual/render/active` | Active visual render job |
 | GET | `/api/visual/render/jobs/{job_id}` | Visual render job |
 | GET | `/api/visual/render/jobs/{job_id}/video` | Visual render video |
@@ -525,6 +600,32 @@ Edit the route or its docstring, then regenerate; do not edit this section by ha
 | GET | `/api/caption/source-video` | Caption source video |
 | POST | `/api/caption/styles` | Save caption style |
 | DELETE | `/api/caption/styles/{name}` | Delete caption style |
+| GET | `/api/creator-production/capabilities` | Creator production capabilities |
+| GET | `/api/creator-production/channel-profiles` | Creator production channel profiles |
+| GET | `/api/creator-production/current` | Current creator production |
+| POST | `/api/creator-production/initialize` | Initialize creator production |
+| GET | `/api/creator-production/jobs` | List creator production jobs |
+| POST | `/api/creator-production/jobs` | Create creator production job |
+| GET | `/api/creator-production/jobs/{job_id}` | Get creator production job |
+| POST | `/api/creator-production/jobs/{job_id}/cancel` | Cancel creator production job |
+| POST | `/api/creator-production/jobs/{job_id}/claim` | Claim creator production job |
+| POST | `/api/creator-production/jobs/{job_id}/complete` | Complete creator production job |
+| GET | `/api/creator-production/jobs/{job_id}/handoff` | Get creator production handoff |
+| POST | `/api/creator-production/jobs/{job_id}/start` | Reject the retired nested Codex execution path |
+| GET | `/api/creator-production/pipeline` | Creator production pipeline |
+| GET | `/api/creator-production/render-jobs` | List creator render jobs |
+| POST | `/api/creator-production/render-jobs` | Create creator render job |
+| POST | `/api/creator-production/render-jobs/{job_id}/cancel` | Cancel creator render job |
+| POST | `/api/creator-production/render-jobs/{job_id}/start` | Start creator render job |
+| GET | `/api/creator-production/review` | Get creator production review |
+| GET | `/api/creator-production/review-video` | Creator production review video |
+| POST | `/api/creator-production/review/approve` | Approve creator production review |
+| POST | `/api/creator-production/review/notes` | Save creator production review note |
+| POST | `/api/creator-production/review/notes/{note_id}/accept` | Accept creator production review note |
+| GET | `/api/creator-production/source-evidence` | Get creator source evidence |
+| POST | `/api/creator-production/source-evidence` | Update creator source evidence |
+| POST | `/api/creator-production/studio/edits` | Apply creator studio edits |
+| POST | `/api/creator-production/studio/handoff` | Create creator studio handoff |
 | GET | `/api/health` | Health |
 
 ## Storage and State
@@ -551,7 +652,9 @@ hostable multi-user service.
 
 ## Validation Baseline
 
-- All 84 Python tests pass when pytest is run explicitly against `tests/`.
+- All 344 Python tests pass when pytest is run explicitly against `tests/`;
+  5 environment-dependent tests skip.
+- All 3 Node web tests pass.
 - File-picker failures expose the exact backend exception in the existing
   transcript status area; normal picker operation adds no diagnostic overlay.
 - TypeScript typecheck and the Next.js production build pass.

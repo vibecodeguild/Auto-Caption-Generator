@@ -29,7 +29,7 @@ import {
 import type { Dispatch, KeyboardEvent as ReactKeyboardEvent, MutableRefObject, PointerEvent as ReactPointerEvent, ReactNode, RefObject, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HexColorInput, HexColorPicker } from "react-colorful";
-import VisualProductionWorkspace from "./visual-production";
+import CreatorProductionWorkspace from "./creator-production";
 import {
   API_BASE,
   type AudioAnalysisResponse,
@@ -1313,7 +1313,7 @@ export default function Home() {
           }}
         />
       ) : (
-        <VisualProductionWorkspace />
+        <CreatorProductionWorkspace />
       )}
     </main>
   );

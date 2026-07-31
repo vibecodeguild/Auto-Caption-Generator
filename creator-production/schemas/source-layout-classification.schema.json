@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "episodeId", "lockedCutSha256", "wordTimingSha256", "totalFrames",
+    "catalogId", "catalogVersion", "sequences"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "episodeId": {"type": "string", "minLength": 1},
+    "lockedCutSha256": {"$ref": "#/$defs/sha"},
+    "wordTimingSha256": {"$ref": "#/$defs/sha"},
+    "totalFrames": {"type": "integer", "minimum": 1},
+    "catalogId": {"const": "creator-obs-capture-layouts"},
+    "catalogVersion": {"type": "integer", "minimum": 1},
+    "sequences": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequenceId", "absoluteStartFrame", "absoluteEndFrameExclusive",
+          "layoutSpans"
+        ],
+        "properties": {
+          "sequenceId": {"type": "string", "minLength": 1},
+          "absoluteStartFrame": {"type": "integer", "minimum": 0},
+          "absoluteEndFrameExclusive": {"type": "integer", "minimum": 1},
+          "layoutSpans": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"$ref": "#/$defs/layoutSpan"}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "layoutId": {
+      "enum": [
+        "full-screen-talking", "talking-left", "talking-right",
+        "talking-bottom-left", "talking-top-left",
+        "talking-bottom-right", "talking-top-right",
+        "computer-screen-only"
+      ]
+    },
+    "layoutSpan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "absoluteStartFrame", "absoluteEndFrameExclusive", "layoutId",
+        "candidateLayoutIds", "confidence", "evidenceFrames",
+        "evidenceRefs", "unresolvedReasons"
+      ],
+      "properties": {
+        "absoluteStartFrame": {"type": "integer", "minimum": 0},
+        "absoluteEndFrameExclusive": {"type": "integer", "minimum": 1},
+        "layoutId": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/layoutId"}
+          ]
+        },
+        "candidateLayoutIds": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/layoutId"},
+          "uniqueItems": true
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "evidenceFrames": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "integer", "minimum": 0},
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "unresolvedReasons": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

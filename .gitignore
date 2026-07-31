@@ -20,12 +20,21 @@ screenshots/
 internal/
 visual-production/
 .tmp-vcg-analysis/
+.tmp/
 .claude/skills/vcg-visual-producer/
 docs/hyperframes-native-skills-boundary-audit.md
 docs/visual-production-remediation-plan.md
 
+# Private creator channel and brand packages.
+# Keep the generic application production profile public.
+creator-production/profiles/*
+!creator-production/profiles/creator-default.v1.json
+creator-production/reference-grammars/*
+
 app/temp/*
 !app/temp/.gitkeep
+app/private-capability-snapshots/
+app/private-renderer-assets/
 app/exports/*
 !app/exports/.gitkeep
 projects/*

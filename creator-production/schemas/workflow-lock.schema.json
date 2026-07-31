@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "workflowId",
+    "workflowVersion",
+    "workflowHash",
+    "productionProfileId",
+    "productionProfileVersion",
+    "productionProfileHash",
+    "channelProfileId",
+    "channelProfileVersion",
+    "channelProfileHash",
+    "capabilityCatalogSnapshotId",
+    "capabilityCatalogSnapshotHash",
+    "hyperframesCliVersion",
+    "hyperframesCliHash",
+    "compilerVersion",
+    "compilerHash",
+    "producerAdapterVersion",
+    "producerAdapterHash",
+    "transitionSourceHashes",
+    "transitionRuntimeRegistryHash",
+    "allowedDomainResources",
+    "forbiddenWorkflowSkills",
+    "executionHost",
+    "createdAt"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "workflowId": { "const": "creator-video-production" },
+    "workflowVersion": { "type": "integer", "minimum": 1 },
+    "workflowHash": { "$ref": "#/$defs/sha256" },
+    "productionProfileId": { "$ref": "#/$defs/id" },
+    "productionProfileVersion": { "type": "integer", "minimum": 1 },
+    "productionProfileHash": { "$ref": "#/$defs/sha256" },
+    "channelProfileId": { "$ref": "#/$defs/id" },
+    "channelProfileVersion": { "type": "integer", "minimum": 1 },
+    "channelProfileHash": { "$ref": "#/$defs/sha256" },
+    "capabilityCatalogSnapshotId": { "$ref": "#/$defs/id" },
+    "capabilityCatalogSnapshotHash": { "$ref": "#/$defs/sha256" },
+    "hyperframesCliVersion": { "type": "string", "minLength": 1 },
+    "hyperframesCliHash": { "$ref": "#/$defs/sha256" },
+    "compilerVersion": { "type": "string", "minLength": 1 },
+    "compilerHash": { "$ref": "#/$defs/sha256" },
+    "producerAdapterVersion": { "type": "string", "minLength": 1 },
+    "producerAdapterHash": { "$ref": "#/$defs/sha256" },
+    "transitionSourceHashes": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/sha256" }
+    },
+    "transitionRuntimeRegistryHash": {
+      "oneOf": [{ "$ref": "#/$defs/sha256" }, { "const": "" }]
+    },
+    "allowedDomainResources": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/sha256" }
+    },
+    "forbiddenWorkflowSkills": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "executionHost": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "handoffProtocol", "monitoringMode", "nestedCodexProcessAllowed", "skillInventoryPolicy", "outputPromotionPolicy", "openaiApiKeyRequired"],
+          "properties": {
+            "kind": {"const": "user-visible-codex-task"},
+            "handoffProtocol": {"const": "immutable-file-packet"},
+            "monitoringMode": {"const": "user-visible"},
+            "nestedCodexProcessAllowed": {"const": false},
+            "skillInventoryPolicy": {"const": "reject-forbidden-visible-skills"},
+            "outputPromotionPolicy": {"const": "application-validated"},
+            "openaiApiKeyRequired": {"const": false}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "skillInstructionPolicy", "requiredInvocationOverride", "promptIsolationProbeRequired", "fallbackWhenProbeFails", "openaiApiKeyRequired"],
+          "properties": {
+            "kind": {"const": "codex-subscription-cli"},
+            "skillInstructionPolicy": {"const": "omit-all"},
+            "requiredInvocationOverride": {"const": "skills.include_instructions=false"},
+            "requiredConfigurationOverrides": {
+              "type": "array",
+              "items": {"type": "string", "minLength": 1},
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "sandboxMode": {"const": "read-only"},
+            "approvalPolicy": {"const": "never"},
+            "ephemeral": {"const": true},
+            "promptIsolationProbeRequired": {"const": true},
+            "fallbackWhenProbeFails": {"const": "block-and-require-global-skill-removal"},
+            "openaiApiKeyRequired": {"const": false}
+          }
+        }
+      ]
+    },
+    "createdAt": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]*$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

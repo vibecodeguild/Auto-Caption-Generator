@@ -62,7 +62,7 @@ def test_creator_library_asset_is_frozen_into_project_and_usage_recorded(tmp_pat
     library_root = _library(tmp_path, monkeypatch)
     source = tmp_path / "callback.mp4"
     source.write_bytes(b"callback")
-    asset, _library_data, _duplicate = story_assets.import_creator_asset(source, {"name": "Recurring callback", "series": "Finance Shane"})
+    asset, _library_data, _duplicate = story_assets.import_creator_asset(source, {"name": "Recurring callback", "series": "Finance Creator"})
     plan_path = _visual_project(tmp_path)
 
     cue, plan = story_assets.freeze_creator_asset(plan_path, asset["id"], start_sec=10, end_sec=15)
@@ -740,10 +740,10 @@ def test_creator_library_search_matches_callback_metadata(tmp_path: Path, monkey
     _library(tmp_path, monkeypatch)
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"clip")
-    story_assets.import_creator_asset(source, {"name": "Shane catches a falling knife", "tags": ["investing", "risk"], "series": "Finance Shane"})
+    story_assets.import_creator_asset(source, {"name": "Creator catches a falling knife", "tags": ["investing", "risk"], "series": "Finance Creator"})
 
-    assert story_assets.search_creator_library("falling knife")[0]["name"] == "Shane catches a falling knife"
-    assert story_assets.search_creator_library("finance")[0]["series"] == "Finance Shane"
+    assert story_assets.search_creator_library("falling knife")[0]["name"] == "Creator catches a falling knife"
+    assert story_assets.search_creator_library("finance")[0]["series"] == "Finance Creator"
 
 
 def test_untrusted_stock_download_url_is_rejected(tmp_path: Path) -> None:

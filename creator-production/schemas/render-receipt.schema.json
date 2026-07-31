@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "status", "workflowLockHash", "resolvedProfileHash", "capabilityCatalogSnapshotHash", "manifestHash", "buildHash", "lockedCutSha256", "transcriptSha256", "wordTimingSha256", "runtime", "renderConfiguration", "browserPreflightIndexHash", "chapterReceiptHashes", "lockedAudioSourceSha256", "outputSha256", "outputRelativePath", "videoIdentity", "audioIdentity", "seamValidation", "expectedTotalFrames", "assembledAt", "receiptHash"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "status": {"const": "assembled"},
+    "workflowLockHash": {"$ref": "#/$defs/sha"},
+    "resolvedProfileHash": {"$ref": "#/$defs/sha"},
+    "capabilityCatalogSnapshotHash": {"$ref": "#/$defs/sha"},
+    "manifestHash": {"$ref": "#/$defs/sha"},
+    "buildHash": {"$ref": "#/$defs/sha"},
+    "lockedCutSha256": {"$ref": "#/$defs/sha"},
+    "transcriptSha256": {"$ref": "#/$defs/sha"},
+    "wordTimingSha256": {"$ref": "#/$defs/sha"},
+    "runtime": {"type": "object"},
+    "renderConfiguration": {"type": "object"},
+    "browserPreflightIndexHash": {"$ref": "#/$defs/sha"},
+    "chapterReceiptHashes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sha"}},
+    "lockedAudioSourceSha256": {"$ref": "#/$defs/sha"},
+    "outputSha256": {"$ref": "#/$defs/sha"},
+    "outputRelativePath": {"type": "string", "minLength": 1},
+    "videoIdentity": {"type": "object"},
+    "audioIdentity": {"type": "object"},
+    "seamValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "boundaries", "passed"],
+      "properties": {
+        "algorithm": {"const": "decoded-frame-md5-two-before-two-after-v1"},
+        "boundaries": {"type": "array", "items": {"type": "object"}},
+        "passed": {"const": true}
+      }
+    },
+    "expectedTotalFrames": {"type": "integer", "minimum": 1},
+    "assembledAt": {"type": "string", "minLength": 1},
+    "receiptHash": {"$ref": "#/$defs/sha"}
+  },
+  "$defs": {"sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

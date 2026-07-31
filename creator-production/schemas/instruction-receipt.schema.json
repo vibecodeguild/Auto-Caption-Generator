@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "owningWorkflowId",
+    "workflowVersion",
+    "workflowHash",
+    "channelProfileId",
+    "channelProfileHash",
+    "resourceLoads",
+    "forbiddenWorkflowResources",
+    "forbiddenAttempts",
+    "nativeWorkflowDiscoveryPerformed",
+    "fallbackOccurred",
+    "createdAt",
+    "receiptHash"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "owningWorkflowId": { "const": "creator-video-production" },
+    "workflowVersion": { "type": "integer", "minimum": 1 },
+    "workflowHash": { "$ref": "#/$defs/sha256" },
+    "channelProfileId": { "type": "string", "minLength": 1 },
+    "channelProfileHash": { "$ref": "#/$defs/sha256" },
+    "resourceLoads": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resourceId", "sha256", "status"],
+        "properties": {
+          "resourceId": { "type": "string", "minLength": 1 },
+          "sha256": { "$ref": "#/$defs/sha256" },
+          "status": { "const": "loaded" }
+        }
+      }
+    },
+    "forbiddenWorkflowResources": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "forbiddenAttempts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 0
+    },
+    "nativeWorkflowDiscoveryPerformed": { "const": false },
+    "fallbackOccurred": { "const": false },
+    "createdAt": { "type": "string", "minLength": 1 },
+    "receiptHash": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

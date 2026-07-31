@@ -203,57 +203,178 @@ def test_visual_project_create_and_save_uses_private_plan(tmp_path: Path, monkey
     assert saved.json()["plan"]["project"]["name"] == "Renamed"
 
 
-def test_visual_render_rejects_invalid_range(tmp_path: Path) -> None:
+def test_legacy_visual_render_execution_is_disabled(tmp_path: Path, monkeypatch) -> None:
     state.visual_plan_path = tmp_path / "plans" / "visual-plan.json"
     state.visual_plan = {"composition": {"durationSec": 60}}
+    gate_called = False
 
-    response = TestClient(app).post("/api/visual/render", json={"start_sec": 20, "end_sec": 10, "quality": "draft"})
+    def fail_if_gate_runs(*_args, **_kwargs):
+        nonlocal gate_called
+        gate_called = True
+        raise AssertionError("legacy render gates must not run")
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Render end must be after render start."
+    monkeypatch.setattr(web_api, "visual_production_gate_report", fail_if_gate_runs)
+    response = TestClient(app).post(
+        "/api/visual/render",
+        json={"start_sec": 20, "end_sec": 10, "quality": "draft"},
+    )
+
+    assert response.status_code == 410
+    assert response.json()["detail"].startswith("Legacy Visual Production rendering is retired.")
+    assert gate_called is False
 
 
-def test_visual_final_export_reuses_active_job_and_restores_progress(tmp_path: Path, monkeypatch) -> None:
-    root = tmp_path / "private"
-    plan_path = root / "visual-production" / "visual-plan.json"
-    plan_path.parent.mkdir(parents=True)
-    (root / ".vcg-private").write_text("private\n", encoding="utf-8")
-    plan = {"composition": {"durationSec": 60}}
-    started_threads: list[object] = []
-
-    class FakeThread:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        def start(self):
-            started_threads.append(self)
+def test_creator_production_initialize_resolves_renderer_assets_from_repository_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    private_root = tmp_path / "private"
+    plan_path = private_root / "visual-production" / "visual-plan.json"
+    private_root.mkdir(parents=True)
+    (private_root / ".vcg-private").write_text("private\n", encoding="utf-8")
+    repository_root = tmp_path / "repository"
+    hyperframes_package = repository_root / "node_modules" / "hyperframes"
+    hyperframes_package.mkdir(parents=True)
+    (hyperframes_package / "package.json").write_text(
+        '{"version":"1.2.3"}',
+        encoding="utf-8",
+    )
+    locked_cut = private_root / "exports" / "locked-cut.mp4"
+    final_transcript = private_root / "transcripts" / "final-transcript.json"
+    animation_source = repository_root / "private-capability-snapshot"
+    hyperframes_cli = hyperframes_package / "dist" / "cli.js"
+    captured: dict = {}
 
     monkeypatch.setattr(state, "visual_plan_path", plan_path)
-    monkeypatch.setattr(state, "visual_plan", plan)
-    monkeypatch.setattr(state, "visual_render_jobs", {})
-    monkeypatch.setattr(web_api, "_active_video_project", lambda: None)
-    monkeypatch.setattr(web_api, "visual_production_gate_report", lambda _path, _plan: {
-        "canRenderReview": True, "canDeliver": True, "messages": [],
-    })
-    monkeypatch.setattr(web_api.threading, "Thread", FakeThread)
-    client = TestClient(app)
+    monkeypatch.setattr(
+        state,
+        "visual_plan",
+        {
+            "project": {"id": "episode-1"},
+            "source": {
+                "video": "exports/locked-cut.mp4",
+                "transcript": "transcripts/final-transcript.json",
+            },
+        },
+    )
+    monkeypatch.setattr(web_api, "project_root", lambda: repository_root)
+    monkeypatch.setattr(
+        web_api,
+        "resolve_project_path",
+        lambda root, relative_path: root / relative_path,
+    )
 
-    first = client.post("/api/visual/render", json={"quality": "high", "purpose": "final"})
-    second = client.post("/api/visual/render", json={"quality": "high", "purpose": "final"})
-    job_id = first.json()["job_id"]
-    state.visual_render_jobs[job_id].update(69, "Rendering visual-production frames...")
-    active = client.get("/api/visual/render/active")
+    def renderer_assets(root: Path) -> dict:
+        captured["renderer_root"] = root
+        return {
+            "hyperframesPackage": hyperframes_package,
+            "hyperframesCli": hyperframes_cli,
+        }
 
-    assert first.status_code == 200
-    assert first.json()["reused"] is False
-    assert second.status_code == 200
-    assert second.json() == {"job_id": job_id, "reused": True}
-    assert len(started_threads) == 1
-    assert active.status_code == 200
-    assert active.json()["job"]["job_id"] == job_id
-    assert active.json()["job"]["stage"] == "rendering"
-    assert active.json()["job"]["value"] == 69
-    assert (plan_path.parent / "render-job.json").is_file()
+    monkeypatch.setattr(web_api, "resolve_creator_renderer_assets", renderer_assets)
+    monkeypatch.setattr(
+        web_api,
+        "resolve_hyperframes_animation_source",
+        lambda **kwargs: animation_source,
+    )
+
+    def initialize(root: Path, **kwargs) -> dict:
+        captured["private_root"] = root
+        captured["initialize_kwargs"] = kwargs
+        return {
+            "workflowId": "workflow-1",
+            "episodeId": "episode-1",
+            "state": "INITIALIZED",
+            "currentHash": "current-hash",
+            "workflowBundle": {"bundleHash": "workflow-bundle-hash"},
+            "capabilityBundle": {"bundleHash": "capability-bundle-hash"},
+        }
+
+    monkeypatch.setattr(web_api, "initialize_creator_project", initialize)
+
+    response = TestClient(app).post(
+        "/api/creator-production/initialize",
+        json={"channel_profile_id": "vcg@2"},
+    )
+
+    assert response.status_code == 200
+    assert captured["renderer_root"] == repository_root
+    assert captured["private_root"] == private_root
+    assert captured["initialize_kwargs"]["locked_cut"] == locked_cut
+    assert captured["initialize_kwargs"]["final_transcript"] == final_transcript
+    assert captured["initialize_kwargs"]["hyperframes_skill_root"] == animation_source
+    assert captured["initialize_kwargs"]["hyperframes_cli_path"] == hyperframes_cli
+    assert captured["initialize_kwargs"]["channel_profile_id"] == "vcg@2"
+
+
+def test_creator_production_current_reports_required_workflow_upgrade(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "private"
+    production_root = root / "creator-production"
+    production_root.mkdir(parents=True)
+    catalog_path = production_root / "catalog.json"
+    catalog_path.write_text('{"inventorySummary":{"productionSelectable":0}}', encoding="utf-8")
+    (production_root / "current.json").write_text(
+        (
+            '{"workflowId":"workflow-1","episodeId":"episode-1","state":"ANALYZING",'
+            '"currentHash":"current-hash","artifacts":{"capabilityCatalog":'
+            '{"path":"creator-production/catalog.json"}}}'
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(web_api, "_creator_production_root", lambda: root)
+    monkeypatch.setattr(web_api, "verify_creator_project", lambda *_args: None)
+
+    def stale_workflow(*_args) -> None:
+        raise RuntimeError("explicit workflow upgrade is required")
+
+    monkeypatch.setattr(
+        web_api,
+        "verify_live_workflow_package_matches_lock",
+        stale_workflow,
+    )
+
+    response = TestClient(app).get("/api/creator-production/current")
+
+    assert response.status_code == 200
+    assert response.json()["workflowUpgradeRequired"] is True
+    assert response.json()["workflowUpgradeReason"] == "explicit workflow upgrade is required"
+
+
+def test_creator_production_workflow_upgrade_uses_audited_core_operation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict = {}
+    root = tmp_path / "private"
+
+    monkeypatch.setattr(web_api, "_creator_production_root", lambda: root)
+
+    def upgrade(private_root: Path, *, actor: str, reason: str) -> None:
+        captured.update(root=private_root, actor=actor, reason=reason)
+
+    monkeypatch.setattr(web_api, "upgrade_creator_workflow_package", upgrade)
+    monkeypatch.setattr(
+        web_api,
+        "current_creator_production",
+        lambda: {"initialized": True, "workflowUpgradeRequired": False},
+    )
+
+    response = TestClient(app).post(
+        "/api/creator-production/workflow-upgrade",
+        json={"actor": "creator", "reason": "Use the current approved workflow."},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["workflowUpgradeRequired"] is False
+    assert captured == {
+        "root": root,
+        "actor": "creator",
+        "reason": "Use the current approved workflow.",
+    }
 
 
 def test_visual_active_job_returns_completed_persisted_status_after_restart(tmp_path: Path, monkeypatch) -> None:

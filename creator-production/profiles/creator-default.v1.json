@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "creator-default",
+  "version": 1,
+  "creatorPolicies": {
+    "lockedTranscriptRequired": true,
+    "timingMutationAllowed": false,
+    "nativeWorkflowDiscoveryAllowed": false,
+    "unknownFallbackAllowed": false,
+    "privateProjectStorageRequired": true
+  },
+  "review": {
+    "navigation": "active-notes-first",
+    "autosaveRequired": true,
+    "disabledActionReasonRequired": true,
+    "creatorOnlyAcceptance": true
+  },
+  "render": {
+    "chapterCacheEnabled": true,
+    "unchangedChapterReuseEnabled": true,
+    "exactBuildLockRequired": true,
+    "fullDeliveryVerificationRequired": true
+  },
+  "privacy": {
+    "publicProjectMediaAllowed": false,
+    "privateContentAddressedStorageRequired": true
+  },
+  "assetPolicy": {
+    "licenseProvenanceRequired": true,
+    "unresolvedPlaceholdersReviewable": false,
+    "unresolvedPlaceholdersDeliverable": false
+  }
+}

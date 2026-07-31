@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schemaVersion",
+    "id",
+    "version",
+    "parentProfileRef",
+    "designTokenContractVersion",
+    "referenceGrammarRef",
+    "brand",
+    "editorial",
+    "selection",
+    "pacing",
+    "capabilities",
+    "reuse",
+    "policies",
+    "speaker",
+    "assets"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "version": { "type": "integer", "minimum": 1 },
+    "parentProfileRef": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*@[1-9][0-9]*$" }
+      ]
+    },
+    "designTokenContractVersion": { "const": 1 },
+    "referenceGrammarRef": { "type": "string", "minLength": 1 },
+    "brand": {
+      "type": "object",
+      "required": ["fonts", "colors", "typographyScale", "lineBreaking", "spacing", "strokeWeights", "borders", "shadows", "speakerFrames"],
+      "properties": {
+        "fonts": { "type": "array" },
+        "colors": { "type": "object" },
+        "typographyScale": { "type": "object" },
+        "lineBreaking": { "type": "object" },
+        "spacing": { "type": "object" },
+        "strokeWeights": { "type": "object" },
+        "borders": { "type": "object" },
+        "shadows": { "type": "object" },
+        "speakerFrames": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "editorial": { "type": "object" },
+    "selection": {
+      "type": "object",
+      "required": ["rankingPolicyRef", "mode", "criterionOrder", "criterionWeights", "tieBreaker"],
+      "properties": {
+        "rankingPolicyRef": { "type": "string", "minLength": 1 },
+        "mode": { "enum": ["lexicographic", "weighted"] },
+        "criterionOrder": { "type": "array", "items": { "type": "string" } },
+        "criterionWeights": { "type": "object", "additionalProperties": { "type": "number" } },
+        "tieBreaker": { "const": "stable-capability-id" }
+      }
+    },
+    "pacing": { "type": "object" },
+    "capabilities": {
+      "type": "object",
+      "required": ["defaultPreference", "preferred", "discouraged", "disabled", "overrides"],
+      "properties": {
+        "defaultPreference": { "const": "allowed" },
+        "preferred": { "type": "array" },
+        "discouraged": { "type": "array" },
+        "disabled": { "type": "array" },
+        "overrides": { "type": "object" }
+      }
+    },
+    "reuse": { "type": "object" },
+    "policies": {
+      "type": "object",
+      "required": ["hard", "warnings", "objectives"],
+      "properties": {
+        "hard": { "type": "array" },
+        "warnings": { "type": "array" },
+        "objectives": { "type": "array" }
+      }
+    },
+    "speaker": { "type": "object" },
+    "assets": { "type": "object" }
+  }
+}
