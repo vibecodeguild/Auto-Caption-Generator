@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "episodeId", "lockedCutSha256",
+    "captureLayoutCatalogRef", "classificationRef", "sequences"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "episodeId": {"type": "string", "minLength": 1},
+    "lockedCutSha256": {"$ref": "#/$defs/sha"},
+    "captureLayoutCatalogRef": {"$ref": "#/$defs/artifactIdentity"},
+    "classificationRef": {"$ref": "#/$defs/artifactIdentity"},
+    "sequences": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequenceId", "layoutSpans", "protectedRegionSamples", "creatorCorrections"],
+        "properties": {
+          "sequenceId": {"type": "string", "minLength": 1},
+          "layoutSpans": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"$ref": "#/$defs/layoutSpan"}
+          },
+          "protectedRegionSamples": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/protectedRegionSample"}
+          },
+          "creatorCorrections": {"type": "array", "items": {"type": "object"}}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "rect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": {"type": "number", "minimum": 0, "maximum": 1},
+        "y": {"type": "number", "minimum": 0, "maximum": 1},
+        "width": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "height": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+      }
+    },
+    "artifactIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactKind", "artifactId", "version", "sha256"],
+      "properties": {
+        "artifactKind": {"type": "string", "minLength": 1},
+        "artifactId": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha"}
+      }
+    },
+    "layoutSpan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "absoluteStartFrame", "absoluteEndFrameExclusive", "layoutId",
+        "subjectBounds", "protectedMasks", "classificationMethod",
+        "classificationActor", "classificationVersion", "confidence",
+        "evidenceFrames", "evidenceRefs"
+      ],
+      "properties": {
+        "absoluteStartFrame": {"type": "integer", "minimum": 0},
+        "absoluteEndFrameExclusive": {"type": "integer", "minimum": 1},
+        "layoutId": {
+          "enum": [
+            "full-screen-talking", "talking-left", "talking-right",
+            "talking-bottom-left", "talking-top-left",
+            "talking-bottom-right", "talking-top-right",
+            "computer-screen-only"
+          ]
+        },
+        "subjectBounds": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/rect"}
+          ]
+        },
+        "protectedMasks": {"type": "array", "items": {"$ref": "#/$defs/rect"}},
+        "classificationMethod": {"const": "agent-frame-classification"},
+        "classificationActor": {
+          "enum": ["user-visible-codex-task", "codex-subscription-host"]
+        },
+        "classificationVersion": {"type": "string", "minLength": 1},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "evidenceFrames": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "integer", "minimum": 0},
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      }
+    },
+    "protectedRegionSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["absoluteFrame", "protectedMasks", "measurementMethod", "evidenceRef"],
+      "properties": {
+        "absoluteFrame": {"type": "integer", "minimum": 0},
+        "protectedMasks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/rect"}},
+        "measurementMethod": {"enum": ["creator-frame-selection", "admitted-detector"]},
+        "evidenceRef": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "capability-catalog.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "version",
+    "owner",
+    "sourceIdentity",
+    "inventorySummary",
+    "capabilities",
+    "sourceResources",
+    "supportResources",
+    "selectionPolicy",
+    "catalogHash"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "id": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "owner": {"const": "creator-video-production"},
+    "sourceIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hyperframesVersion",
+        "hyperframesCliSha256",
+        "skillPackageVersion",
+        "skillSha256",
+        "rulesIndexSha256",
+        "rulesTreeSha256",
+        "blueprintsIndexSha256",
+        "blueprintsTreeSha256",
+        "transitionsTreeSha256"
+      ],
+      "properties": {
+        "hyperframesVersion": {"type": "string", "minLength": 1},
+        "hyperframesCliSha256": {"$ref": "#/$defs/sha"},
+        "skillPackageVersion": {"type": ["string", "null"]},
+        "skillSha256": {"$ref": "#/$defs/sha"},
+        "rulesIndexSha256": {"$ref": "#/$defs/sha"},
+        "rulesTreeSha256": {"$ref": "#/$defs/sha"},
+        "blueprintsIndexSha256": {"$ref": "#/$defs/sha"},
+        "blueprintsTreeSha256": {"$ref": "#/$defs/sha"},
+        "transitionsTreeSha256": {"$ref": "#/$defs/sha"}
+      }
+    },
+    "inventorySummary": {"type": "object"},
+    "capabilities": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/capability"}
+    },
+    "sourceResources": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/resource"}
+    },
+    "supportResources": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "selectionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nativeWorkflowRoutingEnabled",
+        "automaticRecipeSelectionEnabled",
+        "sourceOnlySelectable",
+        "unknownCapabilityFallbackEnabled",
+        "unknownTransitionFallbackEnabled"
+      ],
+      "properties": {
+        "nativeWorkflowRoutingEnabled": {"const": false},
+        "automaticRecipeSelectionEnabled": {"const": false},
+        "sourceOnlySelectable": {"const": false},
+        "unknownCapabilityFallbackEnabled": {"const": false},
+        "unknownTransitionFallbackEnabled": {"const": false}
+      }
+    },
+    "catalogHash": {"$ref": "#/$defs/sha"}
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "relativePath", "sha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "relativePath": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha"}
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "category",
+        "scope",
+        "source",
+        "inventoryState",
+        "sourceAvailability",
+        "adaptationEligibility",
+        "implementationMaturity",
+        "technicalAdmission",
+        "productionSelection",
+        "channelPreference",
+        "aliases",
+        "requirements",
+        "knownIncompatibilities",
+        "linkedImplementationIds"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "category": {
+          "enum": [
+            "native-source-recipe",
+            "workflow-specific-transition-source",
+            "installed-runtime-primitive",
+            "registry-block-source",
+            "registry-component-snippet",
+            "product-compiled-reusable-component",
+            "project-scoped-compiled-composition"
+          ]
+        },
+        "scope": {
+          "enum": [
+            "atomic-operation",
+            "compiled-capability",
+            "blueprint-macro",
+            "project-composition"
+          ]
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["relativePath", "sha256", "sectionAnchor"],
+          "properties": {
+            "relativePath": {"type": "string", "minLength": 1},
+            "sha256": {"$ref": "#/$defs/sha"},
+            "sectionAnchor": {"type": ["string", "null"]}
+          }
+        },
+        "inventoryState": {"enum": ["inventoried", "catalog-integrity-blocked"]},
+        "sourceAvailability": {
+          "enum": ["source-enabled", "globally-blocked", "deprecated", "superseded"]
+        },
+        "adaptationEligibility": {
+          "enum": ["not-adaptable", "adaptable", "adaptation-authorized"]
+        },
+        "implementationMaturity": {
+          "enum": [
+            "source-only",
+            "native-runtime-probed",
+            "compiled",
+            "technically-proven",
+            "delivery-proven"
+          ]
+        },
+        "technicalAdmission": {
+          "enum": ["unassessed", "project-admitted", "library-admitted", "blocked"]
+        },
+        "productionSelection": {
+          "enum": ["not-selectable", "production-selectable"]
+        },
+        "channelPreference": {"enum": ["preferred", "allowed", "discouraged", "disabled"]},
+        "aliases": {"type": "array", "items": {"type": "string"}},
+        "requirements": {"type": "array", "items": {"type": "string"}},
+        "knownIncompatibilities": {"type": "array", "items": {"type": "string"}},
+        "linkedImplementationIds": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

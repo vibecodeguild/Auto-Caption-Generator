@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "version", "frame", "source", "layouts"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "id": {"const": "creator-obs-capture-layouts"},
+    "version": {"type": "integer", "minimum": 1},
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority", "sourceDocumentSha256", "measurementMethod",
+        "readOnlyLegacyRecovery", "executionAuthority"
+      ],
+      "properties": {
+        "authority": {"const": "creator-approved-capture-facts"},
+        "sourceDocumentSha256": {"$ref": "#/$defs/sha"},
+        "measurementMethod": {"type": "string", "minLength": 1},
+        "readOnlyLegacyRecovery": {"const": true},
+        "executionAuthority": {"const": false}
+      }
+    },
+    "layouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "full-screen-talking", "talking-left", "talking-right",
+        "talking-bottom-left", "talking-top-left",
+        "talking-bottom-right", "talking-top-right",
+        "computer-screen-only"
+      ],
+      "properties": {
+        "full-screen-talking": {"$ref": "#/$defs/layout"},
+        "talking-left": {"$ref": "#/$defs/layout"},
+        "talking-right": {"$ref": "#/$defs/layout"},
+        "talking-bottom-left": {"$ref": "#/$defs/layout"},
+        "talking-top-left": {"$ref": "#/$defs/layout"},
+        "talking-bottom-right": {"$ref": "#/$defs/layout"},
+        "talking-top-right": {"$ref": "#/$defs/layout"},
+        "computer-screen-only": {"$ref": "#/$defs/layout"}
+      }
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "rect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": {"type": "number", "minimum": 0, "maximum": 1},
+        "y": {"type": "number", "minimum": 0, "maximum": 1},
+        "width": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "height": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+      }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["obsScene", "speakerBounds", "origin", "evidence"],
+      "properties": {
+        "obsScene": {"type": "string", "minLength": 1},
+        "speakerBounds": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/rect"}
+          ]
+        },
+        "origin": {"enum": ["obs-geometry", "measured-from-footage"]},
+        "evidence": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

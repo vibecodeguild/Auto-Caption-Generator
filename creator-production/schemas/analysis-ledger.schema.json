@@ -1,0 +1,335 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "episodeId", "lockedCutSha256", "wordTimingSha256", "totalFrames", "propositions", "semanticUnits", "sourceEvents", "observedVisualChanges", "copyEvidence", "intentionalCarrySpans", "coverageSpans", "unresolvedAmbiguities"],
+  "properties": {
+    "schemaVersion": {"type": "integer", "const": 1},
+    "episodeId": {"type": "string", "minLength": 1},
+    "lockedCutSha256": {"$ref": "#/$defs/sha"},
+    "wordTimingSha256": {"$ref": "#/$defs/sha"},
+    "totalFrames": {"type": "integer", "minimum": 1},
+    "propositions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/proposition"}
+    },
+    "semanticUnits": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/semanticUnit"}
+    },
+    "sourceEvents": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sourceEvent"}
+    },
+    "observedVisualChanges": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/observedVisualChange"}
+    },
+    "copyEvidence": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/copyEvidence"}
+    },
+    "intentionalCarrySpans": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/intentionalCarrySpan"}
+    },
+    "coverageSpans": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "absoluteStartFrame", "absoluteEndFrameExclusive", "evidenceRefs"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "absoluteStartFrame": {"type": "integer", "minimum": 0},
+          "absoluteEndFrameExclusive": {"type": "integer", "minimum": 1},
+          "evidenceRefs": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "unresolvedAmbiguities": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/unresolvedAmbiguity"}
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+    "geometryObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "kind", "absoluteFrame", "x", "y", "width", "height",
+        "measurementMethod", "confidence", "evidenceRef",
+        "authoritativeForProtection"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {
+          "type": "string",
+          "enum": ["subject", "face", "gesture", "screen", "other"]
+        },
+        "absoluteFrame": {"type": "integer", "minimum": 0},
+        "x": {"type": "number", "minimum": 0, "maximum": 1},
+        "y": {"type": "number", "minimum": 0, "maximum": 1},
+        "width": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "height": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "measurementMethod": {
+          "type": "string",
+          "enum": ["frame-inspection", "admitted-detector", "creator-frame-selection"]
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "evidenceRef": {"type": "string", "minLength": 1},
+        "authoritativeForProtection": {"type": "boolean", "const": false}
+      }
+    },
+    "proposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "startWordId", "endWordId", "absoluteStartFrame",
+        "absoluteEndFrameExclusive", "text", "semanticBeatKind",
+        "relationshipToPrevious", "relationshipToNext", "evidenceRefs",
+        "assetNeeds", "uncertainty", "unresolvedReasons"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "startWordId": {"type": "string", "minLength": 1},
+        "endWordId": {"type": "string", "minLength": 1},
+        "absoluteStartFrame": {"type": "integer", "minimum": 0},
+        "absoluteEndFrameExclusive": {"type": "integer", "minimum": 1},
+        "text": {"type": "string", "minLength": 1},
+        "semanticBeatKind": {"type": "string", "minLength": 1},
+        "relationshipToPrevious": {"type": ["string", "null"]},
+        "relationshipToNext": {"type": ["string", "null"]},
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "assetNeeds": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "uncertainty": {"type": "number", "minimum": 0, "maximum": 1},
+        "unresolvedReasons": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "semanticUnit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "startPropositionId", "endPropositionId", "summary",
+        "relationshipToPrevious", "sourceEventRefs", "evidenceRefs",
+        "unresolvedReasons"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "startPropositionId": {"$ref": "#/$defs/id"},
+        "endPropositionId": {"$ref": "#/$defs/id"},
+        "summary": {"type": "string", "minLength": 1},
+        "relationshipToPrevious": {
+          "enum": [
+            "runtime-start",
+            "continuation",
+            "elaboration",
+            "new-step",
+            "new-idea",
+            "new-example",
+            "new-section",
+            "contrast",
+            "cause",
+            "result",
+            "callback",
+            "payoff",
+            "transition",
+            "conclusion"
+          ]
+        },
+        "sourceEventRefs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/id"}
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "unresolvedReasons": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "sourceEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "absoluteStartFrame", "absoluteEndFrameExclusive",
+        "eventType", "description", "evidenceRefs", "geometryObservations",
+        "candidateProtectedRegionObservationIds", "confidence",
+        "creatorConfirmationRequired", "unresolvedReasons"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "absoluteStartFrame": {"type": "integer", "minimum": 0},
+        "absoluteEndFrameExclusive": {"type": "integer", "minimum": 1},
+        "eventType": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "geometryObservations": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/geometryObservation"}
+        },
+        "candidateProtectedRegionObservationIds": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/id"}
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "creatorConfirmationRequired": {"type": "boolean"},
+        "unresolvedReasons": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "observedVisualChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "absoluteFrame", "kind", "sourceEventId", "description",
+        "evidenceRefs", "confidence"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "absoluteFrame": {"type": "integer", "minimum": 0},
+        "kind": {
+          "enum": [
+            "ui-state-change",
+            "demonstration-action",
+            "gesture",
+            "reaction",
+            "joke-payoff",
+            "speaker-reframe",
+            "source-composition-change"
+          ]
+        },
+        "sourceEventId": {"$ref": "#/$defs/id"},
+        "description": {"type": "string", "minLength": 1},
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "copyEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "observedText", "propositionId", "sourceEventId",
+        "absoluteFrame", "observationMethod", "evidenceRefs", "confidence"
+      ],
+      "properties": {
+        "kind": {
+          "enum": ["exact-ui-label", "verbatim-command"]
+        },
+        "observedText": {"type": "string", "minLength": 1},
+        "propositionId": {"$ref": "#/$defs/id"},
+        "sourceEventId": {"type": ["string", "null"]},
+        "absoluteFrame": {"type": ["integer", "null"], "minimum": 0},
+        "observationMethod": {
+          "enum": ["frame-inspection", "admitted-ocr", "transcript-verification"]
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"kind": {"const": "exact-ui-label"}},
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "sourceEventId": {"$ref": "#/$defs/id"},
+              "absoluteFrame": {"type": "integer", "minimum": 0},
+              "observationMethod": {
+                "enum": ["frame-inspection", "admitted-ocr"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"kind": {"const": "verbatim-command"}},
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "sourceEventId": {"type": "null"},
+              "absoluteFrame": {"type": "null"},
+              "observationMethod": {"const": "transcript-verification"}
+            }
+          }
+        }
+      ]
+    },
+    "intentionalCarrySpan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "absoluteStartFrame", "absoluteEndFrameExclusive", "kind",
+        "sourceEventId", "rationale", "evidenceRefs", "confidence"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "absoluteStartFrame": {"type": "integer", "minimum": 0},
+        "absoluteEndFrameExclusive": {"type": "integer", "minimum": 1},
+        "kind": {"enum": ["performance", "demonstration"]},
+        "sourceEventId": {"$ref": "#/$defs/id"},
+        "rationale": {"type": "string", "minLength": 1},
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "unresolvedAmbiguity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "scope", "description", "consequence", "evidenceRefs",
+        "requiresCreatorInput"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "scope": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "consequence": {"type": "string", "minLength": 1},
+        "evidenceRefs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "requiresCreatorInput": {"type": "boolean"}
+      }
+    }
+  }
+}

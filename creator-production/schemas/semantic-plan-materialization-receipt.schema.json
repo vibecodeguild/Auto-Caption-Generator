@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "jobId",
+    "decisionHash",
+    "spanReceiptHashes",
+    "semanticManifestHash",
+    "createdAt",
+    "receiptHash"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "jobId": { "$ref": "#/$defs/id" },
+    "decisionHash": { "$ref": "#/$defs/sha" },
+    "spanReceiptHashes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sha" },
+      "uniqueItems": true
+    },
+    "semanticManifestHash": { "$ref": "#/$defs/sha" },
+    "createdAt": { "type": "string", "minLength": 1 },
+    "receiptHash": { "$ref": "#/$defs/sha" }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

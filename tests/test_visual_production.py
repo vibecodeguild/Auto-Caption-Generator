@@ -373,8 +373,8 @@ def test_approved_reuse_variants_render_frozen_media_and_can_hide_step_number() 
             "parameters": {
                 "logoAssetId": "skool-logo",
                 "logoText": "SKOOL",
-                "action": "JOIN THE VIBE CODE GUILD",
-                "destination": "SKOOL.COM/VIBECODEGUILD",
+                "action": "JOIN THE CREATOR COMMUNITY",
+                "destination": "COMMUNITY.EXAMPLE/JOIN",
                 "side": "left",
             },
         },

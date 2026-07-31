@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "version", "creatorPolicies", "review", "render", "privacy", "assetPolicy"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "version": {"type": "integer", "minimum": 1},
+    "creatorPolicies": {
+      "type": "object",
+      "required": ["lockedTranscriptRequired", "timingMutationAllowed", "nativeWorkflowDiscoveryAllowed", "unknownFallbackAllowed", "privateProjectStorageRequired"],
+      "properties": {
+        "lockedTranscriptRequired": {"const": true},
+        "timingMutationAllowed": {"const": false},
+        "nativeWorkflowDiscoveryAllowed": {"const": false},
+        "unknownFallbackAllowed": {"const": false},
+        "privateProjectStorageRequired": {"const": true}
+      }
+    },
+    "review": {"type": "object"},
+    "render": {"type": "object"},
+    "privacy": {"type": "object"},
+    "assetPolicy": {"type": "object"}
+  }
+}

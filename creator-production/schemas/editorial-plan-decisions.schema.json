@@ -1,0 +1,408 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "jobId",
+    "episodeId",
+    "revision",
+    "chapters",
+    "sequences",
+    "unresolvedReasons"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "jobId": { "$ref": "#/$defs/id" },
+    "episodeId": { "$ref": "#/$defs/id" },
+    "revision": { "const": 1 },
+    "chapters": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/chapter" }
+    },
+    "sequences": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/sequence" }
+    },
+    "unresolvedReasons": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "anchor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["spanRef", "edge"],
+          "properties": {
+            "spanRef": { "$ref": "#/$defs/id" },
+            "edge": { "enum": ["start", "end"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sequenceEdge"],
+          "properties": {
+            "sequenceEdge": { "enum": ["start", "end"] }
+          }
+        }
+      ]
+    },
+    "chapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "editorialSectionId",
+        "title",
+        "completionRationale",
+        "startBoundaryRef"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "editorialSectionId": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "completionRationale": { "type": "string", "minLength": 1 },
+        "startBoundaryRef": { "$ref": "#/$defs/id" }
+      }
+    },
+    "sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "chapterId",
+        "startBoundaryRef",
+        "boundaryCauseRef",
+        "primaryPropositionId",
+        "conceptId",
+        "seriesId",
+        "callbackTo",
+        "semanticBeatKind",
+        "editorialJob",
+        "semanticForm",
+        "presentationRole",
+        "narrativeStateRole",
+        "editorialDirective",
+        "candidateCanvasTopologies",
+        "capabilityAssessments",
+        "assetRequirements",
+        "semanticEvidenceRefs",
+        "unresolvedReasons",
+        "transitionToNextIntent"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "chapterId": { "$ref": "#/$defs/id" },
+        "startBoundaryRef": { "$ref": "#/$defs/id" },
+        "boundaryCauseRef": { "$ref": "#/$defs/id" },
+        "primaryPropositionId": { "$ref": "#/$defs/id" },
+        "conceptId": { "$ref": "#/$defs/id" },
+        "seriesId": { "type": ["string", "null"] },
+        "callbackTo": { "type": ["string", "null"] },
+        "semanticBeatKind": { "type": "string", "minLength": 1 },
+        "editorialJob": { "type": "string", "minLength": 1 },
+        "semanticForm": { "type": "string", "minLength": 1 },
+        "presentationRole": {
+          "enum": ["source-led", "authored", "hybrid"]
+        },
+        "narrativeStateRole": {
+          "enum": ["establish", "develop", "payoff", "transition"]
+        },
+        "editorialDirective": { "$ref": "#/$defs/editorialDirective" },
+        "candidateCanvasTopologies": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "capabilityAssessments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/capabilityAssessment" }
+        },
+        "assetRequirements": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/assetRequirement" }
+        },
+        "semanticEvidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "unresolvedReasons": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "transitionToNextIntent": { "type": ["string", "null"] }
+      }
+    },
+    "editorialDirective": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "visualPurpose",
+        "sourceStrategy",
+        "spokenBeats",
+        "meaningfulChanges",
+        "intentionalVisualCarry",
+        "copyReview"
+      ],
+      "properties": {
+        "visualPurpose": { "type": "string", "minLength": 1 },
+        "sourceStrategy": {
+          "enum": [
+            "authored-explanation",
+            "hybrid-emphasis",
+            "screen-share-demo",
+            "protected-performance",
+            "intentional-clean-source"
+          ]
+        },
+        "spokenBeats": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/spokenBeat" }
+        },
+        "meaningfulChanges": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/meaningfulChange" }
+        },
+        "intentionalVisualCarry": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/intentionalVisualCarry" }
+          ]
+        },
+        "copyReview": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "spellingPassed",
+            "punctuationPassed",
+            "grammarPassed"
+          ],
+          "properties": {
+            "spellingPassed": { "const": true },
+            "punctuationPassed": { "const": true },
+            "grammarPassed": { "const": true }
+          }
+        }
+      }
+    },
+    "spokenBeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "spanRef",
+        "onScreenText",
+        "copyMode",
+        "editorialPurpose",
+        "copyEvidenceRef",
+        "revealAt",
+        "fullyVisibleAt",
+        "exitAt",
+        "behavior"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "spanRef": { "$ref": "#/$defs/id" },
+        "onScreenText": { "type": ["string", "null"] },
+        "copyMode": {
+          "enum": [
+            "concise-editorial-label",
+            "verbatim-command",
+            "exact-ui-label",
+            "none"
+          ]
+        },
+        "editorialPurpose": { "type": "string", "minLength": 1 },
+        "copyEvidenceRef": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^copy-evidence:[0-9a-f]{64}$" }
+          ]
+        },
+        "revealAt": { "$ref": "#/$defs/anchor" },
+        "fullyVisibleAt": { "$ref": "#/$defs/anchor" },
+        "exitAt": { "$ref": "#/$defs/anchor" },
+        "behavior": { "enum": ["single", "accumulate", "replace"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "copyMode": {
+                "enum": ["verbatim-command", "exact-ui-label"]
+              }
+            },
+            "required": ["copyMode"]
+          },
+          "then": {
+            "properties": {
+              "copyEvidenceRef": {
+                "type": "string",
+                "pattern": "^copy-evidence:[0-9a-f]{64}$"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "copyEvidenceRef": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "meaningfulChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "at", "kind", "description", "spokenBeatId", "sourceVisualChangeRef"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "at": {
+          "oneOf": [
+            { "$ref": "#/$defs/anchor" },
+            { "type": "null" }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "treatment-enter",
+            "treatment-exit",
+            "semantic-reveal",
+            "ui-callout",
+            "screen-highlight",
+            "speaker-reframe",
+            "data-change",
+            "diagram-change",
+            "celebration",
+            "supporting-visual",
+            "performance-beat",
+            "demonstration-beat"
+          ]
+        },
+        "description": { "type": "string", "minLength": 1 },
+        "spokenBeatId": { "type": ["string", "null"] },
+        "sourceVisualChangeRef": { "type": ["string", "null"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": ["performance-beat", "demonstration-beat"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "at": { "type": "null" },
+              "spokenBeatId": { "type": "null" },
+              "sourceVisualChangeRef": { "$ref": "#/$defs/id" }
+            }
+          },
+          "else": {
+            "properties": {
+              "at": { "$ref": "#/$defs/anchor" },
+              "spokenBeatId": { "$ref": "#/$defs/id" },
+              "sourceVisualChangeRef": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "intentionalVisualCarry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["carrySpanRef", "kind", "rationale"],
+      "properties": {
+        "carrySpanRef": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["performance", "demonstration"] },
+        "rationale": { "type": "string", "minLength": 1 }
+      }
+    },
+    "capabilityAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capabilityId",
+        "compatibleRecipeRole",
+        "compatibilityRationale",
+        "editorialExclusions",
+        "criterionValues",
+        "assumptions"
+      ],
+      "properties": {
+        "capabilityId": { "$ref": "#/$defs/id" },
+        "compatibleRecipeRole": { "type": "string", "minLength": 1 },
+        "compatibilityRationale": { "type": "string", "minLength": 1 },
+        "editorialExclusions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "semanticallyIncompatible",
+            "assetUnavailable",
+            "speakerUnsafe",
+            "contentCapacityFailure",
+            "timingInvalid"
+          ],
+          "properties": {
+            "semanticallyIncompatible": { "type": "boolean" },
+            "assetUnavailable": { "type": "boolean" },
+            "speakerUnsafe": { "type": "boolean" },
+            "contentCapacityFailure": { "type": "boolean" },
+            "timingInvalid": { "type": "boolean" }
+          }
+        },
+        "criterionValues": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "semantic-fitness",
+            "whole-video-contrast",
+            "creator-preference"
+          ],
+          "properties": {
+            "semantic-fitness": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "whole-video-contrast": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "creator-preference": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "assumptions": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "assetRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "semanticJob", "required"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "semanticJob": { "type": "string", "minLength": 1 },
+        "required": { "const": true }
+      }
+    }
+  }
+}
