@@ -21,8 +21,12 @@ def execute_materialized_capability(
     adaptation_id: str,
     implementation_source_hash: str,
     context: dict,
+    catalog: dict | None = None,
+    capability_id: str | None = None,
 ) -> dict:
     """Execute admitted capability bytes for materialization using UTF-8 JSON."""
+
+    from app.core.creator_production_menu import resolve_library_implementation_path
 
     root = require_private_root(private_root)
     implementation = (
@@ -34,7 +38,15 @@ def execute_materialized_capability(
         / "implementation.mjs"
     )
     if not implementation.is_file():
-        raise ValueError("Admitted capability implementation bytes are unavailable.")
+        library = resolve_library_implementation_path(
+            catalog=catalog,
+            capability_id=capability_id,
+            adaptation_id=adaptation_id,
+            implementation_source_hash=implementation_source_hash,
+        )
+        if library is None or not library.is_file():
+            raise ValueError("Admitted capability implementation bytes are unavailable.")
+        implementation = library
     node = shutil.which("node")
     if not node:
         raise RuntimeError("Node.js is required to execute admitted capability source.")

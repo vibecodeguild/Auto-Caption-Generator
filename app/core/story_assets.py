@@ -561,7 +561,7 @@ def _renders_something(suggestion: dict) -> bool:
     A clean-speaker or protected-footage scene with no treatment renders bare source footage.
     Whatever its meaningfulChanges say, nothing happens on screen during it.
     """
-    if suggestion.get("moduleId") in (MODULE_IDS - {"source-footage-hold"}):
+    if suggestion.get("moduleId") in MODULE_IDS:
         return True
     if suggestion.get("recipeId"):
         return True
@@ -1762,9 +1762,14 @@ def build_nonmedia_suggestion(plan_path: Path, suggestion_id: str) -> tuple[dict
         if evidence.get("selectedTreatmentId") != (suggestion.get("decision") or {}).get("selectedTreatmentId"):
             raise ValueError("This graphic's approval evidence no longer matches its approved treatment.")
     plan = load_visual_plan(plan_path)
-    module_id = suggestion.get("moduleId") if category == "graphic" else "source-footage-hold"
+    if category != "graphic":
+        raise ValueError(
+            "Only graphic suggestions build into module cues. "
+            "Clean source is no assignment; protected ranges use plan.protectedFootage, not a hold engine."
+        )
+    module_id = suggestion.get("moduleId")
     registered_modules = {item["id"] for item in load_visual_catalog()["modules"]}
-    if category == "graphic" and suggestion.get("recipeId") and not module_id:
+    if suggestion.get("recipeId") and not module_id:
         raise ValueError(
             "This approved recipe still needs a registered HyperFrames composition or frozen overlay asset; "
             "it cannot be replaced with a generic module."
@@ -1778,45 +1783,38 @@ def build_nonmedia_suggestion(plan_path: Path, suggestion_id: str) -> tuple[dict
         "opacity": 1, "transitionIn": "editorial-snap", "transitionOut": "fade",
         **(suggestion.get("moduleParameters") or {}),
     }
-    if module_id != "source-footage-hold":
-        allowed = MODULE_PARAMETER_KEYS.get(module_id, set())
-        if "text" in allowed:
-            module_parameters.setdefault(
-                "text",
-                suggestion.get("proposedText") or suggestion.get("editorialPurpose") or "EDIT THIS MESSAGE",
-            )
-        if "kicker" in allowed:
-            module_parameters.setdefault("kicker", "VCG / VISUAL")
-        module_parameters.update({
-            key: suggestion[key]
-            for key in (
-                "speakerSafety",
-                "visualFamily",
-                "candidateTreatmentIds",
-                "selectionRationale",
-                "meaningfulChanges",
-                "approvalEvidence",
-            )
-            if suggestion.get(key) is not None
-        })
-        module_parameters["planningSuggestionId"] = suggestion_id
-        module_parameters["approvedTreatmentId"] = (
-            (suggestion.get("decision") or {}).get("selectedTreatmentId")
-            or suggestion.get("moduleId")
-            or suggestion.get("recipeId")
+    allowed = MODULE_PARAMETER_KEYS.get(module_id, set())
+    if "text" in allowed:
+        module_parameters.setdefault(
+            "text",
+            suggestion.get("proposedText") or suggestion.get("editorialPurpose") or "EDIT THIS MESSAGE",
         )
+    if "kicker" in allowed:
+        module_parameters.setdefault("kicker", "VCG / VISUAL")
+    module_parameters.update({
+        key: suggestion[key]
+        for key in (
+            "speakerSafety",
+            "visualFamily",
+            "candidateTreatmentIds",
+            "selectionRationale",
+            "meaningfulChanges",
+            "approvalEvidence",
+        )
+        if suggestion.get(key) is not None
+    })
+    module_parameters["planningSuggestionId"] = suggestion_id
+    module_parameters["approvedTreatmentId"] = (
+        (suggestion.get("decision") or {}).get("selectedTreatmentId")
+        or suggestion.get("moduleId")
+        or suggestion.get("recipeId")
+    )
     cue = {
         "id": f"cue-{uuid.uuid4().hex[:12]}", "kind": "module", "moduleId": module_id,
         "startSec": float(suggestion["startSec"]), "endSec": float(suggestion["endSec"]),
         "enabled": True, "parameters": module_parameters,
     }
     plan["cues"].append(cue)
-    if module_id == "source-footage-hold":
-        plan.setdefault("protectedFootage", []).append({
-            "id": f"protected-{uuid.uuid4().hex[:10]}", "cueId": cue["id"],
-            "startSec": cue["startSec"], "endSec": cue["endSec"],
-            "reason": suggestion.get("editorialPurpose") or "Protected source-footage moment",
-        })
     save_visual_plan(plan_path, plan)
     suggestion.update({"status": "built", "cueId": cue["id"]})
     save_visual_suggestions(plan_path, data)

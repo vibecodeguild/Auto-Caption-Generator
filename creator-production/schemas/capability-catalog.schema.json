@@ -122,7 +122,8 @@
             "registry-block-source",
             "registry-component-snippet",
             "product-compiled-reusable-component",
-            "project-scoped-compiled-composition"
+            "project-scoped-compiled-composition",
+            "application-seed-treatment"
           ]
         },
         "scope": {

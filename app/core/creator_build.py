@@ -131,8 +131,16 @@ def _validate_implementation_materialization(
                 and item.get("sequenceId") == sequence["id"]
                 and item.get("episodeId") == manifest["episodeId"]
             ]
+            if not admissions and capability.get("technicalAdmission") == "library-admitted":
+                admissions = [
+                    item
+                    for item in capability.get("libraryAdmissions", [])
+                    if item.get("implementationId") == binding.get("implementationId")
+                ]
             if len(admissions) != 1:
-                raise ValueError(f"Sequence {sequence['id']} lacks one exact project admission.")
+                raise ValueError(
+                    f"Sequence {sequence['id']} lacks one exact project or library admission."
+                )
             admission = admissions[0]
             if binding.get("implementationSourceHash") != admission["implementationSourceHash"]:
                 raise ValueError(f"Sequence {sequence['id']} changed implementation source hash.")
@@ -140,6 +148,8 @@ def _validate_implementation_materialization(
                 root,
                 adaptation_id=admission["adaptationId"],
                 implementation_source_hash=admission["implementationSourceHash"],
+                catalog=catalog,
+                capability_id=binding["capabilityId"],
                 context={
                     "parameters": binding.get("parameters", {}),
                     "tokens": tokens,

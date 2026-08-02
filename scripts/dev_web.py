@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -12,6 +13,20 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[1]
 API_URL = "http://127.0.0.1:8731/api/health"
 WEB_URL = "http://127.0.0.1:3000"
+
+
+def _api_wants_reload() -> bool:
+    """Opt-in only. Default is stable API across file saves.
+
+    Set VCG_API_RELOAD=1 to restore uvicorn --reload behavior.
+    """
+
+    return os.environ.get("VCG_API_RELOAD", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 @dataclass
@@ -28,20 +43,22 @@ def main() -> int:
         print(f"[api] already running at {API_URL}")
         processes.append(ManagedProcess("api", None, reused=True))
     else:
-        processes.append(_start_process(
-            "api",
-            [
-                str(ROOT / ".venv" / "Scripts" / "python.exe"),
-                "-m",
-                "uvicorn",
-                "app.web_api:app",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "8731",
-                "--reload",
-            ],
-        ))
+        api_cmd = [
+            str(ROOT / ".venv" / "Scripts" / "python.exe"),
+            "-m",
+            "uvicorn",
+            "app.web_api:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8731",
+        ]
+        if _api_wants_reload():
+            api_cmd.append("--reload")
+            print("[api] reload enabled (VCG_API_RELOAD=1) — server restarts on Python file changes")
+        else:
+            print("[api] stable mode (no --reload) — restart npm run dev after Python API changes")
+        processes.append(_start_process("api", api_cmd))
 
     if _url_responds(WEB_URL):
         print(f"[web] already running at {WEB_URL}")

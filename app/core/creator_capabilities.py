@@ -354,15 +354,32 @@ def direct_capability_source_resource(catalog: dict, capability_id: str) -> dict
     return resources[0]
 
 
-def planning_capability_resource_ids(catalog: dict) -> list[str]:
-    """List every frozen recipe source available for semantic planning."""
+def planning_capability_resource_ids(
+    catalog: dict,
+    channel_profile: dict | None = None,
+) -> list[str]:
+    """List frozen recipe sources available for semantic planning."""
 
-    return list(
-        dict.fromkeys(
-            str(resource["id"])
-            for resource in catalog["sourceResources"]
+    from app.core.creator_production_menu import planning_capability_ids_for_profile
+
+    planning_ids = set(planning_capability_ids_for_profile(catalog, channel_profile))
+    if not planning_ids:
+        return list(
+            dict.fromkeys(str(resource["id"]) for resource in catalog["sourceResources"])
         )
-    )
+    resource_ids: list[str] = []
+    for capability in catalog["capabilities"]:
+        if capability["id"] not in planning_ids:
+            continue
+        for resource_id in capability.get("requiredResourceIds") or []:
+            resource_ids.append(str(resource_id))
+        # Native recipes still need their direct source resource.
+        relative = (capability.get("source") or {}).get("relativePath")
+        digest = (capability.get("source") or {}).get("sha256")
+        for resource in catalog["sourceResources"]:
+            if resource.get("relativePath") == relative and resource.get("sha256") == digest:
+                resource_ids.append(str(resource["id"]))
+    return list(dict.fromkeys(resource_ids))
 
 
 def _transition_sources(skill_root: Path, cli_path: Path) -> tuple[list[dict], list[dict], dict]:
@@ -513,6 +530,8 @@ def inventory_hyperframes_capabilities(
 ) -> dict:
     """Inventory pinned native source without granting it Production authority."""
 
+    from app.core.creator_production_menu import scrub_retired_catalog_rows
+
     skill_root = skill_root.expanduser().resolve()
     cli_path = hyperframes_cli_path.expanduser().resolve()
     if not skill_root.is_dir():
@@ -584,7 +603,10 @@ def inventory_hyperframes_capabilities(
             "unknownTransitionFallbackEnabled": False,
         },
     }
-    catalog["catalogHash"] = canonical_hash(catalog)
+    scrub_retired_catalog_rows(catalog)
+    catalog["catalogHash"] = canonical_hash(
+        {key: value for key, value in catalog.items() if key != "catalogHash"}
+    )
     validate_artifact("capability-catalog", catalog)
     return catalog
 

@@ -692,12 +692,7 @@ export type VisualCueParameters = {
   startLabel?: string;
   targetLabel?: string;
   nodes?: string[];
-  leftTitle?: string;
-  rightTitle?: string;
-  leftItems?: string[];
-  rightItems?: string[];
-  leftColor?: string;
-  rightColor?: string;
+
   accentColor?: string;
   side?: "left" | "right";
   panelWidth?: number;
@@ -762,7 +757,7 @@ export type VisualSemanticItem = {
 export type VisualCue = {
   id: string;
   kind: "module" | "asset" | "composition";
-  moduleId?: "punchline-reveal" | "source-footage-hold" | "speaker-side-panel" | "progress-scale" | "dependency-stack" | "dual-comparison";
+  moduleId?: "punchline-reveal" | "speaker-side-panel" | "progress-scale" | "dependency-stack";
   assetId?: string;
   compositionId?: string;
   sceneId?: string;
@@ -1182,6 +1177,78 @@ export function getVisualPlanPrompt() {
   return request<{ prompt: string }>("/api/video-project/visual-prompt");
 }
 
+export type MasterbeaterBeat = {
+  id: string;
+  beatType: string;
+  /** Editorial label or paraphrase (optional). */
+  span?: string;
+  label?: string;
+  rationale: string;
+  /** Exact transcript words for the beat. */
+  wordsText?: string;
+  startWordId?: string;
+  endWordId?: string;
+  wordIds?: string[];
+  /** Canonical timing for later graphic work. */
+  startFrame?: number;
+  endFrame?: number;
+  endFrameExclusive?: number;
+  /** Informational only. */
+  startSec?: number;
+  endSec?: number;
+};
+
+export type MasterbeaterResult = {
+  agent?: string;
+  schemaVersion?: number;
+  mode?: string;
+  modeInferred?: boolean;
+  timingAuthority?: string;
+  fps?: number;
+  beatCount?: number;
+  beats?: MasterbeaterBeat[];
+  gaps?: string[];
+  notes?: string;
+  outputPath?: string;
+  ok?: boolean;
+  source?: {
+    projectRoot?: string;
+    transcript?: string;
+    approxDurationSec?: number;
+    wordCount?: number;
+  };
+};
+
+export type VisualPackageStatus = {
+  ok: boolean;
+  projectRoot: string;
+  transcriptPath: string;
+  transcriptExists: boolean;
+  outputPath: string;
+  outputExists: boolean;
+  beatCount: number;
+  result: MasterbeaterResult | null;
+  reviewVideoPath?: string;
+  reviewVideoExists?: boolean;
+  reviewVideoKind?: string;
+  fps?: number;
+};
+
+export function getVisualPackageStatus() {
+  return request<VisualPackageStatus>("/api/visual-package/status");
+}
+
+export function runMasterbeater() {
+  return request<MasterbeaterResult>("/api/visual-package/masterbeater/run", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function visualPackageSourceVideoUrl() {
+  return `${API_BASE}/api/visual-package/source-video`;
+}
+
 export function addVideoProjectClips() {
   return request<VideoProjectOpenResponse>("/api/video-project/clips/add-dialog", { method: "POST", body: "{}" });
 }
@@ -1575,6 +1642,394 @@ export function getActiveVisualRenderJob() {
 
 export function visualRenderVideoUrl(jobId: string) {
   return `${API_BASE}/api/visual/render/jobs/${encodeURIComponent(jobId)}/video`;
+}
+
+export type UsageStatus = "candidate" | "golden";
+
+export const GRAPHICS_LIBRARY_LAYOUT_IDS = [
+  "full-screen-talking",
+  "talking-left",
+  "talking-right",
+  "talking-bottom-left",
+  "talking-bottom-right",
+  "talking-top-left",
+  "talking-top-right",
+  "computer-screen-only",
+] as const;
+
+export type GraphicsLibraryLayoutId = (typeof GRAPHICS_LIBRARY_LAYOUT_IDS)[number];
+
+/** Closed VCG beat universe — same ids as Masterbeater / beat-universe.md */
+export const GRAPHICS_LIBRARY_BEAT_TYPES = [
+  "hook",
+  "setup",
+  "punchline",
+  "aftershock",
+  "callback",
+  "proof",
+  "context",
+  "cta",
+  "example",
+  "prompt",
+  "list",
+  "structure",
+  "ui",
+] as const;
+
+export type GraphicsLibraryBeatType = (typeof GRAPHICS_LIBRARY_BEAT_TYPES)[number];
+
+/**
+ * Short job descriptions from the approved VCG beat universe
+ * (docs/vcg-graphics-process/beat-universe.md). Used in Graphics Library help UI.
+ */
+export const GRAPHICS_LIBRARY_BEAT_TYPE_GUIDE: Record<
+  GraphicsLibraryBeatType,
+  { job: string; howToSpot: string }
+> = {
+  aftershock: {
+    job: "Immediate secondary punches after the main punchline.",
+    howToSpot: "Rapid follow-ups on the same bit, no new premise, right after the main land.",
+  },
+  callback: {
+    job: "Return to earlier material later.",
+    howToSpot: "Explicit reference to an earlier joke, proof, hook, or line.",
+  },
+  context: {
+    job: "Background, definition, or stakes — with no open loop.",
+    howToSpot: "Why it matters / what it is, without teasing unfinished payoff.",
+  },
+  cta: {
+    job: "Drive a specific viewer action or destination.",
+    howToSpot: "Subscribe, follow, link, next video, community.",
+  },
+  example: {
+    job: "Numbered or named worked case.",
+    howToSpot: "“Example 1…”, “First way…”, concrete case intro.",
+  },
+  hook: {
+    job: "Open a curiosity gap the viewer must keep watching to close.",
+    howToSpot: "Bold promise, question, or mid-video open loop without full payoff yet.",
+  },
+  list: {
+    job: "Multi-item sequence meant as sequential visual rows.",
+    howToSpot: "“Three things…”, numbered items that each deserve a moment.",
+  },
+  proof: {
+    job: "Hard fact, metric, or credential hit.",
+    howToSpot: "Dollars, percentages, ranks, time saved, named result.",
+  },
+  prompt: {
+    job: "AI prompt, command, or short code gist.",
+    howToSpot: "“Use this prompt…”, recited syntax, command language.",
+  },
+  punchline: {
+    job: "Main land / reinterpretation that pays off now.",
+    howToSpot: "Joke payoff or sharp thesis that resolves the setup.",
+  },
+  setup: {
+    job: "Baseline assumption before a twist.",
+    howToSpot: "“Normal world,” wrong expectation, calm premise before the land.",
+  },
+  structure: {
+    job: "System view: process, stack, pathway, or tradeoff.",
+    howToSpot: "Pipeline, X vs Y, ordered model — not a flat tip list.",
+  },
+  ui: {
+    job: "Point at on-screen software.",
+    howToSpot: "“Click here…”, “this panel…”, named UI during screen share.",
+  },
+};
+
+/** Beat type ids sorted A→Z for UI lists and help. */
+export function graphicsLibraryBeatTypesAlphabetical(): GraphicsLibraryBeatType[] {
+  return [...GRAPHICS_LIBRARY_BEAT_TYPES].sort((a, b) => a.localeCompare(b));
+}
+
+/** Graphics Library usage (when/where contract). Has-a engineId. */
+export type GraphicsLibraryUsage = {
+  id: string;
+  displayName: string;
+  status: UsageStatus;
+  engineId: string;
+  engineInterface?: string[];
+  allowedLayouts?: string[];
+  beatTypes?: GraphicsLibraryBeatType[] | string[];
+  sample?: {
+    relativePath?: string | null;
+    posterRelativePath?: string | null;
+    durationSec?: number | null;
+    hasAudio?: boolean;
+    source?: string;
+    layoutId?: string | null;
+    renderedAt?: string | null;
+  } | null;
+  createdAt: string;
+  updatedAt: string;
+  hasSample?: boolean;
+  hasPoster?: boolean;
+  sampleUrl?: string | null;
+  posterUrl?: string | null;
+};
+
+export type GraphicsLibraryProductionSet = {
+  root: string;
+  exists: boolean;
+  policy: string;
+  allowedStatuses: string[];
+  usages: Array<{
+    id: string;
+    displayName: string;
+    status: UsageStatus;
+    engineId: string;
+    allowedLayouts: string[];
+    beatTypes: string[];
+  }>;
+  ids: string[];
+  count: number;
+  empty: boolean;
+  emptyReason?: string | null;
+  message: string;
+};
+
+export type GraphicsLibrarySummary = {
+  root: string;
+  exists: boolean;
+  rootLabel?: string;
+  updatedAt?: string;
+  entryCount: number;
+  statusCounts: Record<string, number>;
+  withSample: number;
+  settings?: Record<string, unknown>;
+  layoutClips?: {
+    root: string;
+    present: string[];
+    missing: string[];
+    complete: boolean;
+    clips: Array<{
+      layoutId: string;
+      relativePath: string;
+      present: boolean;
+      path?: string;
+      bytes?: number;
+    }>;
+  };
+  productionSet?: {
+    policy: string;
+    count: number;
+    ids: string[];
+    empty: boolean;
+    emptyReason?: string | null;
+    message: string;
+  };
+  entries: GraphicsLibraryUsage[];
+  ensureReport?: { created: number; total: number; root: string };
+  importReport?: { imported: number; skippedUnbuildable: number; total: number; root: string };
+};
+
+const GRAPHICS_LIBRARY_API = "/api/graphics-library";
+
+export function getGraphicsLibrary() {
+  return request<GraphicsLibrarySummary>(GRAPHICS_LIBRARY_API);
+}
+
+export type GraphicsLibraryMetricBucket = {
+  total: number;
+  golden: number;
+  candidate: number;
+};
+
+export type GraphicsLibraryMetricRow = GraphicsLibraryMetricBucket & {
+  id: string;
+};
+
+export type GraphicsLibraryMetrics = {
+  root: string;
+  exists: boolean;
+  entryCount: number;
+  byBeatType: GraphicsLibraryMetricRow[];
+  byLayout: GraphicsLibraryMetricRow[];
+  untaggedBeatTypes: GraphicsLibraryMetricBucket;
+  untaggedLayouts: GraphicsLibraryMetricBucket;
+};
+
+export function getGraphicsLibraryMetrics() {
+  return request<GraphicsLibraryMetrics>(`${GRAPHICS_LIBRARY_API}/metrics`);
+}
+
+export function getGraphicsLibraryProductionSet(policy: "golden-only" = "golden-only") {
+  return request<GraphicsLibraryProductionSet>(
+    `${GRAPHICS_LIBRARY_API}/production-set?policy=${encodeURIComponent(policy)}`,
+  );
+}
+
+export function createGraphicsLibrary() {
+  return request<GraphicsLibrarySummary>(`${GRAPHICS_LIBRARY_API}/create`, { method: "POST", body: "{}" });
+}
+
+export function openGraphicsLibraryDialog() {
+  return request<GraphicsLibrarySummary>(`${GRAPHICS_LIBRARY_API}/open-dialog`, { method: "POST", body: "{}" });
+}
+
+/** Ensure candidate usage rows exist for each known engine (never auto-golden). */
+export function ensureGraphicsLibraryEngineUsages() {
+  return request<GraphicsLibrarySummary>(`${GRAPHICS_LIBRARY_API}/ensure-engine-usages`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function importGraphicsLibraryHarvest() {
+  return request<GraphicsLibrarySummary>(`${GRAPHICS_LIBRARY_API}/import-harvest`, { method: "POST", body: "{}" });
+}
+
+export function getGraphicsLibraryUsage(entryId: string) {
+  return request<GraphicsLibraryUsage>(`${GRAPHICS_LIBRARY_API}/usages/${encodeURIComponent(entryId)}`);
+}
+
+export function updateGraphicsLibraryUsage(entryId: string, updates: Partial<GraphicsLibraryUsage>) {
+  return request<GraphicsLibraryUsage>(`${GRAPHICS_LIBRARY_API}/usages/${encodeURIComponent(entryId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ updates }),
+  });
+}
+
+export function graphicsLibrarySampleUrl(entryId: string, cacheKey?: string | null) {
+  const base = `${API_BASE}${GRAPHICS_LIBRARY_API}/usages/${encodeURIComponent(entryId)}/media/sample`;
+  return cacheKey ? `${base}?t=${encodeURIComponent(cacheKey)}` : base;
+}
+
+export function graphicsLibraryPosterUrl(entryId: string, cacheKey?: string | null) {
+  const base = `${API_BASE}${GRAPHICS_LIBRARY_API}/usages/${encodeURIComponent(entryId)}/media/poster`;
+  return cacheKey ? `${base}?t=${encodeURIComponent(cacheKey)}` : base;
+}
+
+/** Cache-bust key so re-rendered posters/samples replace stale browser images. */
+export function graphicsLibraryMediaCacheKey(entry: Pick<GraphicsLibraryUsage, "sample" | "updatedAt">) {
+  return entry.sample?.renderedAt || entry.updatedAt || "";
+}
+
+export function graphicsLibraryUsagePosterSrc(entry: GraphicsLibraryUsage) {
+  const key = graphicsLibraryMediaCacheKey(entry);
+  if (entry.posterUrl) {
+    return `${API_BASE}${entry.posterUrl}${key ? `?t=${encodeURIComponent(key)}` : ""}`;
+  }
+  return graphicsLibraryPosterUrl(entry.id, key);
+}
+
+export function graphicsLibraryUsageSampleSrc(entry: GraphicsLibraryUsage) {
+  const key = graphicsLibraryMediaCacheKey(entry);
+  if (entry.sampleUrl) {
+    return `${API_BASE}${entry.sampleUrl}${key ? `?t=${encodeURIComponent(key)}` : ""}`;
+  }
+  return graphicsLibrarySampleUrl(entry.id, key);
+}
+
+export type GraphicsLibraryRenderProgress = {
+  pct: number;
+  message: string;
+};
+
+/**
+ * Render (or re-render) a usage sample. Streams NDJSON progress from the API.
+ * `onProgress` receives live status; resolves with the updated usage when done.
+ */
+export async function renderGraphicsLibrarySample(
+  entryId: string,
+  force = false,
+  quality: "draft" | "standard" | "high" = "draft",
+  layoutId?: string | null,
+  onProgress?: (progress: GraphicsLibraryRenderProgress) => void,
+): Promise<GraphicsLibraryUsage> {
+  const response = await fetch(
+    `${API_BASE}${GRAPHICS_LIBRARY_API}/usages/${encodeURIComponent(entryId)}/render-sample`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force, quality, layoutId: layoutId || undefined }),
+    },
+  );
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      const data = (await response.json()) as { detail?: string };
+      detail = data.detail ?? detail;
+    } catch {
+      // Keep status text.
+    }
+    throw new Error(detail);
+  }
+
+  // Streaming NDJSON path (current API). Fall back to a single JSON body if needed.
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("ndjson") && !contentType.includes("stream")) {
+    return (await response.json()) as GraphicsLibraryUsage;
+  }
+
+  if (!response.body) {
+    throw new Error("Sample render returned an empty body.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalEntry: GraphicsLibraryUsage | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let event: {
+        type?: string;
+        pct?: number;
+        message?: string;
+        entry?: GraphicsLibraryUsage;
+        detail?: string;
+      };
+      try {
+        event = JSON.parse(trimmed) as typeof event;
+      } catch {
+        continue;
+      }
+      if (event.type === "progress") {
+        onProgress?.({
+          pct: typeof event.pct === "number" ? event.pct : 0,
+          message: event.message || "Rendering…",
+        });
+      } else if (event.type === "done" && event.entry) {
+        finalEntry = event.entry;
+      } else if (event.type === "error") {
+        throw new Error(event.detail || "Sample render failed.");
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    try {
+      const event = JSON.parse(buffer.trim()) as {
+        type?: string;
+        entry?: GraphicsLibraryUsage;
+        detail?: string;
+      };
+      if (event.type === "done" && event.entry) finalEntry = event.entry;
+      if (event.type === "error") throw new Error(event.detail || "Sample render failed.");
+    } catch (error) {
+      if (error instanceof Error && error.message !== "Sample render failed." && !finalEntry) {
+        // trailing partial line — ignore if we already have a result
+      } else if (!finalEntry) {
+        throw error;
+      }
+    }
+  }
+
+  if (!finalEntry) {
+    throw new Error("Sample render finished without an entry payload.");
+  }
+  return finalEntry;
 }
 
 export function getCreatorLibrary(query = "") {

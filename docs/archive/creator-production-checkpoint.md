@@ -8,6 +8,24 @@ Updated: 2026-07-29
 projects. The retired Visual Production path remains recovery-only and is not an
 input to Creator Production.
 
+## Daily VCG production menu (vcg@3)
+
+New daily VCG production uses channel profile `vcg@3`:
+
+- planning is limited to **Graphics Library golden usages → engines**
+  (`engine:<id>`), not the full native HyperFrames catalog;
+- the old `creator-production/seed-kit/` draw path has been **deleted**;
+- plan promotion hard-rejects under-dense timelines (~5s visual moments; multi-
+  beat list bullets count individually) and endless carry holds without light
+  emphasis;
+- HyperFrames native recipe browsing remains a later gallery task, not the
+  daily path.
+- Production selectable graphics are Graphics Library **golden** usages
+  (not a Creator Production profile flag).
+
+Existing projects locked to `vcg@2` keep their frozen profile until an explicit
+workflow/profile upgrade.
+
 The former execution-host design is superseded. The application must not start,
 hide, or wait on `codex exec`, `codex debug`, an ephemeral Codex process, or any
 other nested Codex instance. A job now produces an immutable, schema-bound

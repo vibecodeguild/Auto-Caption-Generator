@@ -50,9 +50,11 @@ Copy must pass spelling, punctuation, and grammar review.
 
 Choose semantic intent, presentation role, narrative-state role, candidate
 canvas topologies, and truthful capability assessments. When the resolved
-channel profile requires full-catalog evaluation, assess every planning
-capability exactly once. Do not order or shortlist capabilities; the
-application owns frozen catalog order and deterministic ranking.
+channel profile enables Graphics Library–only planning (or full-catalog
+evaluation), assess every supplied planning capability ID exactly once. Do not
+order or shortlist capabilities; the application owns frozen catalog order and
+deterministic ranking. Prefer light callouts, captions, lists, and UI labels
+that keep the speaker and demonstration mostly visible.
 
 Read the exact frozen source recipe for every treatment before assessing it.
 A capability name, alias, or filename is never semantic evidence. Name the
@@ -66,12 +68,18 @@ Source-led sequences that do not plan an authored graphic must use empty
 graphic, classify it as hybrid and apply the full assessment rules.
 
 For every authored or hybrid sequence, assess the complete supplied planning
-catalog when the channel profile requires full-catalog evaluation. Otherwise,
-follow the profile's candidate requirements without stopping at the first
-match. Record only the editorial exclusions, editorial criterion values, and
-assumptions requested by the output schema. The application supplies global,
-creator, runtime, lifecycle, and implementation-maturity facts, then ranks the
-candidates deterministically. Do not self-declare a winner.
+catalog when the channel profile requires full-catalog evaluation or Graphics
+Library–only planning. Otherwise, follow the profile's candidate requirements
+without stopping at the first match. Record only the editorial exclusions,
+editorial criterion values, and assumptions requested by the output schema. The
+application supplies global, creator, runtime, lifecycle, and
+implementation-maturity facts, then ranks the candidates deterministically. Do
+not self-declare a winner.
+
+Viewer-facing visual moments must land about every five seconds. A multi-beat
+list counts once per revealed bullet. Intentional demo holds are allowed, but
+they cannot blank the whole video and cannot run forever without light
+emphasis. Sparse plans such as one graphic per minute are rejected.
 
 For every sequence, write the complete editorial directive. Graphics must
 explain the spoken idea, protect useful source footage and the speaker, and

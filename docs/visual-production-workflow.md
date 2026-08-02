@@ -473,14 +473,12 @@ to decorate the frame.
 ### Generated modules
 
 Generated graphics are deterministic, parameterized treatments rendered from a
-saved plan. The initial public catalog contains:
-
-- `punchline-reveal`;
-- `source-footage-hold`;
-- `speaker-side-panel`;
-- `progress-scale`;
-- `dependency-stack`;
-- `dual-comparison`, for two colored option columns around a centered square speaker crop.
+saved plan. The live public engine catalog is owned by
+`app/core/visual_production.py` (`MODULE_IDS`) and
+`visual-production/modules/catalog.json` (currently 18 engines: punchline,
+panels, stacks/scales, screen-share motion, tutorial cards, CTAs, robots, etc.).
+There is **no** static `source-footage-hold` engine — empty spans use source-led
+motion or no graphic, not a hold module.
 
 These are the starting vocabulary, not a closed template menu. A private project
 may use a new experimental treatment before it is added to the public catalog.

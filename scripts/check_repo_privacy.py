@@ -37,6 +37,8 @@ PRIVATE_FILENAMES = {
     "transcript.raw.json",
     "transcript.editor.json",
     "transcript.clean.txt",
+    # Populated Graphics Library catalogs are private; only the empty schema may be public.
+    "source-receipt.json",
 }
 TEXT_SUFFIXES = {
     ".css", ".html", ".js", ".json", ".md", ".mjs", ".py", ".ps1",

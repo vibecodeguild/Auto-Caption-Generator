@@ -72,6 +72,28 @@ from app.core.story_assets import (
     update_suggestion,
     update_treatment_metadata,
 )
+from app.core.graphics_library import (
+    INDEX_FILENAME,
+    LEGACY_INDEX_FILENAME,
+    create_graphics_library,
+    default_graphics_library_root,
+    get_entry,
+    get_production_usages,
+    import_layout_clip,
+    import_treatment_harvest,
+    library_metrics as graphics_library_metrics,
+    list_layout_clips,
+    render_entry_sample,
+    resolve_media_path,
+    ensure_candidate_usages_from_engines,
+    summary as graphics_library_summary,
+    update_entry as update_graphics_usage,
+    entry_public_view,
+)
+from app.core.masterbeater import (
+    run_masterbeater_for_video_project,
+    status_for_video_project as masterbeater_status_for_video_project,
+)
 from app.core.transcriber import transcribe_audio
 from app.core.transcript_history import build_edit_analysis, build_generation_metadata, with_initial_repeat_suggestions
 from app.core.transcript_remap import remap_transcript
@@ -626,6 +648,23 @@ class TreatmentUpdateRequest(BaseModel):
     updates: dict
 
 
+class GraphicsLibraryUsageUpdateRequest(BaseModel):
+    updates: dict
+
+
+class GraphicsLibraryRenderRequest(BaseModel):
+    force: bool = False
+    quality: str = "draft"
+    layout_id: str | None = None
+    layoutId: str | None = None  # camelCase from web client
+
+
+class GraphicsLibraryLayoutClipImportRequest(BaseModel):
+    sourcePath: str
+    startSec: float = 0.0
+    durationSec: float | None = None
+
+
 class RecipeSuggestionRequest(BaseModel):
     recipe_id: str
     start_sec: float
@@ -784,6 +823,52 @@ def video_project_visual_prompt() -> dict:
     if active is None:
         raise HTTPException(status_code=404, detail="Create or open a private video project first.")
     return {"prompt": build_visual_plan_prompt(active[0], active[1])}
+
+
+@app.get("/api/visual-package/status")
+def visual_package_status() -> dict:
+    """Status + last Masterbeater result for the open private video project."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        return masterbeater_status_for_video_project(active[0], active[1])
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/visual-package/masterbeater/run")
+def visual_package_run_masterbeater() -> dict:
+    """Run Masterbeater skill against the locked final transcript."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        return run_masterbeater_for_video_project(active[0], active[1])
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/visual-package/source-video")
+def visual_package_source_video(
+    request: Request,
+    range_header: str | None = Header(default=None, alias="Range"),
+) -> Response:
+    """Locked cut (preferred) or working source for Visual Package review."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    path = preferred_stage_source(active[0], active[1])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"Review video not found: {path}")
+    return _range_response(path, range_header)
 
 
 @app.post("/api/video-project/clips/add-dialog")
@@ -2236,6 +2321,217 @@ def use_creator_library_asset(asset_id: str, payload: CreatorAssetUseRequest) ->
         return visual_plan_response(plan_path, plan)
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=f"Could not add Creator Library asset: {exc}") from exc
+
+
+def _set_graphics_library_env(path: Path) -> None:
+    os.environ["VCG_GRAPHICS_LIBRARY"] = str(path)
+
+
+def _graphics_library_index_exists(path: Path) -> bool:
+    return (path / INDEX_FILENAME).is_file() or (path / LEGACY_INDEX_FILENAME).is_file()
+
+
+@app.get("/api/graphics-library")
+def get_graphics_library() -> dict:
+    """Private Graphics Library summary and usage list."""
+    try:
+        return graphics_library_summary()
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not load Graphics Library: {exc}") from exc
+
+
+@app.get("/api/graphics-library/metrics")
+def get_graphics_library_metrics() -> dict:
+    """Usage counts by beat type and allowed layout for Graphics Library charts."""
+    try:
+        return graphics_library_metrics()
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not load Graphics Library metrics: {exc}") from exc
+
+
+@app.get("/api/graphics-library/production-set")
+def get_graphics_library_production_set(policy: str = "golden-only") -> dict:
+    """Golden usages from the Graphics Library (production selectable set)."""
+    try:
+        return get_production_usages(policy=policy)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not load production set: {exc}") from exc
+
+
+@app.post("/api/graphics-library/create")
+def create_graphics_library_api() -> dict:
+    """Create the default private Graphics Library folder and empty index."""
+    try:
+        create_graphics_library()
+        return graphics_library_summary()
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not create Graphics Library: {exc}") from exc
+
+
+@app.post("/api/graphics-library/open-dialog")
+def open_graphics_library_dialog() -> dict:
+    """Choose an existing private Graphics Library folder (Windows folder picker)."""
+    path = _choose_output_folder()
+    if path is None:
+        raise HTTPException(status_code=400, detail="No folder selected.")
+    try:
+        _set_graphics_library_env(path)
+        if not _graphics_library_index_exists(path):
+            create_graphics_library(path)
+        return graphics_library_summary(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not open Graphics Library: {exc}") from exc
+
+
+@app.post("/api/graphics-library/ensure-engine-usages")
+def ensure_graphics_library_engine_usages() -> dict:
+    """Ensure candidate usage rows exist for each known engine (never auto-golden)."""
+    try:
+        report = ensure_candidate_usages_from_engines()
+        snap = graphics_library_summary()
+        snap["ensureReport"] = report
+        return snap
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not ensure Graphics Library engine usages: {exc}",
+        ) from exc
+
+
+@app.post("/api/graphics-library/import-harvest")
+def import_graphics_library_harvest() -> dict:
+    """Import ratings/notes from Creator Library harvest into candidates."""
+    try:
+        report = import_treatment_harvest()
+        snap = graphics_library_summary()
+        snap["importReport"] = report
+        return snap
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not import harvest: {exc}") from exc
+
+
+@app.get("/api/graphics-library/layout-clips")
+def get_graphics_library_layout_clips() -> dict:
+    """List recorded full-frame OBS layout clips available for sample renders."""
+    try:
+        return list_layout_clips()
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not list layout clips: {exc}") from exc
+
+
+@app.post("/api/graphics-library/layout-clips/{layout_id}/import")
+def import_graphics_library_layout_clip(
+    layout_id: str,
+    payload: GraphicsLibraryLayoutClipImportRequest,
+) -> dict:
+    """Import a recorded full-frame OBS layout clip into the private library."""
+    try:
+        return import_layout_clip(
+            layout_id,
+            payload.sourcePath,
+            start_sec=payload.startSec,
+            duration_sec=payload.durationSec,
+        )
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Could not import layout clip: {exc}") from exc
+
+
+@app.get("/api/graphics-library/usages/{entry_id}")
+def get_graphics_library_usage(entry_id: str) -> dict:
+    """Full usage with media availability and engine interface passthrough."""
+    try:
+        root = default_graphics_library_root()
+        return entry_public_view(get_entry(entry_id, root), root)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.patch("/api/graphics-library/usages/{entry_id}")
+def patch_graphics_library_usage(entry_id: str, payload: GraphicsLibraryUsageUpdateRequest) -> dict:
+    """Update status, notes, rating, engineId, beat types, layouts."""
+    try:
+        root = default_graphics_library_root()
+        entry = update_graphics_usage(entry_id, payload.updates, root)
+        return entry_public_view(entry, root)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/graphics-library/usages/{entry_id}/media/{kind}")
+def graphics_library_media(entry_id: str, kind: str, range: str | None = Header(default=None)) -> Response:
+    """Stream a private sample or poster from the Graphics Library root."""
+    if kind not in {"sample", "poster"}:
+        raise HTTPException(status_code=400, detail="Media kind must be sample or poster.")
+    try:
+        path = resolve_media_path(entry_id, kind)
+        response = _range_response(path, range)
+        # Posters/samples rewrite in place on re-render; never let the browser keep a stale frame.
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/graphics-library/usages/{entry_id}/render-sample")
+def render_graphics_library_sample(entry_id: str, payload: GraphicsLibraryRenderRequest) -> StreamingResponse:
+    """Render a short sample; stream NDJSON progress events, then a final entry payload.
+
+    Lines:
+      {"type":"progress","pct":0-100,"message":"..."}
+      {"type":"done","entry":{...}}
+      {"type":"error","detail":"..."}
+    """
+    import queue as queue_mod
+
+    layout = payload.layoutId or payload.layout_id
+    events: queue_mod.Queue[dict] = queue_mod.Queue()
+
+    def on_progress(pct: int, message: str) -> None:
+        events.put({"type": "progress", "pct": int(max(0, min(100, pct))), "message": str(message)})
+
+    def worker() -> None:
+        try:
+            entry = render_entry_sample(
+                entry_id,
+                force=payload.force,
+                quality=payload.quality,
+                layout_id=layout,
+                progress=on_progress,
+            )
+            events.put({"type": "done", "entry": entry})
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+            events.put({"type": "error", "detail": f"Could not render sample: {exc}"})
+        except Exception as exc:  # noqa: BLE001 — surface unexpected render failures to the client
+            events.put({"type": "error", "detail": f"Could not render sample: {exc}"})
+
+    def generate():
+        thread = threading.Thread(target=worker, name=f"gl-sample-{entry_id}", daemon=True)
+        thread.start()
+        while True:
+            try:
+                item = events.get(timeout=0.5)
+            except queue_mod.Empty:
+                if not thread.is_alive():
+                    # Worker died without a terminal event — should not happen.
+                    yield json.dumps({"type": "error", "detail": "Sample render ended without a result."}) + "\n"
+                    break
+                # Keep the connection warm while HyperFrames is working.
+                yield json.dumps({"type": "heartbeat"}) + "\n"
+                continue
+            yield json.dumps(item, ensure_ascii=False) + "\n"
+            if item.get("type") in {"done", "error"}:
+                break
+        thread.join(timeout=1.0)
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/visual/suggestions")

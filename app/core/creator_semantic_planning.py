@@ -9,6 +9,11 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 from app.core.creator_capabilities import direct_capability_source_resource
+from app.core.creator_production_menu import (
+    density_errors,
+    planning_capability_ids_for_profile,
+    vcg_density_enabled,
+)
 from app.core.creator_production import (
     ARTIFACT_SCHEMA_VERSION,
     canonical_hash,
@@ -923,6 +928,46 @@ def _plan_structure_and_evidence_errors(
                         ),
                     }
                 )
+        if vcg_density_enabled(channel_profile):
+            # Spoken-beat changes and multi-beat reveals are the density clock.
+            # Long carries no longer blank an entire teaching video.
+            authored_frames: list[int] = []
+            spoken_word_frames: list[int] = []
+            for decision, sequence in zip(
+                decisions["sequences"], sequence_skeletons
+            ):
+                directive = decision["editorialDirective"]
+                for beat in directive.get("spokenBeats") or []:
+                    # Multi-beat lists: each spoken beat with on-screen copy is a moment.
+                    if str(beat.get("onScreenText") or "").strip():
+                        span = spans.get(beat.get("spanRef"))
+                        if span is not None:
+                            authored_frames.append(int(span["startFrame"]))
+            for span in spans.values():
+                spoken_word_frames.append(int(span["startFrame"]))
+            spoken_word_frames.extend(verified_change_frames)
+            # Pure silence between held labels is not a density failure.
+            speech_aware = []
+            for item in errors:
+                if item.get("code") != "unverified-meaningful-change-cadence":
+                    speech_aware.append(item)
+                    continue
+                left = int(item["absoluteStartFrame"])
+                right = int(item["absoluteEndFrameExclusive"])
+                if any(left < frame < right for frame in spoken_word_frames):
+                    speech_aware.append(item)
+            errors[:] = speech_aware
+            errors.extend(
+                density_errors(
+                    verified_change_frames=verified_change_frames,
+                    verified_carries=verified_carries,
+                    total_frames=total_frames,
+                    fps=fps,
+                    channel_profile=channel_profile,
+                    authored_emphasis_frames=authored_frames,
+                    spoken_word_frames=spoken_word_frames,
+                )
+            )
     return errors
 
 
@@ -1063,12 +1108,7 @@ def materialize_semantic_manifest(
     carry_spans = {
         item["id"]: item for item in analysis["intentionalCarrySpans"]
     }
-    planning_ids = [
-        item["id"]
-        for item in catalog["capabilities"]
-        if item.get("scope") == "blueprint-macro"
-        and item.get("category") != "workflow-specific-transition-source"
-    ]
+    planning_ids = planning_capability_ids_for_profile(catalog, channel_profile)
     disabled = set(channel_profile.get("capabilities", {}).get("disabled", []))
     full_catalog_required = bool(
         channel_profile.get("selection", {}).get(
@@ -1240,7 +1280,9 @@ def materialize_semantic_manifest(
                         "sequenceId": decision["id"],
                         "missing": missing,
                         "unknown": unknown,
-                        "message": "Capability assessments must cover the exact planning catalog.",
+                        "message": (
+                            "Capability assessments must cover the exact planning catalog."
+                        ),
                     }]
                 )
             candidate_ids = [
