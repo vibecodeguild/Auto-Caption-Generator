@@ -52,6 +52,7 @@ from app.core.creator_production import (
     build_instruction_context,
     canonical_hash,
     canonical_json_bytes,
+    next_artifact_version,
     read_frozen_bytes,
     require_private_root,
     transcript_word_timing_hash,
@@ -322,14 +323,17 @@ class CreatorJobStore:
             catalog = self._read_artifact(current["artifacts"]["capabilityCatalog"])
             capability_id = str(job["taskParameters"].get("capabilityId") or "")
             requested.extend(required_capability_resource_ids(catalog, capability_id))
-        if job["taskKind"] == "plan":
-            catalog = self._read_artifact(current["artifacts"]["capabilityCatalog"])
-            requested.extend(planning_capability_resource_ids(catalog))
+        channel_profile = None
         if job["taskKind"] in {"plan", "adapt", "materialize", "revise"}:
             channel_profile = self._read_artifact(current["artifacts"]["channelProfile"])
             grammar_name = channel_profile["referenceGrammarRef"].replace("@", ".v")
             requested.append(
                 f"workflow:package:reference-grammars/{grammar_name}.md"
+            )
+        if job["taskKind"] == "plan":
+            catalog = self._read_artifact(current["artifacts"]["capabilityCatalog"])
+            requested.extend(
+                planning_capability_resource_ids(catalog, channel_profile)
             )
         loaded, instruction_receipt = build_instruction_context(
             self.root,
@@ -342,7 +346,9 @@ class CreatorJobStore:
             self.root,
             artifact_kind="instruction-receipts",
             artifact_id=job["id"],
-            version=1,
+            version=next_artifact_version(
+                self.root, "instruction-receipts", job["id"]
+            ),
             value=instruction_receipt,
             schema_name="instruction-receipt",
         )
@@ -1060,10 +1066,12 @@ class CreatorJobStore:
             )
             if not isinstance(catalog_input, dict):
                 raise RuntimeError("Semantic planning requires the frozen capability catalog.")
-            exact_capability_ids = sorted(
-                str(item["id"]) for item in catalog_input["capabilities"]
-                if item.get("scope") == "blueprint-macro"
-                and item.get("category") != "workflow-specific-transition-source"
+            from app.core.creator_production_menu import planning_capability_ids_for_profile
+
+            channel_profile = self._read_artifact(current["artifacts"]["channelProfile"])
+            exact_capability_ids = planning_capability_ids_for_profile(
+                catalog_input,
+                channel_profile,
             )
             planning_context = self._planning_context(job, current)
             issued_boundaries = boundary_choices(
@@ -1095,9 +1103,21 @@ class CreatorJobStore:
                     (
                         "Every authored or hybrid sequence must assess each ID below "
                         "exactly once. Do not order or shortlist them; the application "
-                        "restores locked catalog order."
+                        "restores locked catalog order. When this list is Graphics "
+                        "Library golden engines only, do not invent HyperFrames-native "
+                        "treatments outside it. Prefer light callouts/captions/lists that "
+                        "keep the speaker and screen mostly visible."
                     ),
                     json.dumps(exact_capability_ids, ensure_ascii=False, indent=2),
+                    "## Daily visual density contract",
+                    (
+                        "Viewer-facing visual moments must land about every 5 seconds. "
+                        "A multi-beat list counts once per revealed bullet, not once for "
+                        "the whole graphic. Intentional demo holds are allowed, but they "
+                        "cannot blank the whole video and cannot run longer than the "
+                        "profile's maximum continuous carry without a light emphasis. "
+                        "A plan with roughly one graphic per minute will be rejected."
+                    ),
                     "## Application-issued sequence and chapter boundary choices",
                     (
                         "Use only these opaque boundaryRef and boundaryCauseRef pairs. "

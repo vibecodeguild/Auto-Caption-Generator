@@ -201,7 +201,21 @@ def _scene_packet(screenshot_time: float) -> dict:
 def _audited_graphic(suggestion_id: str, start_sec: float, end_sec: float, recipe_id: str, family: str) -> dict:
     """A complete graphic suggestion. There is one contract, so there is one fixture."""
     middle = (start_sec + end_sec) / 2
-    candidates = [recipe_id, "speaker-side-panel", "problem-card-triptych"]
+    # Audit requires three distinct registered module/recipe candidates.
+    pool = [
+        "speaker-side-panel",
+        "kinetic-word-punctuation",
+        "ui-callout",
+        "numbered-example-card",
+        "dependency-stack",
+        "progress-scale",
+    ]
+    candidates = [recipe_id]
+    for mid in pool:
+        if mid not in candidates:
+            candidates.append(mid)
+        if len(candidates) >= 3:
+            break
     return {
         "id": suggestion_id,
         "status": "proposed",
@@ -294,8 +308,8 @@ def test_swapping_a_treatment_in_loop_b_cannot_inherit_the_earlier_approval(tmp_
     graphic["decision"].update({"status": "approved", "decidedAt": "now"})
     story_assets.save_visual_suggestions(plan_path, {"schemaVersion": 1, "coverage": coverage, "suggestions": [graphic]})
 
-    graphic["moduleId"] = "problem-card-triptych"
-    coverage["reuseAudit"]["reusedModuleIds"] = ["problem-card-triptych"]
+    graphic["moduleId"] = "speaker-side-panel"
+    coverage["reuseAudit"]["reusedModuleIds"] = ["speaker-side-panel"]
 
     with pytest.raises(ValueError, match="Re-approve the scene after swapping its treatment"):
         story_assets.save_visual_suggestions(plan_path, {"schemaVersion": 1, "coverage": coverage, "suggestions": [graphic]})
@@ -428,7 +442,7 @@ def test_registered_module_prepares_exact_sample_when_history_is_missing(tmp_pat
     monkeypatch.setattr(story_assets, "default_creator_library", lambda: tmp_path / "empty-creator-library")
     graphic, coverage = _approval_contract_graphic()
     graphic["moduleId"] = "speaker-side-panel"
-    graphic["candidateTreatmentIds"] = ["speaker-side-panel", "kinetic-word-punctuation", "problem-card-triptych"]
+    graphic["candidateTreatmentIds"] = ["speaker-side-panel", "kinetic-word-punctuation", "ui-callout"]
     graphic["rankedCandidates"][0]["treatmentId"] = "speaker-side-panel"
     graphic["rankedCandidates"][1]["treatmentId"] = "kinetic-word-punctuation"
     graphic["decision"]["selectedTreatmentId"] = "speaker-side-panel"
@@ -602,7 +616,7 @@ def test_graphic_suggestion_requires_library_comparison_and_speaker_safety(tmp_p
     with pytest.raises(ValueError, match="compare at least three"):
         story_assets.save_visual_suggestions(plan_path, data)
 
-    graphic["candidateTreatmentIds"] = ["kinetic-word-punctuation", "speaker-side-panel", "problem-card-triptych"]
+    graphic["candidateTreatmentIds"] = ["kinetic-word-punctuation", "speaker-side-panel", "ui-callout"]
     graphic.pop("speakerSafety")
     with pytest.raises(ValueError, match="speaker-safety audit"):
         story_assets.save_visual_suggestions(plan_path, data)
@@ -683,8 +697,8 @@ def test_graphic_may_not_hide_the_speaker_at_all(tmp_path: Path) -> None:
 def test_graphic_suggestions_reject_consecutive_visual_family(tmp_path: Path) -> None:
     plan_path = _visual_project(tmp_path)
     first = _audited_graphic("graphic-1", 4, 9, "kinetic-word-punctuation", "kinetic-type")
-    second = _audited_graphic("graphic-2", 10, 15, "list-reveal-pinned-thesis", "kinetic-type")
-    data = {"schemaVersion": 1, "coverage": _audited_coverage(["kinetic-word-punctuation", "list-reveal-pinned-thesis"]), "suggestions": [first, second]}
+    second = _audited_graphic("graphic-2", 10, 15, "speaker-side-panel", "kinetic-type")
+    data = {"schemaVersion": 1, "coverage": _audited_coverage(["kinetic-word-punctuation", "speaker-side-panel"]), "suggestions": [first, second]}
 
     with pytest.raises(ValueError, match="repeats visual family"):
         story_assets.save_visual_suggestions(plan_path, data)
@@ -693,8 +707,8 @@ def test_graphic_suggestions_reject_consecutive_visual_family(tmp_path: Path) ->
 def test_diverse_face_safe_graphic_suggestions_pass_audit(tmp_path: Path) -> None:
     plan_path = _visual_project(tmp_path)
     first = _audited_graphic("graphic-1", 4, 9, "kinetic-word-punctuation", "kinetic-type")
-    second = _audited_graphic("graphic-2", 10, 15, "list-reveal-pinned-thesis", "structured-list")
-    data = {"schemaVersion": 1, "coverage": _audited_coverage(["kinetic-word-punctuation", "list-reveal-pinned-thesis"]), "suggestions": [first, second]}
+    second = _audited_graphic("graphic-2", 10, 15, "speaker-side-panel", "structured-list")
+    data = {"schemaVersion": 1, "coverage": _audited_coverage(["kinetic-word-punctuation", "speaker-side-panel"]), "suggestions": [first, second]}
 
     saved = story_assets.save_visual_suggestions(plan_path, data)
 
@@ -882,8 +896,8 @@ def test_an_unregistered_treatment_cannot_produce_a_sample_at_all(tmp_path: Path
 
 def test_one_treatment_may_not_carry_the_plan(tmp_path: Path) -> None:
     """A pass marked 154 of 165 graphics intentionalRepeat and became 46% punch zooms."""
-    counts = {"source-punch-zoom": 76, "ui-callout": 63, "numbered-example-card": 10, "dual-comparison": 9}
-    families = {"camera-move": 76, "callout": 63, "numbered-example-card": 10, "comparison": 9}
+    counts = {"source-punch-zoom": 76, "ui-callout": 63, "numbered-example-card": 10, "dependency-stack": 9}
+    families = {"camera-move": 76, "callout": 63, "numbered-example-card": 10, "stack": 9}
 
     with pytest.raises(ValueError, match="No treatment may exceed 25% of the plan"):
         story_assets._validate_treatment_variety(counts, families)
@@ -891,10 +905,10 @@ def test_one_treatment_may_not_carry_the_plan(tmp_path: Path) -> None:
 
 def test_two_treatments_may_not_carry_the_plan_between_them(tmp_path: Path) -> None:
     # Each device stays under the single-treatment ceiling; together they still dominate.
-    counts = {"source-punch-zoom": 24, "ui-callout": 24, "side-list-panel": 13,
-              "result-badge": 13, "tradeoff-meter": 13, "link-chip": 13}
+    counts = {"source-punch-zoom": 24, "ui-callout": 24, "speaker-side-panel": 13,
+              "brand-cta-lockup": 13, "tradeoff-meter": 13, "progress-scale": 13}
     families = {"camera-move": 24, "callout": 24, "structured-list": 13,
-                "outcome": 13, "data-motion": 13, "chip": 13}
+                "outcome": 13, "data-motion": 13, "progress": 13}
 
     with pytest.raises(ValueError, match="Two devices may not exceed 45%"):
         story_assets._validate_treatment_variety(counts, families)
@@ -912,8 +926,8 @@ def test_renaming_the_treatment_does_not_create_variety(tmp_path: Path) -> None:
 
 
 def test_a_varied_plan_passes(tmp_path: Path) -> None:
-    counts = {"source-punch-zoom": 10, "ui-callout": 10, "side-list-panel": 8,
-              "numbered-example-card": 10, "result-badge": 6, "tradeoff-meter": 6}
+    counts = {"source-punch-zoom": 10, "ui-callout": 10, "speaker-side-panel": 8,
+              "numbered-example-card": 10, "brand-cta-lockup": 6, "tradeoff-meter": 6}
     families = {"camera-move": 10, "callout": 10, "structured-list": 8,
                 "numbered-example-card": 10, "outcome": 6, "data-motion": 6}
 
@@ -928,9 +942,9 @@ def test_a_small_plan_is_not_held_to_proportions(tmp_path: Path) -> None:
 def test_a_graphic_that_flashes_for_a_tenth_of_a_second_is_rejected(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(story_assets, "default_creator_library", lambda: tmp_path / "empty-library")
     plan_path = _visual_project(tmp_path)
-    graphic = _audited_graphic("graphic-1", 4.0, 4.1, "side-list-panel", "structured-list")
+    graphic = _audited_graphic("graphic-1", 4.0, 4.1, "speaker-side-panel", "structured-list")
     graphic["speakerSafety"]["verifiedAtSec"] = [4.0, 4.05, 4.1]
-    coverage = _audited_coverage(["side-list-panel"])
+    coverage = _audited_coverage(["speaker-side-panel"])
 
     with pytest.raises(ValueError, match="reads as a glitch, not a visual event"):
         story_assets.save_visual_suggestions(plan_path, {
@@ -983,8 +997,8 @@ def test_a_long_protected_scene_is_fine_when_a_treatment_covers_it(tmp_path: Pat
     """Protection preserves source geometry; it does not force the whole interval to stay bare."""
     monkeypatch.setattr(story_assets, "default_creator_library", lambda: tmp_path / "empty-library")
     plan_path = _visual_project(tmp_path)
-    graphic = _audited_graphic("graphic-1", 4, 20, "side-list-panel", "structured-list")
-    coverage = _audited_coverage(["side-list-panel"])
+    graphic = _audited_graphic("graphic-1", 4, 20, "speaker-side-panel", "structured-list")
+    coverage = _audited_coverage(["speaker-side-panel"])
 
     saved = story_assets.save_visual_suggestions(plan_path, {
         "schemaVersion": 1,
@@ -999,8 +1013,8 @@ def test_change_request_keeps_protected_interval_in_timeline_contract(tmp_path: 
     """Rejecting a treatment must save the note without inventing a protected-footage gap."""
     monkeypatch.setattr(story_assets, "default_creator_library", lambda: tmp_path / "empty-library")
     plan_path = _visual_project(tmp_path)
-    graphic = _audited_graphic("graphic-13", 4, 20, "side-list-panel", "structured-list")
-    coverage = _audited_coverage(["side-list-panel"])
+    graphic = _audited_graphic("graphic-13", 4, 20, "speaker-side-panel", "structured-list")
+    coverage = _audited_coverage(["speaker-side-panel"])
     story_assets.save_visual_suggestions(plan_path, {
         "schemaVersion": 1,
         "coverage": coverage,
@@ -1053,8 +1067,8 @@ def test_a_long_uncovered_part_of_a_protected_scene_is_still_rejected(tmp_path: 
     """An overlapping treatment must cover the interval, not merely touch it."""
     monkeypatch.setattr(story_assets, "default_creator_library", lambda: tmp_path / "empty-library")
     plan_path = _visual_project(tmp_path)
-    graphic = _audited_graphic("graphic-1", 13, 25, "side-list-panel", "structured-list")
-    coverage = _audited_coverage(["side-list-panel"])
+    graphic = _audited_graphic("graphic-1", 13, 25, "speaker-side-panel", "structured-list")
+    coverage = _audited_coverage(["speaker-side-panel"])
 
     with pytest.raises(ValueError, match="leaves 9.0s of the video with nothing on screen"):
         story_assets.save_visual_suggestions(plan_path, {
@@ -1068,11 +1082,11 @@ def test_a_graphic_over_a_screen_share_layout_must_name_the_readable_region(tmp_
     """The precise tool is a rectangle. Requiring it stops whole spans being declared off-limits."""
     monkeypatch.setattr(story_assets, "default_creator_library", lambda: tmp_path / "empty-library")
     plan_path = _visual_project(tmp_path)
-    graphic = _audited_graphic("graphic-1", 4, 9, "side-list-panel", "structured-list")
+    graphic = _audited_graphic("graphic-1", 4, 9, "speaker-side-panel", "structured-list")
     graphic["scenePacket"]["layout"] = "computer-screen-only"
     graphic["scenePacket"]["protectedRegions"] = []
     graphic["speakerSafety"]["speakerBounds"] = None
-    coverage = _audited_coverage(["side-list-panel"])
+    coverage = _audited_coverage(["speaker-side-panel"])
 
     with pytest.raises(ValueError, match="List the screen area that must stay readable"):
         story_assets.save_visual_suggestions(plan_path, {
@@ -1084,9 +1098,9 @@ def test_a_graphic_on_a_speaker_led_layout_does_not_need_a_region(tmp_path: Path
     """talking-left is mostly the speaker, so there is no application to keep readable."""
     monkeypatch.setattr(story_assets, "default_creator_library", lambda: tmp_path / "empty-library")
     plan_path = _visual_project(tmp_path)
-    graphic = _audited_graphic("graphic-1", 4, 9, "side-list-panel", "structured-list")
+    graphic = _audited_graphic("graphic-1", 4, 9, "speaker-side-panel", "structured-list")
     graphic["scenePacket"]["protectedRegions"] = []
-    coverage = _audited_coverage(["side-list-panel"])
+    coverage = _audited_coverage(["speaker-side-panel"])
 
     saved = story_assets.save_visual_suggestions(plan_path, {
         "schemaVersion": 1, "coverage": coverage, "suggestions": [graphic],

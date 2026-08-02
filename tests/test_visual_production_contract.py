@@ -20,23 +20,19 @@ def test_module_catalog_matches_visual_plan_schema() -> None:
 
     catalog_ids = [module["id"] for module in catalog["modules"]]
     module_definitions = [
-        "punchlineCue", "sourceHoldCue", "sidePanelCue", "progressCue",
-        "dependencyCue", "comparisonCue", "numberedExampleCardCue", "punchZoomCue", "uiCalloutCue",
-        "sideListPanelCue", "resultBadgeCue", "linkChipCue", "milestonePathCue", "beforeAfterGradeCue", "lowerThirdFlowCue",
-        "threeStepCelebrationCue",
-        "careerPathwayCue",
-        "listRevealPinnedThesisCue",
+        "punchlineCue", "sidePanelCue", "progressCue",
+        "dependencyCue", "numberedExampleCardCue", "punchZoomCue", "uiCalloutCue",
         "kineticWordPunctuationCue",
         "numberedStepIntroCue",
         "problemCardTriptychCue",
         "speakerRiseCalloutsCue",
-        "conversationBubbleSequenceCue",
         "tradeoffMeterCue",
-        "rankMedalHitCue",
         "brandCtaLockupCue",
-        "commandPopupStackCue",
         "windowsPromptTypingCue",
-        "upliftingSunriseFinaleCue",
+        "robotCheerCue",
+        "robotDefiantCue",
+        "robotRoastCue",
+        "robotRocketSignCue",
     ]
     schema_ids = [schema["$defs"][name]["allOf"][1]["properties"]["moduleId"]["const"] for name in module_definitions]
 
@@ -72,7 +68,7 @@ def test_recipe_catalog_is_content_neutral_and_not_registered_as_runtime_modules
     archived = {item["id"] for item in _json(VISUAL_ROOT / "recipes" / "archive-never-built.json")["recipes"]}
     assert archived.isdisjoint(recipe_ids)
     assert all(item["name"] and item["description"] and item["speakerMode"] for item in recipes)
-    assert len(module_ids) >= 29
+    assert len(module_ids) >= 15
     supported = {
         "full-screen-talking", "talking-left", "talking-right", "talking-bottom-left",
         "talking-top-left", "talking-bottom-right", "talking-top-right", "computer-screen-only",

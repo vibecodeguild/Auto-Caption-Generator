@@ -93,7 +93,7 @@ def test_new_vcg_projects_only_offer_latest_channel_contract() -> None:
     vcg_profiles = [item for item in profiles if item["id"] == "vcg"]
 
     assert [(item["id"], item["version"]) for item in vcg_profiles] == [
-        ("vcg", 2)
+        ("vcg", 3)
     ]
 
 

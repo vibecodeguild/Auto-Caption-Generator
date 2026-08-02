@@ -231,8 +231,11 @@ def available_channel_profiles(private_root: Path | None = None) -> list[dict]:
 
 def _resource_bytes(skill_root: Path, catalog: dict) -> dict[str, bytes]:
     resources = {"capability:catalog": canonical_json_bytes(catalog)}
+    skill_root = skill_root.resolve()
     for resource in [*catalog["sourceResources"], *catalog["supportResources"]]:
-        path = (skill_root / resource["relativePath"]).resolve()
+        relative = str(resource["relativePath"])
+        # All catalog resources freeze from the HyperFrames skill tree.
+        path = (skill_root / relative).resolve()
         if not is_within(path, skill_root) or not path.is_file():
             raise RuntimeError(f"Capability resource cannot be frozen: {resource['id']}")
         if sha256_file(path) != resource["sha256"]:

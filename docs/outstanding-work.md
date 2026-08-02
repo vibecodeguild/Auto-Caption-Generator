@@ -259,6 +259,11 @@ additional transition vocabulary, versioned plan migrations, generalized
 promotion tooling for successful private experiments, and broader
 preview/render parity testing across aspect ratios and imported codecs.
 
+**Deferred (graphics):** joke-image generation ratio for `punchline-reveal`
+(image path). Layout is head-left / art-right; custom stills need a published
+target aspect and safe margins so generation and cover-crop stay consistent.
+Tracked in `docs/vcg-graphics-process/README.md` § Deferred.
+
 ### Canonical Cook and Approval Contract implementation
 
 Completed July 24, 2026 through the existing Approval Contract Three path.

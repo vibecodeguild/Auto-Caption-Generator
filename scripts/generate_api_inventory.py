@@ -24,6 +24,7 @@ HEADING = "## API Inventory"
 HTTP_METHODS = {"get", "post", "patch", "put", "delete", "head", "options"}
 GROUPS = [
     ("/api/visual", "Visual Production"),
+    ("/api/graphics-library", "Graphics Library"),
     ("/api/creator-library", "Creator Library"),
     ("/api/video-project", "Video projects"),
     ("/api/audio", "Audio"),

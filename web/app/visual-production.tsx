@@ -82,10 +82,8 @@ import {
 const MODULES: Array<{ id: NonNullable<VisualCue["moduleId"]>; name: string; description: string }> = [
   { id: "punchline-reveal", name: "Punchline reveal", description: "Land text with the spoken phrase" },
   { id: "speaker-side-panel", name: "Speaker side panel", description: "Frame the speaker beside information" },
-  { id: "progress-scale", name: "Progress scale", description: "Animate toward a target" },
-  { id: "dependency-stack", name: "Dependency stack", description: "Build a layered system" },
-  { id: "dual-comparison", name: "Dual comparison", description: "Compare two paths around a square speaker crop" },
-  { id: "source-footage-hold", name: "Protected footage", description: "Clear overlays for authored footage" },
+  { id: "progress-scale", name: "Progress scale", description: "Full white journey stage with speaker in an upper-right window" },
+  { id: "dependency-stack", name: "Dependency stack", description: "Title + sequential stack; talking head docks right" },
 ];
 
 type LibraryTab = "generated" | "creator" | "imported" | "curate";
@@ -102,20 +100,17 @@ function newId(prefix: string) {
 }
 
 function semanticParameterEntries(moduleId: VisualCue["moduleId"], parameters: VisualCueParameters): Array<[string, string]> {
-  if (!moduleId || moduleId === "source-footage-hold") return [];
+  if (!moduleId) return [];
   const entries: Array<[string, string]> = [];
-  const scalarKeys = moduleId === "dual-comparison"
-    ? ["kicker", "leftTitle", "rightTitle"] as const
-    : moduleId === "progress-scale"
-      ? ["kicker", "text", "startLabel", "targetLabel"] as const
-      : ["kicker", "text"] as const;
+  const scalarKeys = moduleId === "progress-scale"
+    ? ["kicker", "text", "startLabel", "targetLabel"] as const
+    : ["kicker", "text"] as const;
   for (const key of scalarKeys) {
     const value = parameters[key];
     if (typeof value === "string" && value.trim()) entries.push([`parameters.${key}`, value]);
   }
-  const listKeys = moduleId === "dual-comparison" ? ["leftItems", "rightItems"] as const
-    : moduleId === "dependency-stack" ? ["nodes"] as const
-      : moduleId === "speaker-side-panel" ? ["items"] as const : [];
+  const listKeys = moduleId === "dependency-stack" ? ["nodes"] as const
+    : moduleId === "speaker-side-panel" ? ["items"] as const : [];
   for (const key of listKeys) {
     const values = parameters[key];
     if (Array.isArray(values)) values.forEach((value, index) => entries.push([`parameters.${key}.${index}`, value]));
@@ -124,17 +119,17 @@ function semanticParameterEntries(moduleId: VisualCue["moduleId"], parameters: V
 }
 
 function defaultModuleCue(moduleId: NonNullable<VisualCue["moduleId"]>, at: number, duration: number): VisualCue {
-  const cueDuration = moduleId === "source-footage-hold" ? 2.5 : Math.min(6, Math.max(2, duration - at));
+  const cueDuration = Math.min(6, Math.max(2, duration - at));
   const common: VisualCueParameters = {
     opacity: 1,
     transitionIn: "editorial-snap",
     transitionOut: "fade",
   };
-  const parameters: VisualCueParameters = moduleId === "source-footage-hold" ? common
-    : moduleId === "dual-comparison" ? { ...common, kicker: "VCG / VISUAL", leftTitle: "OPTION A", rightTitle: "OPTION B", leftItems: ["FIRST POINT", "SECOND POINT"], rightItems: ["FIRST POINT", "SECOND POINT"], leftColor: "#4D7CFE", rightColor: "#6E56CF" }
-    : moduleId === "dependency-stack" ? { ...common, text: "HOW THE STACK FITS TOGETHER", kicker: "VCG / VISUAL", nodes: ["YOUR PRODUCT", "PLATFORM", "DEPENDENCY"], accentColor: "#FF00CE" }
-    : moduleId === "progress-scale" ? { ...common, text: "ANIMATE TOWARD THE TARGET", kicker: "VCG / VISUAL", startLabel: "START", targetLabel: "TARGET", accentColor: "#FF00CE" }
-    : { ...common, text: "EDIT THIS MESSAGE", kicker: "VCG / VISUAL", accentColor: "#FF00CE" };
+  const parameters: VisualCueParameters = moduleId === "dependency-stack"
+    ? { ...common, text: "WHAT YOU NEED", nodes: ["Transcript", "Locked cut", "Graphics kit"] }
+    : moduleId === "progress-scale"
+      ? { ...common, text: "ANIMATE TOWARD THE TARGET", kicker: "VCG / VISUAL", startLabel: "START", targetLabel: "TARGET", accentColor: "#FF00CE" }
+      : { ...common, text: "EDIT THIS MESSAGE", kicker: "VCG / VISUAL", accentColor: "#FF00CE" };
   const startSec = Math.min(at, Math.max(0, duration - cueDuration));
   const endSec = Math.min(duration, at + cueDuration);
   const semanticEntries = semanticParameterEntries(moduleId, parameters);
@@ -713,11 +708,7 @@ export default function VisualProductionWorkspace() {
       return {
         ...current,
         cues: current.cues.map((cue) => cue.id === selectedCue.id ? nextCue : cue),
-        protectedFootage: selectedCue.moduleId === "source-footage-hold"
-          ? current.protectedFootage.map((range) => range.cueId === selectedCue.id
-            ? { ...range, startSec: nextCue.startSec, endSec: nextCue.endSec }
-            : range)
-          : current.protectedFootage,
+        protectedFootage: current.protectedFootage,
       };
     });
   }
@@ -746,9 +737,6 @@ export default function VisualProductionWorkspace() {
     updatePlan((current) => ({
       ...current,
       cues: [...current.cues, cue],
-      protectedFootage: moduleId === "source-footage-hold"
-        ? [...current.protectedFootage, { id: newId("protected"), cueId: cue.id, startSec: cue.startSec, endSec: cue.endSec, reason: "Authored source-footage moment" }]
-        : current.protectedFootage,
     }));
     setSelectedSuggestionId(null);
     setSelectedCueId(cue.id);
@@ -1027,9 +1015,6 @@ export default function VisualProductionWorkspace() {
     updatePlan((current) => ({
       ...current,
       cues: [...current.cues, copyCue],
-      protectedFootage: selectedCue.moduleId === "source-footage-hold"
-        ? [...current.protectedFootage, { id: newId("protected"), cueId: copyCue.id, startSec: copyCue.startSec, endSec: copyCue.endSec, reason: "Authored source-footage moment" }]
-        : current.protectedFootage,
     }));
     setSelectedCueId(copyCue.id);
   }
@@ -1375,7 +1360,7 @@ export default function VisualProductionWorkspace() {
               <div className="visual-library-section"><strong>Registered modules</strong><span>Reuse these content-neutral VCG building blocks first</span></div>
               {MODULES.map((module) => (
                 <button key={module.id} className="visual-library-item" onClick={() => addModule(module.id)}>
-                  {module.id === "source-footage-hold" ? <Shield size={17} /> : module.id === "punchline-reveal" ? <Type size={17} /> : <Clapperboard size={17} />}
+                  {module.id === "punchline-reveal" ? <Type size={17} /> : <Clapperboard size={17} />}
                   <span><strong>{module.name}</strong><small>{module.description}</small></span>
                 </button>
               ))}
@@ -1615,8 +1600,7 @@ export default function VisualProductionWorkspace() {
                 : <div className="visual-render-ownership renderable"><strong>Plan-backed · Renderable</strong><span>Inspector changes save to visual-plan.json; the exact HyperFrames runtime above is also used for review and final rendering.</span></div>}
               <fieldset className="visual-cue-controls" disabled={selectedCompositionCue}>
               <label>Enabled<input type="checkbox" checked={selectedCue.enabled} onChange={(event) => updateCue({ enabled: event.target.checked })} /></label>
-              {selectedCue.kind === "module" && selectedCue.moduleId !== "source-footage-hold" && selectedCue.moduleId !== "dual-comparison" && <><label>Text<textarea value={selectedCue.parameters.text ?? ""} onChange={(event) => updateCue({}, { text: event.target.value })} /></label><label>Kicker<input value={selectedCue.parameters.kicker ?? ""} onChange={(event) => updateCue({}, { kicker: event.target.value })} /></label>{(selectedCue.moduleId === "speaker-side-panel" || selectedCue.moduleId === "punchline-reveal") && <label>Accent color<input type="color" value={selectedCue.parameters.accentColor ?? "#FF00CE"} onChange={(event) => updateCue({}, { accentColor: event.target.value })} /></label>}</>}
-              {selectedCue.kind === "module" && selectedCue.moduleId === "dual-comparison" && <><label>Kicker<input value={selectedCue.parameters.kicker ?? ""} onChange={(event) => updateCue({}, { kicker: event.target.value })} /></label><label>Left title<input value={selectedCue.parameters.leftTitle ?? ""} onChange={(event) => updateCue({}, { leftTitle: event.target.value })} /></label><label>Left points<textarea value={(selectedCue.parameters.leftItems ?? []).join("\n")} onChange={(event) => updateCue({}, { leftItems: event.target.value.split("\n").filter(Boolean) })} /></label><label>Left color<input type="color" value={selectedCue.parameters.leftColor ?? "#4D7CFE"} onChange={(event) => updateCue({}, { leftColor: event.target.value })} /></label><label>Right title<input value={selectedCue.parameters.rightTitle ?? ""} onChange={(event) => updateCue({}, { rightTitle: event.target.value })} /></label><label>Right points<textarea value={(selectedCue.parameters.rightItems ?? []).join("\n")} onChange={(event) => updateCue({}, { rightItems: event.target.value.split("\n").filter(Boolean) })} /></label><label>Right color<input type="color" value={selectedCue.parameters.rightColor ?? "#6E56CF"} onChange={(event) => updateCue({}, { rightColor: event.target.value })} /></label></>}
+              {selectedCue.kind === "module" && <><label>Text<textarea value={selectedCue.parameters.text ?? ""} onChange={(event) => updateCue({}, { text: event.target.value })} /></label><label>Kicker<input value={selectedCue.parameters.kicker ?? ""} onChange={(event) => updateCue({}, { kicker: event.target.value })} /></label>{(selectedCue.moduleId === "speaker-side-panel" || selectedCue.moduleId === "punchline-reveal") && <label>Accent color<input type="color" value={selectedCue.parameters.accentColor ?? "#FF00CE"} onChange={(event) => updateCue({}, { accentColor: event.target.value })} /></label>}</>}
               <div className="visual-field-row"><label>Start<input type="number" min={0} max={duration} step={0.01} value={selectedCue.startSec} onChange={(event) => updateCue({ startSec: Math.min(Number(event.target.value), selectedCue.endSec - .01) })} /></label><label>End<input type="number" min={0} max={duration} step={0.01} value={selectedCue.endSec} onChange={(event) => updateCue({ endSec: Math.max(Number(event.target.value), selectedCue.startSec + .01) })} /></label></div>
               {selectedCue.kind === "asset" && <>
                 <div className="visual-field-row"><label>X %<input type="number" min={0} max={100} value={selectedCue.parameters.x ?? 0} onChange={(event) => updateCue({}, { x: Number(event.target.value) })} /></label><label>Y %<input type="number" min={0} max={100} value={selectedCue.parameters.y ?? 0} onChange={(event) => updateCue({}, { y: Number(event.target.value) })} /></label></div>

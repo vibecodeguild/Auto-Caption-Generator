@@ -167,7 +167,10 @@ export default function CreatorProductionWorkspace() {
     try {
       await initializeCreatorProduction(channelProfileId);
       await refresh();
-      setMessage("Production authority, transcript timing, profiles, and native capability snapshot are locked.");
+      setMessage(
+        "Production authority locked (channel profile vcg@3). "
+        + "Holdover Creator Production path — density pacing is on the profile.",
+      );
     } catch (error) {
       setMessage((error as Error).message);
     } finally {

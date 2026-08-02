@@ -30,6 +30,9 @@ import type { Dispatch, KeyboardEvent as ReactKeyboardEvent, MutableRefObject, P
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HexColorInput, HexColorPicker } from "react-colorful";
 import CreatorProductionWorkspace from "./creator-production";
+import GraphicsLibraryWorkspace from "./graphics-library";
+import VisualPackageWorkspace, { VISUAL_PACKAGE_RAIL_HOST_ID } from "./visual-package";
+import VisualProductionWorkspace from "./visual-production";
 import {
   API_BASE,
   type AudioAnalysisResponse,
@@ -92,6 +95,10 @@ import {
   sourceVideoUrl,
   startTranscription,
   updateEditorSettings,
+  createGraphicsLibrary,
+  getGraphicsLibrary,
+  openGraphicsLibraryDialog,
+  type GraphicsLibrarySummary,
 } from "../lib/api";
 import {
   beginPreviewRequest,
@@ -105,7 +112,7 @@ type PreviewState = {
   loop: boolean;
 };
 
-type ActiveTab = "transcript" | "caption" | "audio" | "visual";
+type ActiveTab = "transcript" | "caption" | "audio" | "visual" | "creator" | "graphics" | "package";
 
 const DEFAULT_WHISPER_MODEL = "Large v3 - best accuracy";
 const DEFAULT_WHISPER_COMPUTE = "NVIDIA GPU";
@@ -136,6 +143,11 @@ type WindowWithSaveFilePicker = Window & {
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("transcript");
+  const [openHeaderMenu, setOpenHeaderMenu] = useState<"tools" | "project" | null>(null);
+  const toolsMenuRef = useRef<HTMLDivElement | null>(null);
+  const projectMenuRef = useRef<HTMLDivElement | null>(null);
+  const [showAppSettings, setShowAppSettings] = useState(false);
+  const [graphicsLibraryRefreshSignal, setGraphicsLibraryRefreshSignal] = useState(0);
   const [project, setProject] = useState<EditorProjectResponse | null>(null);
   const [videoProject, setVideoProject] = useState<VideoProjectResponse | null>(null);
   const [visualPrompt, setVisualPrompt] = useState<string | null>(null);
@@ -147,7 +159,7 @@ export default function Home() {
   const [status, setStatus] = useState(`API: ${API_BASE}`);
   const [captionStatus, setCaptionStatus] = useState("Caption generator ready");
   const [busy, setBusy] = useState(false);
-  const [showTranscriptSettings, setShowTranscriptSettings] = useState(false);
+
   const [activeWorkflowStage, setActiveWorkflowStage] = useState(1);
   const [previewAspect, setPreviewAspect] = useState(16 / 9);
   const [previewBox, setPreviewBox] = useState({ width: 400, height: 225 });
@@ -251,6 +263,33 @@ export default function Home() {
       height: Math.round(height),
     });
   }, [previewAspect]);
+
+  const closeHeaderMenus = useCallback(() => setOpenHeaderMenu(null), []);
+
+  const selectToolTab = useCallback((tab: ActiveTab) => {
+    setActiveTab(tab);
+    setOpenHeaderMenu(null);
+  }, []);
+
+  useEffect(() => {
+    if (!openHeaderMenu) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (openHeaderMenu === "tools" && toolsMenuRef.current?.contains(target)) return;
+      if (openHeaderMenu === "project" && projectMenuRef.current?.contains(target)) return;
+      setOpenHeaderMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpenHeaderMenu(null);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [openHeaderMenu]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1003,38 +1042,73 @@ export default function Home() {
           </section>
         </div>
       )}
-      {showTranscriptSettings && project && (
-        <TranscriptSettingsModal
+      {showAppSettings ? (
+        <AppSettingsModal
           busy={busy}
           project={project}
-          close={() => setShowTranscriptSettings(false)}
-          update={(threshold) => void run(
-            () => updateEditorSettings(threshold),
-            applyProject,
-          )}
+          captionOutputFolder={captionOutputFolder}
+          audioOutputFolder={audioOutputFolder}
+          projectManaged={!!videoProject}
+          close={() => setShowAppSettings(false)}
+          onUpdatePauseThreshold={(threshold) =>
+            void run(() => updateEditorSettings(threshold), applyProject)
+          }
+          onChooseCaptionOutputFolder={() =>
+            void run(chooseCaptionOutputFolder, (data) => {
+              setCaptionOutputFolder(data.output_folder);
+              setStatus(`Caption output folder set to ${data.output_folder}`);
+            })
+          }
+          onChooseAudioOutputFolder={() =>
+            void run(chooseAudioOutputFolder, (data) => {
+              setAudioOutputFolder(data.output_folder);
+              setAudioStatus(`Output folder set to ${data.output_folder}`);
+            })
+          }
+          onCaptionOutputFolderChange={setCaptionOutputFolder}
+          onAudioOutputFolderChange={setAudioOutputFolder}
+          onGraphicsLibraryChanged={() => setGraphicsLibraryRefreshSignal((value) => value + 1)}
         />
-      )}
+      ) : null}
       <header className="topbar modern-topbar">
         <div className="brand-block">
           <h1>VCG Content Command Center</h1>
           <p>{videoProject ? `${videoProject.name} · Private project` : "Create or open a private video project"}</p>
         </div>
-        <div className="header-menu tools-menu">
-          <button className="header-menu-trigger" aria-haspopup="menu">
+        <div
+          className={["header-menu", "tools-menu", openHeaderMenu === "tools" ? "is-open" : ""].join(" ")}
+          ref={toolsMenuRef}
+        >
+          <button
+            className="header-menu-trigger"
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={openHeaderMenu === "tools"}
+            onClick={() => setOpenHeaderMenu((current) => (current === "tools" ? null : "tools"))}
+          >
             <Grid3X3 size={17} /> Tools <ChevronDown size={14} />
           </button>
           <div className="header-dropdown" role="menu">
-            <button className={activeTab === "transcript" ? "active" : ""} onClick={() => setActiveTab("transcript")}>
+            <button type="button" className={activeTab === "transcript" ? "active" : ""} onClick={() => selectToolTab("transcript")}>
               Transcript Edit
             </button>
-            <button className={activeTab === "caption" ? "active" : ""} onClick={() => setActiveTab("caption")}>
+            <button type="button" className={activeTab === "caption" ? "active" : ""} onClick={() => selectToolTab("caption")}>
               Caption Generator
             </button>
-            <button className={activeTab === "audio" ? "active" : ""} onClick={() => setActiveTab("audio")}>
+            <button type="button" className={activeTab === "audio" ? "active" : ""} onClick={() => selectToolTab("audio")}>
               Audio Normalizer
             </button>
-            <button className={activeTab === "visual" ? "active" : ""} onClick={() => setActiveTab("visual")}>
+            <button type="button" className={activeTab === "visual" ? "active" : ""} onClick={() => selectToolTab("visual")}>
               Visual Production
+            </button>
+            <button type="button" className={activeTab === "creator" ? "active" : ""} onClick={() => selectToolTab("creator")}>
+              Creator Production
+            </button>
+            <button type="button" className={activeTab === "graphics" ? "active" : ""} onClick={() => selectToolTab("graphics")}>
+              Graphics Library
+            </button>
+            <button type="button" className={activeTab === "package" ? "active" : ""} onClick={() => selectToolTab("package")}>
+              Visual Package
             </button>
           </div>
         </div>
@@ -1128,6 +1202,8 @@ export default function Home() {
               </button>
             </WorkflowStage>
           </nav>
+        ) : activeTab === "package" ? (
+          <div id={VISUAL_PACKAGE_RAIL_HOST_ID} className="workflow-rail-host" />
         ) : (
           <div className="contextual-tool-actions">
             {activeTab === "caption" ? (
@@ -1143,26 +1219,103 @@ export default function Home() {
                 <button onClick={handleAnalyzeAudio} disabled={busy || !audioSource}><Gauge size={16} /> Analyze Audio</button>
                 <button className="outline-primary" onClick={handleNormalizeAudio} disabled={busy || !audioAnalysis}><WandSparkles size={16} /> Export Corrected Video</button>
               </>
+            ) : activeTab === "creator" ? (
+              <span className="workflow-status">Creator Production pipeline (jobs)</span>
+            ) : activeTab === "graphics" ? (
+              <span className="workflow-status">Graphics Library (review samples & promote usages)</span>
             ) : (
-              <span className="workflow-status">Private post-cut graphics, imported animations, and rendering</span>
+              <span className="workflow-status">Private post-cut graphics, timeline, player, and rendering</span>
             )}
           </div>
         )}
 
         <div className="header-utilities">
-          <div className="header-menu project-menu">
-            <button className="header-menu-trigger" aria-haspopup="menu"><FolderOpen size={17} /> Project <ChevronDown size={14} /></button>
+          <div
+            className={["header-menu", "project-menu", openHeaderMenu === "project" ? "is-open" : ""].join(" ")}
+            ref={projectMenuRef}
+          >
+            <button
+              className="header-menu-trigger"
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded={openHeaderMenu === "project"}
+              onClick={() => setOpenHeaderMenu((current) => (current === "project" ? null : "project"))}
+            >
+              <FolderOpen size={17} /> Project <ChevronDown size={14} />
+            </button>
             <div className="header-dropdown project-dropdown" role="menu">
-              <button onClick={handleCreateVideoProject} disabled={busy}><Upload size={15} /> New Video Project</button>
-              <button onClick={handleOpenVideoProject} disabled={busy}><FolderOpen size={15} /> Open Video Project</button>
-              <button onClick={() => setShowSourceSequence(true)} disabled={busy || !videoProject}><Scissors size={15} /> Manage Source Clips</button>
-              <button onClick={handleCookVisualPlanPrompt} disabled={busy || !videoProject}><ClipboardCopy size={15} /> Cook Visual Plan Prompt</button>
-              <button onClick={handleOpen} disabled={busy}><FolderOpen size={15} /> Open Legacy Transcript</button>
-              <button onClick={handleSaveProject} disabled={busy || !project}><Save size={15} /> Save Project</button>
+              <button
+                type="button"
+                onClick={() => {
+                  closeHeaderMenus();
+                  handleCreateVideoProject();
+                }}
+                disabled={busy}
+              >
+                <Upload size={15} /> New Video Project
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  closeHeaderMenus();
+                  handleOpenVideoProject();
+                }}
+                disabled={busy}
+              >
+                <FolderOpen size={15} /> Open Video Project
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  closeHeaderMenus();
+                  setShowSourceSequence(true);
+                }}
+                disabled={busy || !videoProject}
+              >
+                <Scissors size={15} /> Manage Source Clips
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  closeHeaderMenus();
+                  handleCookVisualPlanPrompt();
+                }}
+                disabled={busy || !videoProject}
+              >
+                <ClipboardCopy size={15} /> Cook Visual Plan Prompt
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  closeHeaderMenus();
+                  handleOpen();
+                }}
+                disabled={busy}
+              >
+                <FolderOpen size={15} /> Open Legacy Transcript
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  closeHeaderMenus();
+                  void handleSaveProject();
+                }}
+                disabled={busy || !project}
+              >
+                <Save size={15} /> Save Project
+              </button>
             </div>
           </div>
           <button className="header-icon-button" aria-label="Save project" title="Save project" onClick={handleSaveProject} disabled={busy || !project}><Save size={18} /></button>
-          <button className="header-icon-button" aria-label="Transcript settings" title="Transcript settings" onClick={() => setShowTranscriptSettings(true)} disabled={busy || !project || activeTab !== "transcript"}><Settings size={18} /></button>
+          <button
+            className="header-icon-button"
+            aria-label="Application settings"
+            title="Application settings — graphics library folder, transcript, caption, and audio preferences"
+            onClick={() => setShowAppSettings(true)}
+            disabled={busy}
+          >
+            <Settings size={18} />
+          </button>
         </div>
       </header>
 
@@ -1312,8 +1465,17 @@ export default function Home() {
             setAudioPreview(null);
           }}
         />
-      ) : (
+      ) : activeTab === "creator" ? (
         <CreatorProductionWorkspace />
+      ) : activeTab === "graphics" ? (
+        <GraphicsLibraryWorkspace refreshSignal={graphicsLibraryRefreshSignal} />
+      ) : activeTab === "package" ? (
+        <VisualPackageWorkspace
+          hasVideoProject={Boolean(videoProject)}
+          projectName={videoProject?.name}
+        />
+      ) : (
+        <VisualProductionWorkspace />
       )}
     </main>
   );
@@ -2486,42 +2648,210 @@ function PreviewRenderModal({
   );
 }
 
-function TranscriptSettingsModal({
+function AppSettingsModal({
   busy,
   close,
   project,
-  update,
+  captionOutputFolder,
+  audioOutputFolder,
+  projectManaged,
+  onUpdatePauseThreshold,
+  onChooseCaptionOutputFolder,
+  onChooseAudioOutputFolder,
+  onCaptionOutputFolderChange,
+  onAudioOutputFolderChange,
+  onGraphicsLibraryChanged,
 }: {
   busy: boolean;
   close: () => void;
-  project: EditorProjectResponse;
-  update: (threshold: number) => void;
+  project: EditorProjectResponse | null;
+  captionOutputFolder: string;
+  audioOutputFolder: string;
+  projectManaged: boolean;
+  onUpdatePauseThreshold: (threshold: number) => void;
+  onChooseCaptionOutputFolder: () => void;
+  onChooseAudioOutputFolder: () => void;
+  onCaptionOutputFolderChange: (value: string) => void;
+  onAudioOutputFolderChange: (value: string) => void;
+  onGraphicsLibraryChanged: () => void;
 }) {
+  const [graphics, setGraphics] = useState<GraphicsLibrarySummary | null>(null);
+  const [graphicsBusy, setGraphicsBusy] = useState(false);
+  const [graphicsMessage, setGraphicsMessage] = useState("");
+
+  const loadGraphics = useCallback(async () => {
+    try {
+      const data = await getGraphicsLibrary();
+      setGraphics(data);
+      setGraphicsMessage("");
+    } catch (error) {
+      setGraphicsMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadGraphics();
+  }, [loadGraphics]);
+
+  const runGraphics = async (action: () => Promise<GraphicsLibrarySummary>, success: string) => {
+    setGraphicsBusy(true);
+    setGraphicsMessage("");
+    try {
+      const data = await action();
+      setGraphics(data);
+      setGraphicsMessage(success);
+      onGraphicsLibraryChanged();
+    } catch (error) {
+      setGraphicsMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGraphicsBusy(false);
+    }
+  };
+
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="transcript-settings-title">
-      <section className="transcript-settings-modal">
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="app-settings-title">
+      <section className="app-settings-modal">
         <div className="settings-modal-header">
           <div>
-            <span className="eyebrow">Transcript Settings</span>
-            <h2 id="transcript-settings-title">Transcript editing</h2>
+            <span className="eyebrow">Application</span>
+            <h2 id="app-settings-title">Settings</h2>
           </div>
-          <button className="icon-button" aria-label="Close settings" onClick={close}><X size={17} /></button>
+          <button className="icon-button" aria-label="Close settings" onClick={close}>
+            <X size={17} />
+          </button>
         </div>
-        <h3>Long pause removal</h3>
-        <p>Only detected pauses at or above this duration are removed by the toolbar action. Shorter cadence pauses remain untouched.</p>
-        <label>
-          <span>Minimum long-pause duration</span>
-          <select
-            disabled={busy}
-            value={project.settings.dead_space_min_seconds}
-            onChange={(event) => update(Number(event.target.value))}
-          >
-            {[0.5, 0.7, 0.8, 1, 1.5, 2].map((seconds) => (
-              <option key={seconds} value={seconds}>{seconds.toFixed(1)} seconds</option>
-            ))}
-          </select>
-        </label>
-        <strong>{project.dead_space_candidate_count} pauses currently qualify</strong>
+
+        <div className="app-settings-sections">
+          <section className="app-settings-section">
+            <h3>Graphics Library</h3>
+            <p>
+              Private Graphics Library folder on this machine. Sample clips and ratings stay local and are never
+              published with the app.
+            </p>
+            <label>
+              <span>Library folder</span>
+              <input
+                readOnly
+                value={graphics?.root || ""}
+                placeholder={graphicsBusy ? "Loading…" : "No folder connected yet"}
+              />
+            </label>
+            <div className="app-settings-row">
+              <button
+                disabled={busy || graphicsBusy}
+                onClick={() => void runGraphics(openGraphicsLibraryDialog, "Graphics library folder updated.")}
+              >
+                <FolderOpen size={15} /> Change folder…
+              </button>
+              {!graphics?.exists ? (
+                <button
+                  className="primary"
+                  disabled={busy || graphicsBusy}
+                  onClick={() => void runGraphics(createGraphicsLibrary, "Default Graphics Library folder created.")}
+                >
+                  Create default library
+                </button>
+              ) : null}
+            </div>
+            {graphics?.exists ? (
+              <small className="app-settings-meta">
+                {graphics.entryCount} graphics · {graphics.withSample} with samples
+              </small>
+            ) : (
+              <small className="app-settings-meta">Not connected — create a default library or choose a folder.</small>
+            )}
+            {graphicsMessage ? <strong className="app-settings-feedback">{graphicsMessage}</strong> : null}
+          </section>
+
+          <section className="app-settings-section">
+            <h3>Transcript Edit</h3>
+            <p>
+              Only detected pauses at or above this duration are removed by Remove Long Pauses. Shorter cadence
+              pauses stay untouched.
+            </p>
+            {project ? (
+              <>
+                <label>
+                  <span>Minimum long-pause duration</span>
+                  <select
+                    disabled={busy}
+                    value={project.settings.dead_space_min_seconds}
+                    onChange={(event) => onUpdatePauseThreshold(Number(event.target.value))}
+                  >
+                    {[0.5, 0.7, 0.8, 1, 1.5, 2].map((seconds) => (
+                      <option key={seconds} value={seconds}>
+                        {seconds.toFixed(1)} seconds
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <small className="app-settings-meta">
+                  {project.dead_space_candidate_count} pauses currently qualify in the active project
+                </small>
+              </>
+            ) : (
+              <small className="app-settings-meta">Open a transcript project to edit pause settings.</small>
+            )}
+          </section>
+
+          <section className="app-settings-section">
+            <h3>Caption Generator</h3>
+            <p>Default folder for generated captioned videos when you are not inside a managed video project.</p>
+            <label>
+              <span>Caption output folder</span>
+              <div className="app-settings-path-row">
+                <input
+                  value={captionOutputFolder}
+                  readOnly={projectManaged}
+                  onChange={(event) => onCaptionOutputFolderChange(event.target.value)}
+                  placeholder="Choose a folder…"
+                />
+                <button
+                  disabled={busy || projectManaged}
+                  onClick={onChooseCaptionOutputFolder}
+                  title={projectManaged ? "Managed automatically by the active video project" : "Choose caption output folder"}
+                >
+                  <FolderOpen size={15} /> Browse…
+                </button>
+              </div>
+            </label>
+            {projectManaged ? (
+              <small className="app-settings-meta">Managed by the active video project.</small>
+            ) : null}
+          </section>
+
+          <section className="app-settings-section">
+            <h3>Audio Normalizer</h3>
+            <p>Default folder for corrected audio exports when you are not inside a managed video project.</p>
+            <label>
+              <span>Audio output folder</span>
+              <div className="app-settings-path-row">
+                <input
+                  value={audioOutputFolder}
+                  readOnly={projectManaged}
+                  onChange={(event) => onAudioOutputFolderChange(event.target.value)}
+                  placeholder="Choose a folder…"
+                />
+                <button
+                  disabled={busy || projectManaged}
+                  onClick={onChooseAudioOutputFolder}
+                  title={projectManaged ? "Managed automatically by the active video project" : "Choose audio output folder"}
+                >
+                  <FolderOpen size={15} /> Browse…
+                </button>
+              </div>
+            </label>
+            {projectManaged ? (
+              <small className="app-settings-meta">Managed by the active video project.</small>
+            ) : null}
+          </section>
+        </div>
+
+        <div className="app-settings-footer">
+          <button className="primary" onClick={close}>
+            Done
+          </button>
+        </div>
       </section>
     </div>
   );

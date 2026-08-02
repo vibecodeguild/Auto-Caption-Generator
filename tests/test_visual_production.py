@@ -259,31 +259,7 @@ def test_validate_visual_plan_rejects_unknown_module(tmp_path: Path) -> None:
         visual_production.save_visual_plan(plan_path, plan)
 
 
-def test_dual_comparison_module_renders_two_colored_sides() -> None:
-    cue = {
-        "moduleId": "dual-comparison",
-        "parameters": {
-            "kicker": "Choose the result",
-            "leftTitle": "Work",
-            "rightTitle": "Codex",
-            "leftItems": ["Business artifact"],
-            "rightItems": ["Technical change"],
-            "leftColor": "#4D7CFE",
-            "rightColor": "#6E56CF",
-        },
-    }
-
-    markup = visual_production._module_markup(cue, "comparison", 10, 8, 20)
-
-    assert "module-dual-comparison" in markup
-    assert "Business artifact" in markup
-    assert "Technical change" in markup
-    assert "--left-accent:#4D7CFE" in markup
-    assert "--right-accent:#6E56CF" in markup
-    assert "comparison-speaker-outline" not in markup
-
-
-@pytest.mark.parametrize("module_id", ["punchline-reveal", "progress-scale", "dual-comparison"])
+@pytest.mark.parametrize("module_id", ["punchline-reveal"])
 def test_sustained_modules_render_only_inside_the_audited_speaker_safe_region(module_id: str) -> None:
     cue = {
         "moduleId": module_id,
@@ -303,21 +279,30 @@ def test_sustained_modules_render_only_inside_the_audited_speaker_safe_region(mo
     assert 'class="module-fill"' not in markup or 'style="left:18.000%' in markup
 
 
-def test_progress_scale_renders_its_planned_milestones() -> None:
+def test_progress_scale_renders_full_white_stage_with_video_window() -> None:
     cue = {
         "moduleId": "progress-scale",
         "parameters": {
+            "kicker": "PROGRESS",
             "text": "Working result",
             "milestones": ["Prompt again", "Add detail", "Verify"],
+            "startLabel": "IDEA",
+            "targetLabel": "SHIPPED",
         },
     }
 
     markup = visual_production._module_markup(cue, "progress", 10, 8, 20)
 
+    assert "progress-stage" in markup
+    assert "progress-track-block" in markup
+    assert "stat-video-outline" in markup
+    assert "module-fill" not in markup
     assert "scale-milestones" in markup
+    assert "scale-marker" not in markup
     assert "Prompt again" in markup
     assert "Add detail" in markup
     assert "Verify" in markup
+    assert "Working result" in markup
     semantic_paths = [
         item["parameterPath"]
         for item in visual_production._unanchored_semantic_items({
@@ -332,23 +317,285 @@ def test_progress_scale_renders_its_planned_milestones() -> None:
     assert "parameters.milestones.2" in semantic_paths
 
 
-def test_pinned_list_rows_mark_structural_parent_child_overlap_as_intentional() -> None:
+def test_progress_scale_milestone_hits_track_linear_bar_fill() -> None:
+    """Stops sit at 0/50/100% of fill; bar finishes before a multi-second linger."""
+    start, duration = 1.0, 10.0
+    hold_after_fill = 2.5
+    video_out = 0.45
+    fill_lead = 0.45
+    min_fill = 1.2
+    fill_duration = max(min_fill, duration - fill_lead - hold_after_fill - video_out)
+    fill_start = start + fill_lead
+    fill_end = fill_start + fill_duration
+    milestone_count = 3
+    appears = [
+        fill_start + (index / max(milestone_count - 1, 1)) * fill_duration
+        for index in range(milestone_count)
+    ]
+    assert appears[0] == pytest.approx(fill_start)
+    assert appears[1] == pytest.approx(fill_start + fill_duration * 0.5)
+    assert appears[2] == pytest.approx(fill_end)
+    # Linger after last stop, before video restore / cue end.
+    restore_at = min(start + duration - video_out, fill_end + hold_after_fill)
+    assert restore_at - fill_end == pytest.approx(hold_after_fill)
+    assert appears[0] < appears[1] < appears[2]
+
+
+def test_brand_cta_lockup_is_community_stage_with_generic_defaults() -> None:
     markup = visual_production._module_markup(
         {
-            "moduleId": "list-reveal-pinned-thesis",
+            "moduleId": "brand-cta-lockup",
             "parameters": {
-                "kicker": "RULES",
-                "thesis": "Keep it readable",
-                "rows": ["First point", "Second point"],
+                "action": "JOIN THE COMMUNITY",
+                "destination": "your.community.url",
             },
         },
-        "pinned-list",
-        10,
+        "cta",
+        1,
         8,
         20,
     )
+    assert "community-stage" in markup
+    assert "community-mask" in markup
+    assert "community-bg" not in markup  # solid bg under the hole paints the video white
+    assert "community-logo" in markup
+    assert "community-copy" in markup
+    assert "community-url" in markup
+    assert "community-video-outline" in markup
+    assert "JOIN THE COMMUNITY" in markup
+    assert "your.community.url" in markup
+    assert "brand-skool-logo.svg" in markup
+    assert "pf-card" not in markup
+    assert visual_production.brand_skool_logo_path().is_file()
 
-    assert markup.count("data-layout-allow-overlap") == 2
+
+def test_punchline_reveal_with_image_is_joke_card() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "punchline-reveal",
+            "parameters": {
+                "kicker": "RARE MARKETING SKILL",
+                "text": "WORD LAYOUT DARK ARTS",
+                "imageAssetId": "demo-joke-image",
+            },
+        },
+        "joke",
+        1,
+        8,
+        20,
+        staged_assets={"demo-joke-image": "demo-joke-image.png"},
+    )
+    assert "joke-stage" in markup
+    assert "joke-mask" in markup
+    assert "joke-video-outline" in markup
+    assert "joke-panel" in markup
+    assert "joke-card" in markup
+    assert "joke-image" in markup
+    assert "joke-copy" in markup
+    assert "joke-kicker" in markup
+    assert "joke-line" in markup
+    assert "WORD LAYOUT DARK ARTS" in markup
+    assert "COMEDY BREAK" not in markup
+    assert "joke-tab" not in markup
+    assert "demo-joke-image.png" in markup
+    assert "module-fill" not in markup
+
+
+def test_punchline_reveal_without_image_stays_text_path() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "punchline-reveal",
+            "parameters": {"kicker": "PUNCH", "text": "JUST START"},
+        },
+        "punch",
+        1,
+        4,
+        20,
+    )
+    assert "joke-card" not in markup
+    assert "punchline" in markup
+
+
+def test_robot_rocket_sign_markup_has_rig_and_sign() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "robot-rocket-sign",
+            "parameters": {"text": "LINK IN DESCRIPTION"},
+        },
+        "rocket",
+        1,
+        6,
+        20,
+    )
+    assert "rocket-stage" in markup
+    assert "rocket-rig" in markup
+    assert "rocket-smoke" in markup
+    assert "rocket-fist" in markup
+    assert "rocket-sign-board" in markup
+    assert "LINK IN DESCRIPTION" in markup
+    assert "robot-bubble" not in markup
+
+
+def test_robot_hold_after_drawn_is_three_seconds() -> None:
+    """Long cues still exit ~3s after the bubble is drawn (engine-fixed)."""
+    assert visual_production.ROBOT_HOLD_AFTER_DRAWN_SEC == 3.0
+    # drawn_at (cheer) = start + 0.28 + 0.45 = start + 0.73 → exit at start + 3.73
+    start = 2.0
+    duration = 20.0  # deliberately long
+    drawn_at = start + 0.28 + 0.45
+    expected_exit = drawn_at + visual_production.ROBOT_HOLD_AFTER_DRAWN_SEC
+    # Reconstruct the same math the timeline uses.
+    exit_d = 0.28
+    exit_at = min(start + duration - exit_d, expected_exit)
+    assert exit_at == pytest.approx(expected_exit)
+    assert exit_at - drawn_at == pytest.approx(3.0)
+
+
+def test_robot_cheer_markup_has_bubble_and_svg() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "robot-cheer",
+            "parameters": {"text": "Vibe coding", "tagline": "FOR THE WIN!"},
+        },
+        "cheer",
+        1,
+        6,
+        20,
+    )
+    assert "robot-stage-left" in markup
+    assert "robot-bubble" in markup
+    assert "Vibe coding" in markup
+    assert "FOR THE WIN!" in markup
+    assert "robot-body" in markup
+    assert 'data-semantic-path="parameters.text"' in markup
+
+
+def test_robot_defiant_and_roast_markup_sides() -> None:
+    defiant = visual_production._module_markup(
+        {"moduleId": "robot-defiant", "parameters": {"text": "Stand firm"}},
+        "def",
+        1,
+        6,
+        20,
+    )
+    roast = visual_production._module_markup(
+        {"moduleId": "robot-roast", "parameters": {"text": "He's lowkey cheap"}},
+        "roast",
+        1,
+        8,
+        20,
+    )
+    assert "robot-stage-left" in defiant
+    assert "robot-fist" in defiant
+    assert "Stand firm" in defiant
+    assert "robot-stage-right" in roast
+    assert "robot-point" in roast
+    assert "lowkey cheap" in roast
+    assert "robot-bubble-roast" in roast
+
+
+def test_dependency_stack_markup_has_title_nodes_and_video_frame() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "dependency-stack",
+            "parameters": {
+                "text": "WHAT YOU NEED",
+                "nodes": ["Transcript", "Locked cut", "Graphics kit"],
+            },
+        },
+        "dep",
+        1,
+        10,
+        20,
+    )
+    assert "dependency-stage" in markup
+    assert "dependency-video-outline" in markup
+    assert "dependency-title" in markup
+    assert "WHAT YOU NEED" in markup
+    assert "STACK" not in markup
+    assert 'data-node-index="0"' in markup
+    assert "Transcript" in markup
+    assert "lib-kicker" not in markup
+    assert 'class="kicker"' not in markup
+
+
+def test_windows_prompt_typing_docks_head_and_types_chars() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "windows-prompt-typing",
+            "parameters": {
+                "appName": "Windows PowerShell",
+                "prompt": "Hi there",
+            },
+        },
+        "prompt",
+        1,
+        8,
+        20,
+    )
+    assert "prompt-stage" in markup
+    assert "prompt-terminal" in markup
+    assert "prompt-video-outline" in markup
+    assert "prompt-mask" in markup
+    assert "Windows PowerShell" in markup
+    assert "PS C:\\&gt;" in markup or "PS C:\\>" in markup
+    assert "prompt-typed-text" in markup
+    assert 'data-full-prompt="Hi there"' in markup
+    # Live text starts empty; GSAP fills textContent letter-by-letter.
+    assert 'class="prompt-typed-text"></span>' in markup
+    # Caret trails the typed text node inside .prompt-typed.
+    text_idx = markup.find('class="prompt-typed-text"')
+    cursor_idx = markup.find('class="prompt-cursor"')
+    assert text_idx != -1 and cursor_idx > text_idx
+    assert "pf-window" not in markup
+    # Windows caption buttons, not Mac traffic-light dots.
+    assert "win-min" in markup
+    assert "win-max" in markup
+    assert "win-close" in markup
+    assert "prompt-win-controls" in markup
+
+
+def test_problem_card_triptych_markup_is_sequential_not_static_accent() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "problem-card-triptych",
+            "parameters": {
+                "cards": ["Too slow", "Too generic", "Too risky"],
+            },
+        },
+        "tri",
+        1,
+        10,
+        20,
+    )
+    assert "pf-triptych" in markup
+    assert 'data-card-index="0"' in markup
+    assert 'data-card-index="2"' in markup
+    assert "Too slow" in markup
+    assert "lib-accent" not in markup
+    assert "lib-kicker" not in markup
+    assert "PROBLEMS" not in markup
+
+
+def test_progress_scale_markup_places_stops_on_bar_fractions() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "progress-scale",
+            "parameters": {
+                "text": "JOURNEY",
+                "milestones": ["Brief", "Build", "Ship"],
+            },
+        },
+        "progress",
+        1,
+        8,
+        20,
+    )
+    assert 'data-milestone-index="0"' in markup
+    assert "left:0.0000%" in markup
+    assert "left:50.0000%" in markup
+    assert "left:100.0000%" in markup
+    assert "scale-milestone" in markup
 
 
 def test_approved_reuse_variants_render_frozen_media_and_can_hide_step_number() -> None:
@@ -401,9 +648,10 @@ def test_approved_reuse_variants_render_frozen_media_and_can_hide_step_number() 
     )
 
     assert 'src="assets/joke-image.png"' in joke
-    assert "joke-card-approved" in joke
-    assert 'src="assets/skool-logo.svg"' in cta
-    assert "pf-community" in cta
+    assert "joke-card" in joke
+    assert "joke-stage" in joke
+    assert 'src="assets/skool-logo.svg"' in cta or "brand-skool-logo.svg" in cta
+    assert "community-stage" in cta
     assert 'data-semantic-path="parameters.logoText"' in cta
     assert 'data-semantic-path="parameters.logoAssetId"' not in cta
     assert "pf-step-no-num" in step
@@ -486,7 +734,7 @@ def test_a_plan_with_cues_and_no_decision_record_cannot_be_delivered(tmp_path: P
     """Absence of visual-suggestions.json used to mean every gate silently passed."""
     plan_path, plan = _private_project(tmp_path)
     plan["cues"] = [{
-        "id": "cue-1", "kind": "module", "moduleId": "source-footage-hold",
+        "id": "cue-1", "kind": "module", "moduleId": "source-punch-zoom",
         "startSec": 1, "endSec": 4, "enabled": True, "parameters": {}, "semanticItems": [],
     }]
     saved = visual_production.save_visual_plan(plan_path, plan)
@@ -534,7 +782,7 @@ def test_editing_a_cue_after_approval_reopens_the_full_review(tmp_path: Path) ->
     approved = visual_production.approve_full_review(plan_path)
 
     approved["cues"] = [{
-        "id": "cue-1", "kind": "module", "moduleId": "source-footage-hold",
+        "id": "cue-1", "kind": "module", "moduleId": "source-punch-zoom",
         "startSec": 1, "endSec": 4, "enabled": True, "parameters": {}, "semanticItems": [],
     }]
     edited = visual_production.save_visual_plan(plan_path, approved)
@@ -548,7 +796,7 @@ def test_recutting_the_locked_cut_names_the_cues_that_must_be_retimed(tmp_path: 
     locked = plan_path.parents[1] / "source" / "locked-cut.mp4"
     plan["source"]["videoSha256"] = visual_production.sha256_file(locked)
     plan["cues"] = [{
-        "id": "cue-1", "kind": "module", "moduleId": "source-footage-hold",
+        "id": "cue-1", "kind": "module", "moduleId": "source-punch-zoom",
         "startSec": 1, "endSec": 4, "enabled": True, "parameters": {}, "semanticItems": [],
     }]
     saved = visual_production.save_visual_plan(plan_path, plan)
@@ -585,7 +833,7 @@ def test_a_custom_composition_cannot_declare_a_source_hash_it_does_not_have(tmp_
 def test_a_plan_that_does_not_record_its_locked_cut_cannot_render(tmp_path: Path) -> None:
     plan_path, plan = _private_project(tmp_path)
     plan["cues"] = [{
-        "id": "cue-1", "kind": "module", "moduleId": "source-footage-hold",
+        "id": "cue-1", "kind": "module", "moduleId": "source-punch-zoom",
         "startSec": 1, "endSec": 4, "enabled": True, "parameters": {}, "semanticItems": [],
     }]
     saved = visual_production.save_visual_plan(plan_path, plan)

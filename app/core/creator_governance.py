@@ -251,17 +251,16 @@ def validate_semantic_manifest(
     used_source_change_refs: set[str] = set()
     cursor = 0
     sequence_ids: list[str] = []
+    from app.core.creator_production_menu import planning_capability_ids_for_profile
+
     full_catalog_required = bool(
         (channel_profile or {}).get("selection", {}).get(
             "fullCatalogEvaluationRequired", False
         )
     )
-    planning_capability_ids = [
-        item["id"]
-        for item in catalog["capabilities"]
-        if item.get("scope") == "blueprint-macro"
-        and item.get("category") != "workflow-specific-transition-source"
-    ]
+    planning_capability_ids = planning_capability_ids_for_profile(
+        catalog, channel_profile
+    )
     for sequence in manifest["sequences"]:
         if sequence["absoluteStartFrame"] != cursor:
             raise ValueError("Semantic sequences must cover the runtime without gaps or overlaps.")
@@ -546,8 +545,8 @@ def validate_materialized_capability_bindings(manifest: dict, catalog: dict) -> 
                 raise ValueError(
                     f"Materialized sequence {sequence['id']} uses unadmitted capability {capability_id}."
                 )
+            implementation_id = binding.get("implementationId")
             if capability["technicalAdmission"] == "project-admitted":
-                implementation_id = binding.get("implementationId")
                 valid = any(
                     admission.get("episodeId") == manifest["episodeId"]
                     and admission.get("sequenceId") == sequence["id"]
@@ -557,6 +556,18 @@ def validate_materialized_capability_bindings(manifest: dict, catalog: dict) -> 
                 if not valid:
                     raise ValueError(
                         f"Sequence {sequence['id']} does not bind its exact project-admitted implementation."
+                    )
+            elif capability["technicalAdmission"] == "library-admitted":
+                valid = any(
+                    admission.get("implementationId") == implementation_id
+                    for admission in capability.get("libraryAdmissions", [])
+                ) or any(
+                    (capability.get("seedKit") or {}).get("implementationId")
+                    == implementation_id
+                )
+                if not valid:
+                    raise ValueError(
+                        f"Sequence {sequence['id']} does not bind its exact library-admitted seed implementation."
                     )
 
 

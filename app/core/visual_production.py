@@ -31,78 +31,85 @@ SPEAKER_SAFETY_MODES = {
 BRAND_ID = "vcg-white-editorial"
 MODULE_IDS = {
     "punchline-reveal",
-    "source-footage-hold",
     "speaker-side-panel",
     "progress-scale",
     "dependency-stack",
-    "dual-comparison",
     "numbered-example-card",
-    # Movement and emphasis over a software demonstration. Without these the vocabulary could not
-    # express anything at all over 500+ seconds of screen recording, so plans went bare there.
+    # Screen-share motion / callouts (without these, long demos go bare).
     "source-punch-zoom",
     "ui-callout",
-    # Ported from the July-22 project's built library. These are the families that already worked
-    # over a software demonstration: they anchor to one edge and leave the screen readable.
-    "side-list-panel",
-    "result-badge",
-    "link-chip",
-    "milestone-path",
-    "before-after-grade",
-    "lower-third-flow",
-    "three-step-celebration",
-    "career-pathway",
-    "list-reveal-pinned-thesis",
+    # Ported July-22 families: edge-anchored overlays that leave UI readable.
     "kinetic-word-punctuation",
     "numbered-step-intro",
     "problem-card-triptych",
     "speaker-rise-callouts",
-    "conversation-bubble-sequence",
     "tradeoff-meter",
-    "rank-medal-hit",
     "brand-cta-lockup",
-    "command-popup-stack",
     "windows-prompt-typing",
-    "uplifting-sunrise-finale",
+    # VCG mascot overlays (cheer / defiant / roast).
+    "robot-cheer",
+    "robot-defiant",
+    "robot-roast",
+    # Soft CTA: rocket fly-by with placard (description / prior video pointer).
+    "robot-rocket-sign",
 }
+ROBOT_MODULE_IDS = frozenset({"robot-cheer", "robot-defiant", "robot-roast"})
+# Engine-fixed: after the mascot is fully drawn, max on-screen hold before exit.
+ROBOT_HOLD_AFTER_DRAWN_SEC = 3.0
+# Rocket soft-CTA gag is longer than standing robots (misfire + pound + blast).
+ROBOT_ROCKET_MIN_CUE_SEC = 6.5
+# Optional private community wordmark for brand-cta-lockup (lives under gitignored internal/).
+BRAND_SKOOL_LOGO_STAGED_NAME = "brand-skool-logo.svg"
+# Public defaults stay generic so channel URLs / community names are not forced into the repo.
+DEFAULT_BRAND_CTA_LOGO_TEXT = "Community"
+DEFAULT_BRAND_CTA_ACTION = "JOIN THE COMMUNITY"
+DEFAULT_BRAND_CTA_DESTINATION = "your.community.url"
+
+
+def brand_skool_logo_path() -> Path:
+    """Private logo path (not tracked by git). Missing is fine until a local brand pack exists."""
+    return project_root() / "internal" / "brand" / "skool-logo.svg"
+
+
+def brand_joke_demo_image_path() -> Path:
+    """Default illustration for library samples of the 7-22 joke image card."""
+    return project_root() / "internal" / "brand" / "joke-demo.png"
+
+
 CUE_KINDS = {"module", "asset", "composition"}
 ANCHOR_TYPES = {"spoken", "scene-relative", "unanchored"}
 COMMON_MODULE_PARAMETERS = {
     "reviewLabel", "editorialPurpose", "recipeId", "opacity", "transitionIn", "transitionOut",
     "speakerSafety", "visualFamily", "candidateTreatmentIds", "selectionRationale",
     "planningSuggestionId", "approvedTreatmentId", "meaningfulChanges", "approvalEvidence",
+    # Layout-aware sample / placement free region (normalized bounds).
+    "placementBounds",
 }
 MODULE_PARAMETER_KEYS = {
+    # Image path = joke card (imageAssetId + kicker + text); head docks left, art right.
     "punchline-reveal": COMMON_MODULE_PARAMETERS | {"text", "kicker", "accentColor", "imageAssetId"},
-    "source-footage-hold": COMMON_MODULE_PARAMETERS,
     "speaker-side-panel": COMMON_MODULE_PARAMETERS | {"text", "kicker", "accentColor", "side", "panelWidth", "videoBounds", "frameStyle", "items"},
     "progress-scale": COMMON_MODULE_PARAMETERS | {"text", "kicker", "startLabel", "targetLabel", "accentColor", "milestones"},
-    "dependency-stack": COMMON_MODULE_PARAMETERS | {"text", "kicker", "nodes", "accentColor"},
-    "dual-comparison": COMMON_MODULE_PARAMETERS | {"kicker", "leftTitle", "rightTitle", "leftItems", "rightItems", "leftColor", "rightColor"},
+    # No kicker. Title (`text`) + up to 6 stack nodes; video floats into right frame.
+    "dependency-stack": COMMON_MODULE_PARAMETERS | {"text", "nodes"},
     "numbered-example-card": COMMON_MODULE_PARAMETERS | {
         "kicker", "exampleNumber", "totalExamples", "titleLines", "accentLineIndex", "tags", "accentColor",
     },
-    "source-punch-zoom": COMMON_MODULE_PARAMETERS | {"focusX", "focusY", "zoom", "settleSec"},
+    "source-punch-zoom": COMMON_MODULE_PARAMETERS | {"focusX", "focusY", "zoom", "settleSec", "motion"},
     "ui-callout": COMMON_MODULE_PARAMETERS | {"label", "detail", "targetBounds", "accentColor", "pointer"},
-    "side-list-panel": COMMON_MODULE_PARAMETERS | {"kicker", "text", "rows", "accentRowIndex", "side", "rowStyle"},
-    "result-badge": COMMON_MODULE_PARAMETERS | {"kicker", "lines", "accentLineIndex", "mark", "side"},
-    "link-chip": COMMON_MODULE_PARAMETERS | {"kicker", "glyph", "words", "accentWordIndex", "side"},
-    "milestone-path": COMMON_MODULE_PARAMETERS | {"kicker", "text", "stops", "accentStopIndex", "side"},
-    "before-after-grade": COMMON_MODULE_PARAMETERS | {"kicker", "before", "after", "arrow", "footerLeft", "footerRight", "side"},
-    "lower-third-flow": COMMON_MODULE_PARAMETERS | {"kicker", "items", "accentItemIndex", "variant"},
-    "three-step-celebration": COMMON_MODULE_PARAMETERS | {"kicker", "steps", "payoff", "side"},
-    "career-pathway": COMMON_MODULE_PARAMETERS | {"kicker", "rows", "accentRowIndex", "side"},
-    "list-reveal-pinned-thesis": COMMON_MODULE_PARAMETERS | {"kicker", "thesis", "rows", "accentRowIndex", "side"},
     "kinetic-word-punctuation": COMMON_MODULE_PARAMETERS | {"phrase", "anchor", "side", "accentColor"},
     "numbered-step-intro": COMMON_MODULE_PARAMETERS | {"stepNumber", "title", "action", "side", "showNumber"},
-    "problem-card-triptych": COMMON_MODULE_PARAMETERS | {"kicker", "cards", "accentCardIndex"},
+    # No kicker/eyebrow — three cards only. Highlight is sequential (pink → white).
+    "problem-card-triptych": COMMON_MODULE_PARAMETERS | {"cards"},
     "speaker-rise-callouts": COMMON_MODULE_PARAMETERS | {"thesis", "callouts", "accentCalloutIndex"},
-    "conversation-bubble-sequence": COMMON_MODULE_PARAMETERS | {"kicker", "bubbles", "accentBubbleIndex", "side"},
     "tradeoff-meter": COMMON_MODULE_PARAMETERS | {"kicker", "leftLabel", "rightLabel", "value", "verdict", "side"},
-    "rank-medal-hit": COMMON_MODULE_PARAMETERS | {"rank", "verdict", "medal", "side"},
-    "brand-cta-lockup": COMMON_MODULE_PARAMETERS | {"logoText", "logoAssetId", "action", "destination", "side"},
-    "command-popup-stack": COMMON_MODULE_PARAMETERS | {"kicker", "commands", "purposes", "accentCommandIndex", "side"},
+    "brand-cta-lockup": COMMON_MODULE_PARAMETERS | {"logoText", "logoAssetId", "action", "destination"},
     "windows-prompt-typing": COMMON_MODULE_PARAMETERS | {"appName", "prompt", "side"},
-    "uplifting-sunrise-finale": COMMON_MODULE_PARAMETERS | {"kicker", "claim", "action"},
+    # Mascot reaction: bubble line (cheer also has a fixed-energy tagline).
+    "robot-cheer": COMMON_MODULE_PARAMETERS | {"text", "tagline"},
+    "robot-defiant": COMMON_MODULE_PARAMETERS | {"text"},
+    "robot-roast": COMMON_MODULE_PARAMETERS | {"text"},
+    "robot-rocket-sign": COMMON_MODULE_PARAMETERS | {"text"},
 }
 SIDE_ANCHORS = {"left", "right"}
 MAX_PUNCH_ZOOM = 2.0
@@ -376,31 +383,26 @@ def resolve_project_path(root: Path, relative_path: str) -> Path:
 
 def _module_semantic_texts(cue: dict) -> list[tuple[str, str, str]]:
     """Return every visible module string that requires an explicit reveal anchor."""
-    if cue.get("kind") != "module" or cue.get("moduleId") == "source-footage-hold":
+    if cue.get("kind") != "module":
         return []
     params = cue.get("parameters") if isinstance(cue.get("parameters"), dict) else {}
     module_id = cue.get("moduleId")
     fields: list[tuple[str, str]] = []
-    if module_id in {"punchline-reveal", "speaker-side-panel", "progress-scale", "dependency-stack"}:
+    if module_id in {"punchline-reveal", "speaker-side-panel", "progress-scale"}:
         fields.extend([("parameters.kicker", str(params.get("kicker") or "")), ("parameters.text", str(params.get("text") or ""))])
+    if module_id == "dependency-stack":
+        fields.append(("parameters.text", str(params.get("text") or "")))
+    if module_id in ROBOT_MODULE_IDS or module_id == "robot-rocket-sign":
+        fields.append(("parameters.text", str(params.get("text") or "")))
+        if module_id == "robot-cheer":
+            fields.append(("parameters.tagline", str(params.get("tagline") or "")))
     if module_id == "progress-scale":
         fields.extend([("parameters.startLabel", str(params.get("startLabel") or "")), ("parameters.targetLabel", str(params.get("targetLabel") or ""))])
-    if module_id == "dual-comparison":
-        fields.extend([
-            ("parameters.kicker", str(params.get("kicker") or "")),
-            ("parameters.leftTitle", str(params.get("leftTitle") or "")),
-            ("parameters.rightTitle", str(params.get("rightTitle") or "")),
-        ])
     if module_id == "numbered-example-card":
         fields.append(("parameters.kicker", str(params.get("kicker") or "")))
     if module_id in PORTED_MODULE_IDS:
         for key in ("kicker", "thesis", "phrase", "title", "action", "payoff", "verdict", "rank",
                     "leftLabel", "rightLabel", "logoText", "destination", "appName", "prompt", "claim"):
-            if key in MODULE_PARAMETER_KEYS.get(module_id, set()):
-                fields.append((f"parameters.{key}", str(params.get(key) or "")))
-    if module_id in LIBRARY_MODULE_IDS:
-        fields.append(("parameters.kicker", str(params.get("kicker") or "")))
-        for key in ("text", "before", "after", "footerLeft", "footerRight"):
             if key in MODULE_PARAMETER_KEYS.get(module_id, set()):
                 fields.append((f"parameters.{key}", str(params.get(key) or "")))
     if module_id == "ui-callout":
@@ -410,21 +412,11 @@ def _module_semantic_texts(cue: dict) -> list[tuple[str, str, str]]:
         ])
     list_fields = (
         ["nodes"] if module_id == "dependency-stack"
-        else ["leftItems", "rightItems"] if module_id == "dual-comparison"
         else ["milestones"] if module_id == "progress-scale"
         else ["items"] if module_id == "speaker-side-panel"
         else ["titleLines"] if module_id == "numbered-example-card"
-        else ["rows"] if module_id == "side-list-panel"
-        else ["lines"] if module_id == "result-badge"
-        else ["words"] if module_id == "link-chip"
-        else ["stops"] if module_id == "milestone-path"
-        else ["items"] if module_id == "lower-third-flow"
-        else ["steps"] if module_id == "three-step-celebration"
-        else ["rows"] if module_id in {"career-pathway", "list-reveal-pinned-thesis"}
         else ["cards"] if module_id == "problem-card-triptych"
         else ["callouts"] if module_id == "speaker-rise-callouts"
-        else ["bubbles"] if module_id == "conversation-bubble-sequence"
-        else ["commands", "purposes"] if module_id == "command-popup-stack"
         else []
     )
     for field in list_fields:
@@ -1275,7 +1267,7 @@ def visual_planning_gate_issues(plan_path: Path, plan: dict) -> list[str]:
                 issues.append(f"{suggestion_id} approval evidence does not match its approved treatment.")
         approved_by_id[suggestion_id] = suggestion
     for cue in plan.get("cues", []):
-        if not cue.get("enabled", True) or cue.get("moduleId") == "source-footage-hold":
+        if not cue.get("enabled", True):
             continue
         parameters = cue.get("parameters") if isinstance(cue.get("parameters"), dict) else {}
         suggestion_id = parameters.get("planningSuggestionId")
@@ -1712,18 +1704,17 @@ def _cue_window(cue: dict, range_start: float, range_end: float) -> tuple[float,
     return start - range_start, end - start
 
 
-LIBRARY_MODULE_IDS = {
-    "side-list-panel", "result-badge", "link-chip",
-    "milestone-path", "before-after-grade", "lower-third-flow",
-}
-# The catalog families, built. Each was a name with a description and no renderer; a plan that
-# selected one could not even produce an approval frame, which is why plans came back thin.
+# Empty: July-22 library families retired; remaining edge graphics live in PORTED.
+LIBRARY_MODULE_IDS: set[str] = set()
+# Ported catalog families with dedicated markup paths (subset of MODULE_IDS).
 PORTED_MODULE_IDS = {
-    "three-step-celebration", "career-pathway", "list-reveal-pinned-thesis",
-    "kinetic-word-punctuation", "numbered-step-intro", "problem-card-triptych",
-    "speaker-rise-callouts", "conversation-bubble-sequence", "tradeoff-meter",
-    "rank-medal-hit", "brand-cta-lockup", "command-popup-stack",
-    "windows-prompt-typing", "uplifting-sunrise-finale",
+    "kinetic-word-punctuation",
+    "numbered-step-intro",
+    "problem-card-triptych",
+    "speaker-rise-callouts",
+    "tradeoff-meter",
+    "brand-cta-lockup",
+    "windows-prompt-typing",
 }
 
 
@@ -1735,7 +1726,7 @@ def _ported_markup(
     kicker: str,
     staged_assets: dict[str, str] | None = None,
 ) -> str:
-    """Markup for the fourteen catalog families, built against the creator's brand language."""
+    """Markup for ported catalog families (brand language from successful VCG projects)."""
     side = str(params.get("side")) if str(params.get("side")) in SIDE_ANCHORS else "right"
     open_tag = f'<section {common} style="--cue-accent:{accent}">'
     kick = f'<div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
@@ -1743,45 +1734,10 @@ def _ported_markup(
     def accent_at(key: str) -> int:
         return int(_number(params.get(key), -1, -1, 9))
 
-    if module_id == "three-step-celebration":
-        steps = _strings(params.get("steps"), 3)
-        payoff = html.escape(str(params.get("payoff") or ""))
-        body = "".join(
-            f'<div class="pf-step"><i>{index + 1}</i>'
-            f'<span data-semantic-path="parameters.steps.{index}">{html.escape(step)}</span></div>'
-            for index, step in enumerate(steps)
-        )
-        spark = "".join('<i class="pf-spark"></i>' for _ in range(9))
-        return (f'{open_tag}<div class="pf-card pf-{side}">{kick}<div class="pf-steps">{body}</div>'
-                f'<div class="pf-payoff" data-semantic-path="parameters.payoff">{payoff}</div>'
-                f'<div class="pf-sparks">{spark}</div></div></section>')
-
-    if module_id == "career-pathway":
-        rows = _strings(params.get("rows"), 4)
-        marked = accent_at("accentRowIndex")
-        body = "".join(
-            f'<div class="pf-path-row pf-{"odd" if index % 2 else "even"}{" lib-accent" if index == marked else ""}" '
-            f'data-semantic-path="parameters.rows.{index}">{html.escape(row)}</div>'
-            for index, row in enumerate(rows)
-        )
-        return f'{open_tag}<div class="pf-card pf-{side}">{kick}<div class="pf-path">{body}</div></div></section>'
-
-    if module_id == "list-reveal-pinned-thesis":
-        thesis = html.escape(str(params.get("thesis") or ""))
-        rows = _strings(params.get("rows"), 5)
-        marked = accent_at("accentRowIndex")
-        body = "".join(
-            f'<div class="pf-pin-row{" lib-accent" if index == marked else ""}" data-layout-allow-overlap>'
-            f'<i></i><span data-semantic-path="parameters.rows.{index}">{html.escape(row)}</span></div>'
-            for index, row in enumerate(rows)
-        )
-        return (f'{open_tag}<div class="pf-card pf-{side}">{kick}'
-                f'<div class="pf-thesis" data-semantic-path="parameters.thesis">{thesis}</div>'
-                f'<div class="pf-pin-rows">{body}</div></div></section>')
-
     if module_id == "kinetic-word-punctuation":
         phrase = html.escape(str(params.get("phrase") or "THIS"))
-        anchor = str(params.get("anchor")) if str(params.get("anchor")) in {"top", "middle", "bottom"} else "middle"
+        # Default high on frame — emphasis stamps should sit above the face band.
+        anchor = str(params.get("anchor")) if str(params.get("anchor")) in {"top", "middle", "bottom"} else "top"
         return (f'{open_tag}<div class="pf-kinetic pf-k-{anchor} pf-{side}">'
                 f'<span data-semantic-path="parameters.phrase">{phrase}</span></div></section>')
 
@@ -1798,18 +1754,21 @@ def _ported_markup(
                 f'<div class="pf-step-action" data-semantic-path="parameters.action">{action}</div></div></section>')
 
     if module_id == "problem-card-triptych":
+        # Three sequential point cards only (no eyebrow). Number left, copy right;
+        # pink active / white settled; type inherits for contrast.
         cards = _strings(params.get("cards"), 3)
-        marked = accent_at("accentCardIndex")
         body = "".join(
-            f'<div class="pf-tri-card{" lib-accent" if index == marked else ""}"><i>{index + 1:02d}</i>'
+            f'<div class="pf-tri-card" data-card-index="{index}">'
+            f'<i>{index + 1:02d}</i>'
             f'<span data-semantic-path="parameters.cards.{index}">{html.escape(card)}</span></div>'
             for index, card in enumerate(cards)
         )
-        return f'{open_tag}<div class="pf-triptych">{kick}<div class="pf-tri-row">{body}</div></div></section>'
+        return f'{open_tag}<div class="pf-triptych"><div class="pf-tri-row">{body}</div></div></section>'
 
     if module_id == "speaker-rise-callouts":
         thesis = html.escape(str(params.get("thesis") or ""))
-        callouts = _strings(params.get("callouts"), 4)
+        # Up to 6 emphasis words/phrases around the speaker + one thesis bar.
+        callouts = _strings(params.get("callouts"), 6)
         marked = accent_at("accentCalloutIndex")
         body = "".join(
             f'<div class="pf-rise-item{" lib-accent" if index == marked else ""}" '
@@ -1818,16 +1777,6 @@ def _ported_markup(
         )
         return (f'{open_tag}<div class="pf-rise-thesis" data-semantic-path="parameters.thesis">{thesis}</div>'
                 f'<div class="pf-rise">{body}</div></section>')
-
-    if module_id == "conversation-bubble-sequence":
-        bubbles = _strings(params.get("bubbles"), 4)
-        marked = accent_at("accentBubbleIndex")
-        body = "".join(
-            f'<div class="pf-bubble pf-b-{"right" if index % 2 else "left"}{" lib-accent" if index == marked else ""}" '
-            f'data-semantic-path="parameters.bubbles.{index}">{html.escape(bubble)}</div>'
-            for index, bubble in enumerate(bubbles)
-        )
-        return f'{open_tag}<div class="pf-card pf-{side}">{kick}<div class="pf-bubbles">{body}</div></div></section>'
 
     if module_id == "tradeoff-meter":
         left_label = html.escape(str(params.get("leftLabel") or "EASY"))
@@ -1841,154 +1790,74 @@ def _ported_markup(
                 f'<span data-semantic-path="parameters.rightLabel">{right_label}</span></div>'
                 f'<div class="pf-verdict" data-semantic-path="parameters.verdict">{verdict}</div></div></section>')
 
-    if module_id == "rank-medal-hit":
-        rank = html.escape(str(params.get("rank") or "#1"))
-        verdict = html.escape(str(params.get("verdict") or ""))
-        medal = html.escape(str(params.get("medal") or "★"))
-        return (f'{open_tag}<div class="pf-card pf-medal pf-{side}"><div class="pf-medal-disc">{medal}</div>'
-                f'<div class="pf-rank" data-semantic-path="parameters.rank">{rank}</div>'
-                f'<div class="pf-verdict" data-semantic-path="parameters.verdict">{verdict}</div></div></section>')
-
     if module_id == "brand-cta-lockup":
-        logo = html.escape(str(params.get("logoText") or "VCG"))
+        # Community CTA stage: white stage, teal left band, logo + join line + URL pill,
+        # talking head docked in the right frame. Channel-specific copy is parameters only.
+        logo = html.escape(str(params.get("logoText") or DEFAULT_BRAND_CTA_LOGO_TEXT))
         logo_asset_id = str(params.get("logoAssetId") or "")
-        staged_logo = (staged_assets or {}).get(logo_asset_id)
+        staged_logo = (staged_assets or {}).get(logo_asset_id) if logo_asset_id else None
         if logo_asset_id and not staged_logo:
             raise ValueError(f"brand-cta-lockup references unknown logoAssetId: {logo_asset_id}")
-        action = html.escape(str(params.get("action") or ""))
-        destination = html.escape(str(params.get("destination") or ""))
-        logo_markup = (
-            f'<img class="pf-logo-image" src="assets/{html.escape(staged_logo)}" alt="{logo}" '
+        # Optional private logo from internal/brand when present; else parameters supply art.
+        logo_src = html.escape(staged_logo or BRAND_SKOOL_LOGO_STAGED_NAME)
+        action = html.escape(str(params.get("action") or DEFAULT_BRAND_CTA_ACTION))
+        destination = html.escape(str(params.get("destination") or DEFAULT_BRAND_CTA_DESTINATION))
+        return (
+            f'{open_tag}'
+            f'<div class="community-stage">'
+            # White stage with a punched hole so #main-video shows in the right frame.
+            # Do not put a solid full-bleed bg under that hole — it paints the window white.
+            f'<div class="community-mask" aria-hidden="true"></div>'
+            f'<div class="community-band" aria-hidden="true"></div>'
+            f'<img class="community-logo" src="assets/{logo_src}" alt="{logo}" '
             f'data-semantic-path="parameters.logoText"/>'
-            if staged_logo else
-            f'<div class="pf-logo" data-semantic-path="parameters.logoText">{logo}</div>'
+            f'<div class="community-copy" data-semantic-path="parameters.action">{action}</div>'
+            f'<div class="community-url" data-semantic-path="parameters.destination">{destination}</div>'
+            f'<div class="community-video-outline" aria-hidden="true"></div>'
+            f'</div></section>'
         )
-        community_class = " pf-community" if staged_logo else ""
-        return (f'{open_tag}<div class="pf-card pf-cta{community_class} pf-{side}">'
-                f'{logo_markup}'
-                f'<div class="pf-action" data-semantic-path="parameters.action">{action}</div>'
-                f'<div class="pf-dest" data-semantic-path="parameters.destination">{destination}</div></div></section>')
-
-    if module_id == "command-popup-stack":
-        commands = _strings(params.get("commands"), 5)
-        purposes = _strings(params.get("purposes"), 5)
-        marked = accent_at("accentCommandIndex")
-        body = "".join(
-            f'<div class="pf-cmd{" lib-accent" if index == marked else ""}">'
-            f'<b data-semantic-path="parameters.commands.{index}">{html.escape(command)}</b>'
-            + (f'<span data-semantic-path="parameters.purposes.{index}">{html.escape(purposes[index])}</span>'
-               if index < len(purposes) else "")
-            + '</div>'
-            for index, command in enumerate(commands)
-        )
-        return f'{open_tag}<div class="pf-card pf-{side}">{kick}<div class="pf-cmds">{body}</div></div></section>'
 
     if module_id == "windows-prompt-typing":
-        app_name = html.escape(str(params.get("appName") or "PowerPoint"))
-        prompt_text = html.escape(str(params.get("prompt") or ""))
-        return (f'{open_tag}<div class="pf-window pf-{side}">'
-                f'<div class="pf-titlebar"><span data-semantic-path="parameters.appName">{app_name}</span>'
-                f'<i></i><i></i><i></i></div>'
-                f'<div class="pf-prompt" data-semantic-path="parameters.prompt">{prompt_text}</div></div></section>')
+        # Full stage: talking head cover-docks RIGHT (dependency-stack frame);
+        # Windows terminal fades in on the LEFT and types the prompt like a CLI.
+        # Typed text starts empty; GSAP writes textContent letter-by-letter so the caret
+        # (sibling after the text node) advances right/down with a real typewriter.
+        app_name = html.escape(str(params.get("appName") or "Windows PowerShell"))
+        # Full prompt kept in data-full-prompt for debugging / future hooks; live text is empty.
+        full_prompt = str(params.get("prompt") or "").replace("\r\n", "\n").replace("\r", "\n")
+        full_attr = html.escape(full_prompt, quote=True)
+        return (
+            f'{open_tag}'
+            f'<div class="prompt-stage">'
+            f'<div class="prompt-mask" aria-hidden="true"></div>'
+            f'<div class="prompt-terminal">'
+            f'<div class="prompt-titlebar">'
+            f'<span class="prompt-app" data-semantic-path="parameters.appName">{app_name}</span>'
+            # Windows caption buttons (min / max / close) — not Mac traffic lights.
+            f'<span class="prompt-win-controls" aria-hidden="true">'
+            f'<span class="win-btn win-min">&#x2013;</span>'
+            f'<span class="win-btn win-max">&#x25A1;</span>'
+            f'<span class="win-btn win-close">&#x2715;</span>'
+            f'</span>'
+            f'</div>'
+            f'<div class="prompt-body">'
+            f'<div class="prompt-line">'
+            f'<span class="prompt-prefix" aria-hidden="true">PS C:\\&gt;&nbsp;</span>'
+            f'<span class="prompt-typed" data-semantic-path="parameters.prompt" '
+            f'data-full-prompt="{full_attr}">'
+            f'<span class="prompt-typed-text"></span>'
+            f'<span class="prompt-cursor" aria-hidden="true"></span>'
+            f'</span>'
+            f'</div></div></div>'
+            f'<div class="prompt-video-outline" aria-hidden="true"></div>'
+            f'</div></section>'
+        )
 
-    claim = html.escape(str(params.get("claim") or ""))
-    action = html.escape(str(params.get("action") or ""))
-    return (f'{open_tag}<div class="pf-sunrise"><div class="pf-sun"></div>{kick}'
-            f'<div class="pf-claim" data-semantic-path="parameters.claim">{claim}</div>'
-            f'<div class="pf-final-action" data-semantic-path="parameters.action">{action}</div></div></section>')
+    raise ValueError(f"Unknown ported module id: {module_id}")
 
 
 def _strings(value: object, limit: int) -> list[str]:
     return [str(item) for item in value[:limit]] if isinstance(value, list) else []
-
-
-def _library_markup(module_id: str, params: dict, common: str, accent: str, kicker: str, text: str) -> str:
-    """Markup for the families ported from the creator's built library.
-
-    Each anchors to one edge of the frame so a software demonstration stays readable behind it,
-    which is why these were the ones that worked in the July-22 video.
-    """
-    side = str(params.get("side")) if str(params.get("side")) in SIDE_ANCHORS else "right"
-    accent_index = int(_number(params.get("accentRowIndex", params.get("accentLineIndex", params.get("accentWordIndex", params.get("accentStopIndex", params.get("accentItemIndex", -1))))), -1, -1, 9))
-    open_tag = f'<section {common} style="--cue-accent:{accent}">'
-
-    if module_id == "side-list-panel":
-        rows = _strings(params.get("rows"), 6)
-        numbered = str(params.get("rowStyle")) != "plain"
-        body = "".join(
-            f'<div class="lib-row{" lib-accent" if index == accent_index else ""}">'
-            f'{f"<i>{index + 1:02d}</i>" if numbered else "<i></i>"}'
-            f'<b data-semantic-path="parameters.rows.{index}">{html.escape(row)}</b></div>'
-            for index, row in enumerate(rows)
-        )
-        title = f'<div class="lib-title" data-semantic-path="parameters.text">{text}</div>' if params.get("text") else ""
-        return (f'{open_tag}<div class="lib-panel lib-{side}">'
-                f'<div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
-                f'{title}<div class="lib-rows">{body}</div></div></section>')
-
-    if module_id == "result-badge":
-        lines = _strings(params.get("lines"), 4)
-        mark = html.escape(str(params.get("mark") or "✓"))
-        body = "".join(
-            f'<div class="lib-result-line{" lib-accent" if index == accent_index else ""}" '
-            f'data-semantic-path="parameters.lines.{index}">{html.escape(line)}</div>'
-            for index, line in enumerate(lines)
-        )
-        return (f'{open_tag}<div class="lib-badge lib-{side}"><span class="lib-check">{mark}</span>'
-                f'<div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
-                f'{body}</div></section>')
-
-    if module_id == "link-chip":
-        words = _strings(params.get("words"), 6)
-        glyph = html.escape(str(params.get("glyph") or "→"))
-        body = "".join(
-            f'<span class="{"lib-accent" if index == accent_index else ""}" '
-            f'data-semantic-path="parameters.words.{index}">{html.escape(word)}</span>'
-            for index, word in enumerate(words)
-        )
-        return (f'{open_tag}<div class="lib-chip lib-{side}"><div class="lib-glyph">{glyph}</div>'
-                f'<div><div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
-                f'<div class="lib-words">{body}</div></div></div></section>')
-
-    if module_id == "milestone-path":
-        stops = _strings(params.get("stops"), 5)
-        body = "".join(
-            f'<div class="lib-stop{" lib-accent" if index == accent_index else ""}"><i></i>'
-            f'<span data-semantic-path="parameters.stops.{index}">{html.escape(stop)}</span></div>'
-            for index, stop in enumerate(stops)
-        )
-        title = f'<div class="lib-title" data-semantic-path="parameters.text">{text}</div>' if params.get("text") else ""
-        return (f'{open_tag}<div class="lib-path lib-{side}"><div class="lib-spine"></div>'
-                f'<div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
-                f'{title}{body}</div></section>')
-
-    if module_id == "before-after-grade":
-        before_raw = str(params.get("before") or "C")
-        after_raw = str(params.get("after") or "A")
-        before = html.escape(before_raw)
-        after = html.escape(after_raw)
-        before_class = " lib-long" if len(before_raw) > 3 else ""
-        after_class = " lib-long" if len(after_raw) > 3 else ""
-        arrow = html.escape(str(params.get("arrow") or "→"))
-        footer_left = html.escape(str(params.get("footerLeft") or ""))
-        footer_right = html.escape(str(params.get("footerRight") or ""))
-        return (f'{open_tag}<div class="lib-grade lib-{side}">'
-                f'<div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
-                f'<div class="lib-track"><span class="lib-before{before_class}" data-semantic-path="parameters.before">{before}</span>'
-                f'<i>{arrow}</i><span class="lib-after{after_class}" data-semantic-path="parameters.after">{after}</span></div>'
-                f'<div class="lib-grade-foot"><span data-semantic-path="parameters.footerLeft">{footer_left}</span>'
-                f'<b data-semantic-path="parameters.footerRight">{footer_right}</b></div></div></section>')
-
-    items = _strings(params.get("items"), 6)
-    variant = str(params.get("variant")) if str(params.get("variant")) in {"flow", "stack", "celebrate"} else "flow"
-    body = "".join(
-        f'<span class="lib-flow-item{" lib-accent" if index == accent_index else ""}" '
-        f'data-semantic-path="parameters.items.{index}">{html.escape(item)}</span>'
-        for index, item in enumerate(items)
-    )
-    return (f'{open_tag}<div class="lib-lower lib-{variant}"><div class="lib-lower-rail"></div>'
-            f'<div class="lib-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
-            f'<div class="lib-flow">{body}</div></div></section>')
 
 
 def _speaker_safe_overlay_style(params: dict) -> str:
@@ -2012,6 +1881,226 @@ def _speaker_safe_overlay_style(params: dict) -> str:
     )
 
 
+def _robot_svg_cheer() -> str:
+    """Teal VCG robot — raised fists, happy yell (recovered from original HyperFrames)."""
+    return (
+        '<svg class="robot-svg robot-svg-cheer" width="300" height="380" viewBox="0 0 320 400" '
+        'xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
+        '<g class="robot-body">'
+        '<rect x="116" y="338" width="42" height="32" rx="13" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<rect x="162" y="338" width="42" height="32" rx="13" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<g transform="rotate(-26 120 224)">'
+        '<rect x="104" y="96" width="32" height="134" rx="16" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<circle cx="120" cy="98" r="23" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '</g>'
+        '<g transform="rotate(26 200 224)">'
+        '<rect x="184" y="96" width="32" height="134" rx="16" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<circle cx="200" cy="98" r="23" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '</g>'
+        '<rect x="112" y="212" width="96" height="124" rx="26" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<rect x="138" y="240" width="44" height="60" rx="11" fill="#FF00CE"/>'
+        '<circle cx="152" cy="270" r="7" fill="#fff"/><circle cx="168" cy="270" r="7" fill="#fff"/>'
+        '<line x1="160" y1="78" x2="160" y2="46" stroke="#1A1A2E" stroke-width="7" stroke-linecap="round"/>'
+        '<circle cx="160" cy="36" r="12" fill="#FF00CE"/>'
+        '<rect x="100" y="78" width="120" height="106" rx="26" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<path d="M124 118 q15 -17 30 0" fill="none" stroke="#1A1A2E" stroke-width="8" stroke-linecap="round"/>'
+        '<path d="M166 118 q15 -17 30 0" fill="none" stroke="#1A1A2E" stroke-width="8" stroke-linecap="round"/>'
+        '<circle cx="118" cy="150" r="11" fill="#FF00CE" opacity="0.55"/>'
+        '<circle cx="202" cy="150" r="11" fill="#FF00CE" opacity="0.55"/>'
+        '<ellipse cx="160" cy="150" rx="30" ry="22" fill="#1A1A2E"/>'
+        '<path d="M136 155 a24 16 0 0 0 48 0 z" fill="#FF00CE"/>'
+        '</g></svg>'
+    )
+
+
+def _robot_svg_defiant() -> str:
+    """Teal VCG robot — angry brows, raised fist pump."""
+    return (
+        '<svg class="robot-svg robot-svg-defiant" width="300" height="394" viewBox="0 0 320 420" '
+        'xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
+        '<g class="robot-body">'
+        '<rect x="116" y="358" width="42" height="32" rx="13" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<rect x="162" y="358" width="42" height="32" rx="13" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<rect x="86" y="240" width="30" height="94" rx="15" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<circle cx="101" cy="336" r="21" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<rect x="112" y="234" width="96" height="126" rx="26" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<rect x="138" y="262" width="44" height="60" rx="11" fill="#FF00CE"/>'
+        '<circle cx="152" cy="292" r="7" fill="#fff"/><circle cx="168" cy="292" r="7" fill="#fff"/>'
+        '<g class="robot-fist">'
+        '<rect x="196" y="72" width="30" height="168" rx="15" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<circle cx="211" cy="70" r="24" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<line x1="200" y1="62" x2="222" y2="62" stroke="#1A1A2E" stroke-width="4" stroke-linecap="round"/>'
+        '</g>'
+        '<line x1="160" y1="100" x2="160" y2="68" stroke="#1A1A2E" stroke-width="7" stroke-linecap="round"/>'
+        '<circle cx="160" cy="58" r="12" fill="#FF00CE"/>'
+        '<rect x="100" y="100" width="120" height="106" rx="26" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<line x1="120" y1="130" x2="150" y2="144" stroke="#1A1A2E" stroke-width="9" stroke-linecap="round"/>'
+        '<line x1="200" y1="130" x2="170" y2="144" stroke="#1A1A2E" stroke-width="9" stroke-linecap="round"/>'
+        '<circle cx="140" cy="158" r="6" fill="#1A1A2E"/><circle cx="180" cy="158" r="6" fill="#1A1A2E"/>'
+        '<ellipse cx="160" cy="180" rx="28" ry="20" fill="#1A1A2E"/>'
+        '<path d="M137 184 a23 15 0 0 0 46 0 z" fill="#FF00CE"/>'
+        '</g></svg>'
+    )
+
+
+def _robot_svg_roast() -> str:
+    """Teal VCG robot — laughing, pointing left at the host."""
+    return (
+        '<svg class="robot-svg robot-svg-roast" width="640" height="660" viewBox="0 0 600 660" '
+        'xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
+        '<g class="robot-body">'
+        '<rect x="232" y="548" width="74" height="44" rx="20" fill="#007C7D" stroke="#1A1A2E" stroke-width="8"/>'
+        '<rect x="300" y="548" width="74" height="44" rx="20" fill="#007C7D" stroke="#1A1A2E" stroke-width="8"/>'
+        '<g transform="rotate(22 398 372)">'
+        '<rect x="378" y="368" width="44" height="160" rx="22" fill="#007C7D" stroke="#1A1A2E" stroke-width="8"/>'
+        '</g>'
+        '<rect x="212" y="348" width="184" height="214" rx="38" fill="#007C7D" stroke="#1A1A2E" stroke-width="8"/>'
+        '<rect x="252" y="392" width="104" height="112" rx="18" fill="#FF00CE"/>'
+        '<circle cx="288" cy="448" r="9" fill="#fff"/><circle cx="320" cy="448" r="9" fill="#fff"/>'
+        '<g class="robot-point">'
+        '<rect x="66" y="378" width="158" height="42" rx="21" fill="#007C7D" stroke="#1A1A2E" stroke-width="8"/>'
+        '<circle cx="78" cy="399" r="36" fill="#007C7D" stroke="#1A1A2E" stroke-width="8"/>'
+        '<rect x="14" y="386" width="62" height="26" rx="13" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '</g>'
+        '<line x1="305" y1="150" x2="305" y2="104" stroke="#1A1A2E" stroke-width="8" stroke-linecap="round"/>'
+        '<circle cx="305" cy="90" r="16" fill="#FF00CE"/>'
+        '<rect x="205" y="148" width="200" height="172" rx="42" fill="#007C7D" stroke="#1A1A2E" stroke-width="8"/>'
+        '<path d="M246 236 q28 -32 56 0" fill="none" stroke="#1A1A2E" stroke-width="11" stroke-linecap="round"/>'
+        '<path d="M306 236 q28 -32 56 0" fill="none" stroke="#1A1A2E" stroke-width="11" stroke-linecap="round"/>'
+        '<circle cx="238" cy="272" r="15" fill="#FF00CE" opacity="0.55"/>'
+        '<circle cx="372" cy="272" r="15" fill="#FF00CE" opacity="0.55"/>'
+        '<ellipse cx="305" cy="286" rx="46" ry="32" fill="#1A1A2E"/>'
+        '<path d="M268 292 a37 24 0 0 0 74 0 z" fill="#FF00CE"/>'
+        '</g></svg>'
+    )
+
+
+def _robot_rocket_svg() -> str:
+    """Teal robot on a white rocket; placard type is HTML-overlaid for crisp Montserrat.
+
+    Face layers (normal / confused / shocked) are swapped in the gag timeline.
+    Fist is the circle at the *end* of the arm (not the shoulder).
+    """
+    return (
+        '<svg class="rocket-svg" viewBox="0 0 520 320" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
+        '<g class="rocket-smoke" opacity="0">'
+        '<ellipse class="rocket-puff rocket-puff-a" cx="48" cy="210" rx="22" ry="16" fill="#2a2a32"/>'
+        '<ellipse class="rocket-puff rocket-puff-b" cx="28" cy="228" rx="28" ry="18" fill="#1a1a2e"/>'
+        '<ellipse class="rocket-puff rocket-puff-c" cx="10" cy="242" rx="18" ry="12" fill="#3a3a46"/>'
+        '</g>'
+        '<g class="rocket-flame">'
+        '<ellipse class="rocket-flame-core" cx="72" cy="198" rx="36" ry="18" fill="#FF00CE"/>'
+        '<ellipse class="rocket-flame-outer" cx="58" cy="198" rx="28" ry="12" fill="#ff6ae0" opacity="0.85"/>'
+        '</g>'
+        # White hull for contrast against the talking-head / white stage.
+        '<g class="rocket-hull">'
+        '<path d="M90 160 L90 236 L300 236 Q360 198 300 160 Z" fill="#FFFFFF" stroke="#1A1A2E" stroke-width="7"/>'
+        '<path d="M300 160 Q390 160 440 198 Q390 236 300 236 Z" fill="#F4F4F8" stroke="#1A1A2E" stroke-width="7"/>'
+        '<path d="M100 160 L130 128 L170 160 Z" fill="#FF00CE" stroke="#1A1A2E" stroke-width="6"/>'
+        '<path d="M100 236 L130 268 L170 236 Z" fill="#FF00CE" stroke="#1A1A2E" stroke-width="6"/>'
+        '<circle cx="250" cy="198" r="28" fill="#e6f5f5" stroke="#1A1A2E" stroke-width="6"/>'
+        '<circle cx="250" cy="198" r="14" fill="#FF00CE"/>'
+        '</g>'
+        '<g class="rocket-sign-art">'
+        '<rect x="300" y="48" width="200" height="72" rx="12" fill="#FFFFFF" stroke="#1A1A2E" stroke-width="6"/>'
+        '<rect x="300" y="48" width="200" height="72" rx="12" fill="none" stroke="#FF00CE" stroke-width="4"/>'
+        '<line x1="360" y1="120" x2="280" y2="175" stroke="#1A1A2E" stroke-width="7" stroke-linecap="round"/>'
+        '</g>'
+        # Rider: head floats with a clear air gap over the body (VCG robot silhouette).
+        '<g class="rocket-rider">'
+        '<rect x="175" y="128" width="70" height="72" rx="16" fill="#007C7D" stroke="#1A1A2E" stroke-width="6"/>'
+        '<rect x="192" y="146" width="36" height="34" rx="8" fill="#FF00CE"/>'
+        '<circle cx="204" cy="163" r="5" fill="#fff"/><circle cx="216" cy="163" r="5" fill="#fff"/>'
+        # Antenna sits on head
+        '<line x1="210" y1="58" x2="210" y2="38" stroke="#1A1A2E" stroke-width="6" stroke-linecap="round"/>'
+        '<circle cx="210" cy="32" r="9" fill="#FF00CE"/>'
+        # Head (gap between y=110 head bottom and y=128 body top)
+        '<rect x="168" y="52" width="84" height="58" rx="16" fill="#007C7D" stroke="#1A1A2E" stroke-width="6"/>'
+        # --- faces (mutually exclusive opacity) ---
+        '<g class="rocket-face-normal">'
+        '<circle cx="190" cy="78" r="5" fill="#1A1A2E"/><circle cx="230" cy="78" r="5" fill="#1A1A2E"/>'
+        '<path d="M198 92 q12 10 24 0" fill="none" stroke="#1A1A2E" stroke-width="5" stroke-linecap="round"/>'
+        '</g>'
+        '<g class="rocket-face-confused" opacity="0">'
+        # Quizzical brows + small o mouth
+        '<line x1="178" y1="68" x2="200" y2="74" stroke="#1A1A2E" stroke-width="5" stroke-linecap="round"/>'
+        '<line x1="242" y1="66" x2="220" y2="74" stroke="#1A1A2E" stroke-width="5" stroke-linecap="round"/>'
+        '<circle cx="190" cy="82" r="5" fill="#1A1A2E"/><circle cx="230" cy="84" r="5" fill="#1A1A2E"/>'
+        '<circle cx="210" cy="96" r="7" fill="none" stroke="#1A1A2E" stroke-width="5"/>'
+        '</g>'
+        '<g class="rocket-face-shocked" opacity="0">'
+        # Wide eyes + open O mouth
+        '<ellipse cx="190" cy="78" rx="11" ry="13" fill="#FFFFFF" stroke="#1A1A2E" stroke-width="5"/>'
+        '<ellipse cx="230" cy="78" rx="11" ry="13" fill="#FFFFFF" stroke="#1A1A2E" stroke-width="5"/>'
+        '<circle cx="192" cy="80" r="4" fill="#1A1A2E"/><circle cx="232" cy="80" r="4" fill="#1A1A2E"/>'
+        '<ellipse cx="210" cy="98" rx="12" ry="10" fill="#1A1A2E"/>'
+        '<ellipse cx="210" cy="100" rx="7" ry="5" fill="#FF00CE"/>'
+        '</g>'
+        # Arm: shoulder is the top of the rect; fist circle is at the bottom end.
+        '<g class="rocket-fist" transform-origin="252 130">'
+        '<rect x="242" y="128" width="20" height="58" rx="10" fill="#007C7D" stroke="#1A1A2E" stroke-width="5"/>'
+        '<circle cx="252" cy="192" r="16" fill="#007C7D" stroke="#1A1A2E" stroke-width="5"/>'
+        '</g>'
+        '</g>'
+        '</svg>'
+    )
+
+
+def _robot_rocket_markup(params: dict, common: str) -> str:
+    """Soft CTA: robot on rocket flies L→R with a short sign line."""
+    line = html.escape(str(params.get("text") or "LINK IN DESCRIPTION"))
+    return (
+        f'<section {common}>'
+        f'<div class="rocket-stage">'
+        f'<div class="rocket-rig">'
+        f'{_robot_rocket_svg()}'
+        f'<div class="rocket-sign-board" data-semantic-path="parameters.text">{line}</div>'
+        f'</div></div></section>'
+    )
+
+
+def _robot_module_markup(module_id: str, params: dict, common: str) -> str:
+    """Transparent mascot overlay: bubble + SVG robot (cheer left, defiant left, roast right)."""
+    if module_id == "robot-rocket-sign":
+        return _robot_rocket_markup(params, common)
+    line = html.escape(str(params.get("text") or "EDIT THIS LINE"))
+    if module_id == "robot-cheer":
+        tagline = html.escape(str(params.get("tagline") or "FOR THE WIN!"))
+        bubble = (
+            f'<div class="robot-bubble">'
+            f'<span data-semantic-path="parameters.text">{line}</span> '
+            f'<span class="robot-hl" data-semantic-path="parameters.tagline">{tagline}</span> &#127881;'
+            f'<div class="robot-tail"></div></div>'
+        )
+        stage = "robot-stage-left"
+        svg = _robot_svg_cheer()
+    elif module_id == "robot-defiant":
+        bubble = (
+            f'<div class="robot-bubble">'
+            f'<span data-semantic-path="parameters.text">{line}</span> &#9994;'
+            f'<div class="robot-tail"></div></div>'
+        )
+        stage = "robot-stage-left"
+        svg = _robot_svg_defiant()
+    elif module_id == "robot-roast":
+        bubble = (
+            f'<div class="robot-bubble robot-bubble-roast">'
+            f'<span data-semantic-path="parameters.text">{line}</span> &#128514;'
+            f'<div class="robot-tail"></div></div>'
+        )
+        stage = "robot-stage-right"
+        svg = _robot_svg_roast()
+    else:
+        raise ValueError(f"Unknown robot module: {module_id}")
+    return (
+        f'<section {common}>'
+        f'<div class="robot-stage {stage}">'
+        f'<div class="robot-wrap">'
+        f'{bubble}{svg}'
+        f'</div></div></section>'
+    )
+
+
 def _module_markup(
     cue: dict,
     element_id: str,
@@ -2029,67 +2118,91 @@ def _module_markup(
         f'id="{element_id}" class="clip module module-{module_id}" '
         f'data-start="{start:.4f}" data-duration="{duration:.4f}" data-track-index="{track}"'
     )
+    if module_id in ROBOT_MODULE_IDS or module_id == "robot-rocket-sign":
+        return _robot_module_markup(module_id, params, common)
     safe_overlay_style = _speaker_safe_overlay_style(params)
-    if module_id == "source-footage-hold":
-        return ""
     if module_id == "punchline-reveal":
+        # Image path = recovered 7-22 joke card (custom generated image + caption box).
+        # Text-only path stays a simple kinetic punchline for non-image lands.
         image_asset_id = str(params.get("imageAssetId") or "")
         staged_image = (staged_assets or {}).get(image_asset_id)
         if image_asset_id and not staged_image:
             raise ValueError(f"punchline-reveal references unknown imageAssetId: {image_asset_id}")
         if staged_image:
+            # Transposed dependency-stack: talking head docks left; image+copy on the right.
             return (
                 f'<section {common} style="--cue-accent:{accent_color}">'
-                f'<div class="joke-card-approved">'
-                f'<img class="joke-image-approved" src="assets/{html.escape(staged_image)}" alt="" />'
-                f'<div class="joke-copy-approved">'
-                f'<div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
-                f'<div class="joke-line-approved" data-semantic-path="parameters.text">{text}</div>'
-                f'</div></div></section>'
+                f'<div class="joke-stage">'
+                f'<div class="joke-mask" aria-hidden="true"></div>'
+                f'<div class="joke-video-outline" aria-hidden="true"></div>'
+                f'<div class="joke-panel">'
+                f'<div class="joke-card">'
+                f'<img class="joke-image" src="assets/{html.escape(staged_image)}" alt="" />'
+                f'<div class="joke-copy">'
+                f'<div class="joke-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+                f'<div class="joke-line" data-semantic-path="parameters.text">{text}</div>'
+                f'</div></div></div></div></section>'
             )
-        return f'<section {common} style="--cue-accent:{accent_color}"><div class="module-fill" style="{safe_overlay_style}"><div class="grid"></div><div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div><div class="punchline" data-semantic-path="parameters.text">{text}</div><div class="rule"></div></div></section>'
+        return (
+            f'<section {common} style="--cue-accent:{accent_color}">'
+            f'<div class="module-fill" style="{safe_overlay_style}">'
+            f'<div class="grid"></div>'
+            f'<div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+            f'<div class="punchline" data-semantic-path="parameters.text">{text}</div>'
+            f'<div class="rule"></div></div></section>'
+        )
     if module_id == "speaker-side-panel":
         return f'<section {common} style="--cue-accent:{accent_color}"><div class="side-copy"><div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div><div class="side-title" data-semantic-path="parameters.text">{text}</div></div><div class="video-outline"></div></section>'
     if module_id == "progress-scale":
+        # Full white stage (base is white): copy on the left, source video framed
+        # upper-right in .stat-video-outline. Not an overlay card over full-frame video.
+        # Milestone stops sit at the same bar fractions the fill travels (0…1).
         start_label = html.escape(str(params.get("startLabel") or "START"))
         target_label = html.escape(str(params.get("targetLabel") or "TARGET"))
         milestones = params.get("milestones") if isinstance(params.get("milestones"), list) else []
-        milestone_markup = "".join(
-            f'<span data-semantic-path="parameters.milestones.{index}" '
-            f'style="border-left:5px solid var(--teal);padding:8px 10px;color:var(--ink);'
-            f'font-size:18px;font-weight:800;line-height:1.05">{html.escape(str(item))}</span>'
-            for index, item in enumerate(milestones[:4])
-        )
+        milestone_items = milestones[:4]
+        count = len(milestone_items)
+        milestone_parts: list[str] = []
+        for index, item in enumerate(milestone_items):
+            frac = index / max(count - 1, 1) if count > 1 else 0.5
+            if count == 1:
+                align = "translateX(-50%)"
+            elif index == 0:
+                align = "translateX(0)"
+            elif index == count - 1:
+                align = "translateX(-100%)"
+            else:
+                align = "translateX(-50%)"
+            milestone_parts.append(
+                f'<span class="scale-milestone" data-milestone-index="{index}" '
+                f'data-semantic-path="parameters.milestones.{index}" '
+                f'style="left:{frac * 100:.4f}%;transform:{align}">'
+                f'{html.escape(str(item))}</span>'
+            )
         milestones_markup = (
-            f'<div class="scale-milestones" style="position:absolute;left:7%;right:7%;bottom:24%;'
-            f'display:grid;grid-template-columns:repeat({len(milestones[:4])},minmax(0,1fr));'
-            f'gap:12px">{milestone_markup}</div>'
-            if milestone_markup else ""
+            f'<div class="scale-milestones">{"".join(milestone_parts)}</div>'
+            if milestone_parts
+            else ""
         )
-        return f'<section {common}><div class="module-fill" style="{safe_overlay_style}"><div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div><div class="stat-title" data-semantic-path="parameters.text">{text}</div>{milestones_markup}<div class="scale"><div class="scale-fill"></div><div class="scale-marker"></div><div class="scale-labels"><span data-semantic-path="parameters.startLabel">{start_label}</span><span data-semantic-path="parameters.targetLabel">{target_label}</span></div></div></div></section>'
-    if module_id == "dual-comparison":
-        left_title = html.escape(str(params.get("leftTitle") or "OPTION A"))
-        right_title = html.escape(str(params.get("rightTitle") or "OPTION B"))
-        left_color = html.escape(str(params.get("leftColor") or "#4D7CFE"))
-        right_color = html.escape(str(params.get("rightColor") or "#6E56CF"))
-        left_items = params.get("leftItems") if isinstance(params.get("leftItems"), list) else []
-        right_items = params.get("rightItems") if isinstance(params.get("rightItems"), list) else []
-        left_markup = "".join(f'<li data-semantic-path="parameters.leftItems.{index}">{html.escape(str(item))}</li>' for index, item in enumerate(left_items[:5]))
-        right_markup = "".join(f'<li data-semantic-path="parameters.rightItems.{index}">{html.escape(str(item))}</li>' for index, item in enumerate(right_items[:5]))
         return (
-            f'<section {common} style="--left-accent:{left_color};--right-accent:{right_color}">'
-            f'<div class="comparison-canvas" style="{safe_overlay_style};grid-template-columns:repeat(2,minmax(0,1fr));padding:76px 28px 24px">'
-            f'<div class="comparison-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
-            f'<div class="comparison-column comparison-left"><h2 data-semantic-path="parameters.leftTitle">{left_title}</h2><ul>{left_markup}</ul></div>'
-            f'<div class="comparison-column comparison-right"><h2 data-semantic-path="parameters.rightTitle">{right_title}</h2><ul>{right_markup}</ul></div>'
+            f'<section {common} style="--cue-accent:{accent_color}">'
+            f'<div class="progress-stage">'
+            f'<div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+            f'<div class="stat-title" data-semantic-path="parameters.text">{text}</div>'
+            f'<div class="progress-track-block">'
+            f'{milestones_markup}'
+            f'<div class="scale"><div class="scale-fill"></div>'
+            f'<div class="scale-labels">'
+            f'<span data-semantic-path="parameters.startLabel">{start_label}</span>'
+            f'<span data-semantic-path="parameters.targetLabel">{target_label}</span>'
+            f'</div></div></div>'
+            f'<div class="stat-video-outline" aria-hidden="true"></div>'
             f'</div></section>'
         )
     if module_id == "source-punch-zoom":
         # Pure camera move on the source. It renders no overlay at all, which is what makes it
         # usable over a demonstration that must stay readable.
         return f'<section {common}></section>'
-    if module_id in LIBRARY_MODULE_IDS:
-        return _library_markup(module_id, params, common, accent_color, kicker, text)
     if module_id in PORTED_MODULE_IDS:
         return _ported_markup(module_id, params, common, accent_color, kicker, staged_assets)
     if module_id == "ui-callout":
@@ -2129,9 +2242,17 @@ def _module_markup(
             f'<span class="example-pip{" example-pip-filled" if index < number else ""}"></span>'
             for index in range(total)
         )
+        place = normalized_bounds(params.get("placementBounds"))
+        place_style = (
+            f'left:{place["x"] * 100:.3f}%;top:{place["y"] * 100:.3f}%;'
+            f'width:{place["width"] * 100:.3f}%;height:{place["height"] * 100:.3f}%;'
+            if place
+            else ""
+        )
+        card_style = f' style="{place_style}"' if place_style else ""
         return (
             f'<section {common} style="--cue-accent:{accent_color}">'
-            f'<div class="example-card">'
+            f'<div class="example-card"{card_style}>'
             f'<div class="example-rail"><div class="example-number">{number:02d}</div><div class="example-rail-label">EXAMPLE</div></div>'
             f'<div class="example-body">'
             f'<div class="example-head"><span class="kicker" data-semantic-path="parameters.kicker">{kicker}</span>'
@@ -2141,9 +2262,28 @@ def _module_markup(
             f'<div class="example-foot"><span class="example-tags">{tag_markup}</span><span class="example-pips">{pips}</span></div>'
             f'</div></div></section>'
         )
-    nodes = params.get("nodes") if isinstance(params.get("nodes"), list) else ["YOUR PRODUCT", "PLATFORM", "DEPENDENCY"]
-    node_markup = "".join(f'<div class="node" data-semantic-path="parameters.nodes.{index}">{html.escape(str(node))}</div>' for index, node in enumerate(nodes[:5]))
-    return f'<section {common}><div class="dependency-panel"><div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div><div class="dependency-title" data-semantic-path="parameters.text">{text}</div><div class="nodes">{node_markup}</div></div></section>'
+    if module_id == "dependency-stack":
+        # Left title + sequential stack; talking head covers into a tall right frame
+        # (sides of the full-frame source are cropped by a white mask hole).
+        title = html.escape(str(params.get("text") or "WHAT YOU NEED"))
+        nodes = _strings(params.get("nodes"), 6)
+        node_markup = "".join(
+            f'<div class="dep-node" data-node-index="{index}" '
+            f'data-semantic-path="parameters.nodes.{index}">{html.escape(node)}</div>'
+            for index, node in enumerate(nodes)
+        )
+        return (
+            f'<section {common} style="--cue-accent:{accent_color}">'
+            f'<div class="dependency-stage">'
+            f'<div class="dependency-mask" aria-hidden="true"></div>'
+            f'<div class="dependency-panel">'
+            f'<div class="dependency-title" data-semantic-path="parameters.text">{title}</div>'
+            f'<div class="nodes">{node_markup}</div>'
+            f'</div>'
+            f'<div class="dependency-video-outline" aria-hidden="true"></div>'
+            f'</div></section>'
+        )
+    raise ValueError(f"Unknown visual module: {module_id}")
 
 
 def _asset_markup(asset: dict, cue: dict, element_id: str, staged_name: str, start: float, duration: float, track: int) -> tuple[str, str | None]:
@@ -2231,6 +2371,9 @@ def build_hyperframes_composition(
     end_sec: float | None = None,
     workspace_override: Path | None = None,
     progress: ProgressCallback | None = None,
+    # Library samples only: seconds between multi-item reveals (lists, callouts, etc.).
+    # Production keeps engine defaults when this is None.
+    sample_reveal_stagger_sec: float | None = None,
 ) -> tuple[Path, float]:
     progress = progress or (lambda _value, _message: None)
     root = find_visual_root(plan_path)
@@ -2276,6 +2419,17 @@ def build_hyperframes_composition(
         shutil.copy2(source_asset, public / "assets" / staged_name)
         staged_assets[asset["id"]] = staged_name
 
+    # Community CTA uses the optional private wordmark when no logoAssetId is set.
+    if any(
+        cue.get("kind") == "module" and cue.get("moduleId") == "brand-cta-lockup"
+        for cue in plan.get("cues", [])
+        if cue.get("enabled", True)
+    ):
+        skool_logo = brand_skool_logo_path()
+        if not skool_logo.is_file():
+            raise RuntimeError(f"Missing private community logo at {skool_logo}")
+        shutil.copy2(skool_logo, public / "assets" / BRAND_SKOOL_LOGO_STAGED_NAME)
+
     repo = project_root()
     gsap_source = repo / "node_modules" / "gsap" / "dist" / "gsap.min.js"
     if not gsap_source.is_file():
@@ -2309,8 +2463,18 @@ def build_hyperframes_composition(
             module_id = cue["moduleId"]
             params = cue.get("parameters") or {}
             motion_selector = f"#{element_id} > .cue-motion"
-            transition_in = params.get("transitionIn", "editorial-snap")
-            transition_out = params.get("transitionOut", "fade")
+            # Engines that own full enter/exit skip the shell slide.
+            owns_shell = (
+                module_id in ROBOT_MODULE_IDS
+                or module_id in {"brand-cta-lockup", "robot-rocket-sign", "windows-prompt-typing"}
+                or (module_id == "punchline-reveal" and bool(params.get("imageAssetId")))
+            )
+            if owns_shell:
+                transition_in = "none"
+                transition_out = "none"
+            else:
+                transition_in = params.get("transitionIn", "editorial-snap")
+                transition_out = params.get("transitionOut", "fade")
             enter = min(0.45, duration / 3)
             exit_duration = min(0.35, duration / 4)
             entry_start = _entry_preroll_time(start, fps)
@@ -2326,46 +2490,889 @@ def build_hyperframes_composition(
                     exit_x = 35 if transition_out == "slide" else 0
                     timeline_lines.append(f'tl.to("{motion_selector}", {{opacity:0,x:{exit_x},duration:{exit_duration:.3f},ease:"power2.in"}}, {(start + duration - exit_duration):.4f});')
                     timeline_lines.append(f'tl.set("{motion_selector}", {{opacity:0}}, {(start + duration):.4f});')
-                timeline_lines.extend(_semantic_timeline_lines(cue, element_id, range_start, range_end, start))
+                # Speaker-rise drives its own sequential reveals (thesis, then each word).
+                # Skip generic semantic opacity tweens so they cannot flatten the sequence.
+                # Modules that own their reveal sequence must not also run generic
+                # semantic opacity tweens (those flatten the intended timing).
+                skip_semantic = {
+                    "speaker-rise-callouts",
+                    "progress-scale",
+                    "problem-card-triptych",
+                    "dependency-stack",
+                    "brand-cta-lockup",
+                    "robot-rocket-sign",
+                    "windows-prompt-typing",
+                    *ROBOT_MODULE_IDS,
+                }
+                # Joke-image card owns kicker/line reveals.
+                if module_id == "punchline-reveal" and (cue.get("parameters") or {}).get("imageAssetId"):
+                    skip_semantic = {*skip_semantic, "punchline-reveal"}
+                if module_id not in skip_semantic:
+                    timeline_lines.extend(_semantic_timeline_lines(cue, element_id, range_start, range_end, start))
+                elif module_id == "progress-scale":
+                    # Keep non-milestone copy on normal semantic timing; milestones
+                    # are driven by the bar fill below so words land as the bar hits them.
+                    non_milestone = [
+                        item
+                        for item in cue.get("semanticItems", [])
+                        if not str(item.get("parameterPath") or "").startswith("parameters.milestones.")
+                    ]
+                    if non_milestone:
+                        filtered = dict(cue)
+                        filtered["semanticItems"] = non_milestone
+                        timeline_lines.extend(
+                            _semantic_timeline_lines(filtered, element_id, range_start, range_end, start)
+                        )
+                elif module_id == "problem-card-triptych":
+                    # Cards own their reveal (pink handoff). Skip generic semantic opacity.
+                    pass
+                elif module_id == "dependency-stack":
+                    # Title may use semantic timing; nodes are the pink handoff sequence.
+                    non_nodes = [
+                        item
+                        for item in cue.get("semanticItems", [])
+                        if not str(item.get("parameterPath") or "").startswith("parameters.nodes.")
+                    ]
+                    if non_nodes:
+                        filtered = dict(cue)
+                        filtered["semanticItems"] = non_nodes
+                        timeline_lines.extend(
+                            _semantic_timeline_lines(filtered, element_id, range_start, range_end, start)
+                        )
             if module_id == "punchline-reveal":
-                # The graphic occupies only its audited overlay region. The source speaker remains
-                # visible continuously; the canonical contract forbids full-frame takeovers.
-                pass
+                # Joke-image path: dock head LEFT (transpose of dependency-stack),
+                # image + caption panel enters from the right.
+                if (cue.get("parameters") or {}).get("imageAssetId"):
+                    # Must match .joke-video-outline / .joke-mask (left tall frame).
+                    video_left, video_top = 0.08, 0.10
+                    video_w, video_h = 0.42, 0.78
+                    video_scale = max(video_w, video_h)
+                    face_center_x = 0.47
+                    video_x = (video_left + video_w / 2) - face_center_x * video_scale
+                    video_y = video_top
+                    video_in, video_out = 0.55, 0.42
+                    panel = f'#{element_id} .joke-panel'
+                    card = f'#{element_id} .joke-card'
+                    img = f'#{element_id} .joke-image'
+                    exit_d = min(0.32, max(0.22, duration * 0.12))
+                    timeline_lines.append(
+                        f'tl.set("#{element_id} [data-semantic-path]", {{opacity:0}}, {start:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("#main-video", {{scale:{video_scale:.4f},'
+                        f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
+                        f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.fromTo("#{element_id} .joke-mask", {{opacity:0}}, '
+                        f'{{opacity:1,duration:0.28,ease:"power2.out"}}, {entry_start:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.fromTo("#{element_id} .joke-video-outline", {{opacity:0}}, '
+                        f'{{opacity:1,duration:0.35,ease:"power2.out"}}, {(start + 0.12):.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.fromTo("{panel}", {{opacity:0,x:70}}, '
+                        f'{{opacity:1,x:0,duration:0.52,ease:"power3.out"}}, {entry_start:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.fromTo("{img}", {{scale:1.08,x:18}}, '
+                        f'{{scale:1,x:0,duration:{max(0.8, duration - 0.4):.3f},'
+                        f'ease:"sine.inOut",immediateRender:false}}, {(start + 0.1):.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.fromTo("#{element_id} .joke-kicker", {{opacity:0,y:16}}, '
+                        f'{{opacity:1,y:0,duration:0.34,ease:"power2.out",immediateRender:false}}, '
+                        f'{(start + 0.32):.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.fromTo("#{element_id} .joke-line", {{opacity:0,y:18}}, '
+                        f'{{opacity:1,y:0,duration:0.38,ease:"power2.out",immediateRender:false}}, '
+                        f'{(start + 0.52):.4f});'
+                    )
+                    restore_at = start + duration - video_out
+                    timeline_lines.append(
+                        f'tl.to("{panel}", {{opacity:0,x:48,duration:{exit_d:.3f},ease:"power2.in"}}, '
+                        f'{(start + duration - exit_d):.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("#{element_id} .joke-mask, #{element_id} .joke-video-outline", '
+                        f'{{opacity:0,duration:{exit_d:.3f},ease:"power2.in"}}, '
+                        f'{(start + duration - exit_d):.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},'
+                        f'ease:"power3.inOut"}}, {restore_at:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.set("{card}", {{opacity:0}}, {(start + duration):.4f});'
+                    )
+            elif module_id == "speaker-rise-callouts":
+                # Explicit sequence: thesis bar first, then each emphasis word one-by-one.
+                # Library samples pass sample_reveal_stagger_sec≈1.0 so you can see each land.
+                callouts = _strings(params.get("callouts"), 6)
+                stagger = (
+                    float(sample_reveal_stagger_sec)
+                    if sample_reveal_stagger_sec is not None and sample_reveal_stagger_sec > 0
+                    else 0.45
+                )
+                stagger = max(0.2, min(2.0, stagger))
+                # Keep children hidden until their beat (CSS also starts data-semantic-path at 0).
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .pf-rise-thesis, #{element_id} .pf-rise-item", '
+                    f'{{opacity:0,y:18}}, {start:.4f});'
+                )
+                thesis_at = start + 0.08
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .pf-rise-thesis", '
+                    f'{{opacity:0,y:-18,scale:0.96}}, '
+                    f'{{opacity:1,y:0,scale:1,duration:0.42,ease:"power3.out"}}, {thesis_at:.4f});'
+                )
+                first_word_at = thesis_at + 0.7
+                for index in range(len(callouts)):
+                    appear_at = first_word_at + index * stagger
+                    # Leave room for exit; compress only if the cue is too short.
+                    latest = start + duration - exit_duration - 0.35
+                    if appear_at > latest:
+                        appear_at = max(thesis_at + 0.35, latest - (len(callouts) - 1 - index) * min(stagger, 0.35))
+                    timeline_lines.append(
+                        f'tl.fromTo("#{element_id} .pf-rise-item:nth-child({index + 1})", '
+                        f'{{opacity:0,y:26,scale:0.9}}, '
+                        f'{{opacity:1,y:0,scale:1,duration:0.4,ease:"power2.out"}}, {appear_at:.4f});'
+                    )
+                exit_at = start + duration - exit_duration
+                timeline_lines.append(
+                    f'tl.to("#{element_id} .pf-rise-thesis, #{element_id} .pf-rise-item", '
+                    f'{{opacity:0,duration:{exit_duration:.3f},ease:"power2.in"}}, {exit_at:.4f});'
+                )
             elif module_id == "speaker-side-panel":
                 timeline_lines.append(f'tl.to("#main-video", {{scale:0.48,x:{width * .48:.2f},y:{height * .26:.2f},duration:0.5,ease:"power3.inOut"}}, {start:.4f});')
                 timeline_lines.append(f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:0.45,ease:"power3.inOut"}}, {(start + duration - 0.45):.4f});')
+            elif module_id == "dependency-stack":
+                # Tall right video window (CSS hole + outline). Cover-scale crops the
+                # sides of the full-frame talking head into a skinnier portrait frame.
+                # Must match .dependency-video-outline / .dependency-mask in runtime.css.
+                video_left, video_top = 0.50, 0.10
+                video_w, video_h = 0.42, 0.78
+                video_scale = max(video_w, video_h)
+                # Source talking head sits slightly left of geometric center; bias the
+                # cover crop so the face reads centered in the portrait hole.
+                face_center_x = 0.46
+                video_x = (video_left + video_w / 2) - face_center_x * video_scale
+                video_y = video_top
+                video_in, video_out = 0.55, 0.45
+                settle_after_last_sec = 2.0
+                linger_all_white_sec = 2.0
+                pink, white_bg, ink = "#ff00ce", "#ffffff", "#1a1a2e"
+                nodes = _strings(params.get("nodes"), 6)
+                node_count = len(nodes)
+                node_stagger = (
+                    float(sample_reveal_stagger_sec)
+                    if sample_reveal_stagger_sec is not None and sample_reveal_stagger_sec > 0
+                    else 0.85
+                )
+                node_stagger = max(0.35, min(2.0, node_stagger))
+                node_times: list[float] = []
+                for index in range(node_count):
+                    path = f"parameters.nodes.{index}"
+                    match = next(
+                        (
+                            item
+                            for item in cue.get("semanticItems", [])
+                            if str(item.get("parameterPath") or "") == path
+                        ),
+                        None,
+                    )
+                    if match is not None:
+                        spoken = float(match.get("spokenStartSec") or 0.0)
+                        appear_at = max(spoken, range_start) - range_start
+                        node_times.append(max(start + 0.35, appear_at))
+                    else:
+                        node_times.append(start + 0.45 + index * node_stagger)
+                for index in range(1, len(node_times)):
+                    node_times[index] = max(node_times[index], node_times[index - 1] + 0.35)
+                if node_times:
+                    latest_need = (
+                        node_times[-1] + settle_after_last_sec + linger_all_white_sec + video_out
+                    )
+                    if latest_need > start + duration and node_count > 1:
+                        budget = max(
+                            0.8,
+                            duration - video_out - settle_after_last_sec - linger_all_white_sec - 0.45,
+                        )
+                        step = budget / max(node_count - 1, 1)
+                        node_times = [start + 0.45 + index * step for index in range(node_count)]
+                timeline_lines.append(
+                    f'tl.to("#main-video", {{scale:{video_scale:.4f},'
+                    f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
+                    f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .dependency-panel", {{opacity:0,x:-36}}, '
+                    f'{{opacity:1,x:0,duration:0.45,ease:"power3.out"}}, {entry_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .dependency-title", {{opacity:1}}, {entry_start:.4f});'
+                )
+                if node_count:
+                    timeline_lines.append(
+                        f'tl.set("#{element_id} .dep-node", {{opacity:0,y:56}}, {start:.4f});'
+                    )
+                for index in range(node_count):
+                    appear_at = node_times[index]
+                    node_sel = f'#{element_id} .dep-node[data-node-index=\\"{index}\\"]'
+                    timeline_lines.append(
+                        f'tl.fromTo("{node_sel}", {{opacity:0,y:56}}, '
+                        f'{{opacity:1,y:0,duration:0.42,ease:"power2.out",immediateRender:false}}, '
+                        f'{appear_at:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.set("{node_sel}", {{opacity:1}}, {appear_at:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("{node_sel}", {{backgroundColor:"{pink}",color:"#ffffff",'
+                        f'borderColor:"{pink}",duration:0.18,ease:"power1.out"}}, {appear_at:.4f});'
+                    )
+                    if index > 0:
+                        prev_sel = f'#{element_id} .dep-node[data-node-index=\\"{index - 1}\\"]'
+                        timeline_lines.append(
+                            f'tl.to("{prev_sel}", {{backgroundColor:"{white_bg}",color:"{ink}",'
+                            f'borderColor:"{ink}",duration:0.28,ease:"power1.out"}}, {appear_at:.4f});'
+                        )
+                if node_count:
+                    last_sel = f'#{element_id} .dep-node[data-node-index=\\"{node_count - 1}\\"]'
+                    settle_at = node_times[-1] + settle_after_last_sec
+                    settle_at = min(settle_at, start + duration - video_out - linger_all_white_sec)
+                    settle_at = max(settle_at, node_times[-1] + 0.4)
+                    timeline_lines.append(
+                        f'tl.to("{last_sel}", {{backgroundColor:"{white_bg}",color:"{ink}",'
+                        f'borderColor:"{ink}",duration:0.3,ease:"power1.out"}}, {settle_at:.4f});'
+                    )
+                restore_at = start + duration - video_out
+                timeline_lines.append(
+                    f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},ease:"power3.inOut"}}, '
+                    f'{restore_at:.4f});'
+                )
             elif module_id == "progress-scale":
-                timeline_lines.append(f'tl.fromTo("#{element_id} .scale-fill", {{scaleX:0}}, {{scaleX:1,duration:{max(.2, duration - .8):.3f},ease:"power2.inOut"}}, {(start + .4):.4f});')
-            elif module_id == "dual-comparison":
-                timeline_lines.append(f'tl.fromTo("#{element_id} .comparison-column", {{opacity:0,y:24}}, {{opacity:1,y:0,duration:0.38,stagger:0.08,ease:"power2.out"}}, {(start + .28):.4f});')
+                # Match .stat-video-outline in runtime.css (upper-right window).
+                # main-video uses transform-origin:0 0, so scale + x/y land in the frame.
+                video_x = 0.5625
+                video_y = 0.12
+                video_scale = 0.365
+                video_in = 0.5
+                video_out = 0.45
+                # Bar grows, then the full stage lingers 2–3s before exit (not fill-to-end).
+                hold_after_fill = 2.5
+                fill_lead = 0.45
+                min_fill = 1.2
+                reserved = hold_after_fill + video_out
+                available = max(min_fill, duration - fill_lead - video_out)
+                if available < min_fill + hold_after_fill:
+                    hold_after_fill = max(1.5, available - min_fill)
+                fill_duration = max(min_fill, duration - fill_lead - hold_after_fill - video_out)
+                fill_start = start + fill_lead
+                fill_end = fill_start + fill_duration
+                restore_at = min(start + duration - video_out, fill_end + hold_after_fill)
+                timeline_lines.append(
+                    f'tl.to("#main-video", {{scale:{video_scale:.4f},'
+                    f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
+                    f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
+                )
+                # Linear fill so milestone stops land when the bar reaches them.
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .scale-fill", {{scaleX:0}}, '
+                    f'{{scaleX:1,duration:{fill_duration:.3f},ease:"none"}}, '
+                    f'{fill_start:.4f});'
+                )
+                milestones = params.get("milestones") if isinstance(params.get("milestones"), list) else []
+                milestone_count = min(4, len(milestones))
+                if milestone_count:
+                    # Opacity only — never animate transform/y here (inline left/translateX
+                    # places each stop on the bar fraction the fill reaches).
+                    timeline_lines.append(
+                        f'tl.set("#{element_id} .scale-milestone", {{opacity:0}}, {start:.4f});'
+                    )
+                    for index in range(milestone_count):
+                        frac = index / max(milestone_count - 1, 1) if milestone_count > 1 else 0.5
+                        appear_at = fill_start + frac * fill_duration
+                        timeline_lines.append(
+                            f'tl.fromTo("#{element_id} .scale-milestone[data-milestone-index=\\"{index}\\"]", '
+                            f'{{opacity:0}}, '
+                            f'{{opacity:1,duration:0.18,ease:"power2.out",immediateRender:false}}, '
+                            f'{appear_at:.4f});'
+                        )
+                timeline_lines.append(
+                    f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},ease:"power3.inOut"}}, '
+                    f'{restore_at:.4f});'
+                )
             elif module_id == "source-punch-zoom":
+                # One camera engine, three paths (placement picks path; default in-out):
+                #   in     — full → tight, hold tight for the cue
+                #   out    — start tight → full
+                #   in-out — full → tight → hold → full (classic punch)
                 focus_x = _number(params.get("focusX"), 0.5, 0, 1) * 100
                 focus_y = _number(params.get("focusY"), 0.5, 0, 1) * 100
                 zoom = _number(params.get("zoom"), 1.25, 1.02, MAX_PUNCH_ZOOM)
                 settle = _number(params.get("settleSec"), 0.6, 0.2, max(0.3, duration / 2))
-                timeline_lines.append(f'tl.to("#main-video", {{scale:{zoom:.4f},transformOrigin:"{focus_x:.2f}% {focus_y:.2f}%",duration:{settle:.3f},ease:"power2.inOut"}}, {start:.4f});')
-                timeline_lines.append(f'tl.to("#main-video", {{scale:1,transformOrigin:"{focus_x:.2f}% {focus_y:.2f}%",duration:{settle:.3f},ease:"power2.inOut"}}, {(start + duration - settle):.4f});')
-            elif module_id in PORTED_MODULE_IDS:
+                motion = str(params.get("motion") or "in-out").strip().lower().replace("_", "-")
+                if motion not in {"in", "out", "in-out"}:
+                    motion = "in-out"
+                origin = f'"{focus_x:.2f}% {focus_y:.2f}%"'
+                # Keep settle from eating the whole cue when short.
+                settle = min(settle, max(0.2, duration * 0.45))
+                if motion == "in":
+                    timeline_lines.append(
+                        f'tl.to("#main-video", {{scale:{zoom:.4f},transformOrigin:{origin},'
+                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {start:.4f});'
+                    )
+                    # Hold tight for the rest of the cue; clean reset after so the next cue starts full.
+                    timeline_lines.append(
+                        f'tl.set("#main-video", {{scale:1,transformOrigin:{origin}}}, '
+                        f'{(start + duration):.4f});'
+                    )
+                elif motion == "out":
+                    timeline_lines.append(
+                        f'tl.set("#main-video", {{scale:{zoom:.4f},transformOrigin:{origin}}}, {start:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("#main-video", {{scale:1,transformOrigin:{origin},'
+                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {start:.4f});'
+                    )
+                else:  # in-out
+                    out_at = start + duration - settle
+                    if out_at < start + settle:
+                        out_at = start + settle
+                    timeline_lines.append(
+                        f'tl.to("#main-video", {{scale:{zoom:.4f},transformOrigin:{origin},'
+                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {start:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("#main-video", {{scale:1,transformOrigin:{origin},'
+                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {out_at:.4f});'
+                    )
+            elif module_id == "problem-card-triptych":
+                # Sequence (hard-coded settle/linger — not parameters):
+                #   1) each card enters pink as the “active” point
+                #   2) previous card settles white when the next appears
+                #   3) 2s after the last card enters, it settles white
+                #   4) all three white linger ~2s more, then exit
+                settle_after_last_sec = 2.0
+                linger_all_white_sec = 2.0
+                pink = "#ff00ce"
+                white_bg = "#fbfbfd"
+                ink = "#1a1a2e"
+                teal = "#007c7d"
+                cards = _strings(params.get("cards"), 3)
+                card_count = len(cards)
+                card_stagger = (
+                    float(sample_reveal_stagger_sec)
+                    if sample_reveal_stagger_sec is not None and sample_reveal_stagger_sec > 0
+                    else 0.85
+                )
+                card_stagger = max(0.35, min(2.0, card_stagger))
+                # Prefer spoken/sample semantic times for each card when present.
+                card_times: list[float] = []
+                for index in range(card_count):
+                    path = f"parameters.cards.{index}"
+                    match = next(
+                        (
+                            item
+                            for item in cue.get("semanticItems", [])
+                            if str(item.get("parameterPath") or "") == path
+                        ),
+                        None,
+                    )
+                    if match is not None:
+                        spoken = float(match.get("spokenStartSec") or 0.0)
+                        appear_at = max(spoken, range_start) - range_start
+                        card_times.append(max(start + 0.12, appear_at))
+                    else:
+                        card_times.append(start + 0.28 + index * card_stagger)
+                # Guarantee increasing order and room for settle + linger + exit.
+                for index in range(1, len(card_times)):
+                    card_times[index] = max(card_times[index], card_times[index - 1] + 0.35)
+                latest_need = (
+                    (card_times[-1] if card_times else start + 0.28)
+                    + settle_after_last_sec
+                    + linger_all_white_sec
+                    + exit_duration
+                )
+                if card_times and latest_need > start + duration and card_count > 1:
+                    # Compress gaps so the hard-coded settle/linger still fit the cue.
+                    budget = max(0.8, duration - exit_duration - settle_after_last_sec - linger_all_white_sec - 0.28)
+                    step = budget / max(card_count - 1, 1)
+                    card_times = [start + 0.28 + index * step for index in range(card_count)]
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .pf-triptych", {{opacity:0,y:16}}, '
+                    f'{{opacity:1,y:0,duration:0.4,ease:"power3.out"}}, {entry_start:.4f});'
+                )
+                if card_count:
+                    timeline_lines.append(
+                        f'tl.set("#{element_id} .pf-tri-card", {{opacity:0,y:18}}, {start:.4f});'
+                    )
+                for index in range(card_count):
+                    appear_at = card_times[index]
+                    card_sel = f'#{element_id} .pf-tri-card[data-card-index=\\"{index}\\"]'
+                    timeline_lines.append(
+                        f'tl.fromTo("{card_sel}", {{opacity:0,y:18}}, '
+                        f'{{opacity:1,y:0,duration:0.34,ease:"power2.out",immediateRender:false}}, '
+                        f'{appear_at:.4f});'
+                    )
+                    # Force copy visible (CSS zeros [data-semantic-path] until spoken/generic reveals).
+                    timeline_lines.append(
+                        f'tl.set("{card_sel} span", {{opacity:1}}, {appear_at:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("{card_sel}", {{backgroundColor:"{pink}",color:"#ffffff",'
+                        f'duration:0.18,ease:"power1.out"}}, {appear_at:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("{card_sel} i, {card_sel} span", {{color:"#ffffff",duration:0.18}}, '
+                        f'{appear_at:.4f});'
+                    )
+                    if index > 0:
+                        prev_sel = f'#{element_id} .pf-tri-card[data-card-index=\\"{index - 1}\\"]'
+                        timeline_lines.append(
+                            f'tl.to("{prev_sel}", {{backgroundColor:"{white_bg}",color:"{ink}",'
+                            f'duration:0.28,ease:"power1.out"}}, {appear_at:.4f});'
+                        )
+                        timeline_lines.append(
+                            f'tl.to("{prev_sel} i", {{color:"{teal}",duration:0.28}}, {appear_at:.4f});'
+                        )
+                        timeline_lines.append(
+                            f'tl.to("{prev_sel} span", {{color:"{ink}",duration:0.28}}, {appear_at:.4f});'
+                        )
+                if card_count:
+                    last_sel = f'#{element_id} .pf-tri-card[data-card-index=\\"{card_count - 1}\\"]'
+                    settle_at = card_times[-1] + settle_after_last_sec
+                    # Keep settle before exit so the all-white linger is visible.
+                    settle_at = min(settle_at, start + duration - exit_duration - linger_all_white_sec)
+                    settle_at = max(settle_at, card_times[-1] + 0.4)
+                    timeline_lines.append(
+                        f'tl.to("{last_sel}", {{backgroundColor:"{white_bg}",color:"{ink}",'
+                        f'duration:0.3,ease:"power1.out"}}, {settle_at:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("{last_sel} i", {{color:"{teal}",duration:0.3}}, {settle_at:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("{last_sel} span", {{color:"{ink}",duration:0.3}}, {settle_at:.4f});'
+                    )
+                timeline_lines.append(
+                    f'tl.to("#{element_id} .pf-triptych", {{opacity:0,duration:0.28,ease:"power2.in"}}, '
+                    f'{(start + duration - exit_duration):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .pf-triptych", {{opacity:0}}, {(start + duration):.4f});'
+                )
+            elif module_id == "windows-prompt-typing":
+                # Head docks into the right tall frame (same geometry as dependency-stack).
+                # Terminal fades in on the left; prompt characters type like a CLI while spoken.
+                video_left, video_top = 0.50, 0.10
+                video_w, video_h = 0.42, 0.78
+                video_scale = max(video_w, video_h)
+                face_center_x = 0.46
+                video_x = (video_left + video_w / 2) - face_center_x * video_scale
+                video_y = video_top
+                video_in, video_out = 0.55, 0.45
+                raw_prompt = str(params.get("prompt") or "").replace("\r\n", "\n").replace("\r", "\n")
+                type_count = len(raw_prompt)
+                # Readable CLI pace (~12–14 chars/sec). Speech window may be shorter;
+                # never collapse a multi-char prompt into a flash.
+                min_type_duration = max(1.2, type_count * 0.075) if type_count else 0.5
+                type_start = start + 0.9
+                type_end = start + duration - video_out - 0.45
+                prompt_match = next(
+                    (
+                        item
+                        for item in cue.get("semanticItems", [])
+                        if str(item.get("parameterPath") or "") == "parameters.prompt"
+                    ),
+                    None,
+                )
+                if prompt_match is not None:
+                    spoken = float(prompt_match.get("spokenStartSec") or 0.0)
+                    fully = float(prompt_match.get("fullyVisibleSec") or spoken)
+                    # Timeline is composition-local (0 = range_start), same as other engines.
+                    type_start = max(start + 0.85, max(spoken, range_start) - range_start)
+                    speech_end = max(fully, range_start) - range_start
+                    # Prefer speech end when it actually covers typing; otherwise use min pace.
+                    if speech_end >= type_start + min_type_duration * 0.85:
+                        type_end = speech_end
+                    else:
+                        type_end = type_start + min_type_duration
+                # Library samples / short cues: type at readable pace, then hold finished line.
+                type_end = max(type_end, type_start + min_type_duration)
+                type_end = min(type_end, start + duration - video_out - 0.35)
+                if type_end <= type_start + 0.4 and type_count > 0:
+                    type_start = start + 0.85
+                    type_end = min(
+                        start + duration - video_out - 0.35,
+                        type_start + min_type_duration,
+                    )
+                type_duration = max(0.4, type_end - type_start)
+                # Force typed shell visible (CSS zeros [data-semantic-path] until set).
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .prompt-app, #{element_id} .prompt-typed, '
+                    f'#{element_id} .prompt-typed-text, #{element_id} .prompt-prefix, '
+                    f'#{element_id} .prompt-cursor", {{opacity:1}}, {entry_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .prompt-typed-text", {{textContent:""}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("#main-video", {{scale:{video_scale:.4f},'
+                    f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
+                    f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .prompt-mask", {{opacity:0}}, '
+                    f'{{opacity:1,duration:0.28,ease:"power2.out"}}, {entry_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .prompt-terminal", {{opacity:0,y:18,scale:0.98}}, '
+                    f'{{opacity:1,y:0,scale:1,duration:0.5,ease:"power3.out",'
+                    f'transformOrigin:"left center",immediateRender:false}}, {(start + 0.2):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .prompt-video-outline", {{opacity:0}}, '
+                    f'{{opacity:1,duration:0.35,ease:"power2.out"}}, {(start + 0.15):.4f});'
+                )
+                if type_count > 0:
+                    # Progressive textContent — seek-safe, no display/opacity tricks.
+                    # Caret is the next sibling, so it tracks the growing string (incl. wraps).
+                    step = type_duration / type_count
+                    for index in range(1, type_count + 1):
+                        appear_at = type_start + (index - 1) * step
+                        partial = json.dumps(raw_prompt[:index])
+                        timeline_lines.append(
+                            f'tl.set("#{element_id} .prompt-typed-text", '
+                            f'{{textContent:{partial}}}, {appear_at:.4f});'
+                        )
+                restore_at = start + duration - video_out
+                exit_d = 0.28
+                timeline_lines.append(
+                    f'tl.to("#{element_id} .prompt-stage > *", {{opacity:0,duration:{exit_d:.3f},'
+                    f'ease:"power2.in"}}, {(start + duration - exit_d):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},'
+                    f'ease:"power3.inOut"}}, {restore_at:.4f});'
+                )
+            elif module_id == "brand-cta-lockup":
+                # Community CTA stage:
+                # full white stage, teal band wipe, logo + join line + URL pill,
+                # talking head cover-scaled into the right tall frame.
+                # Frame matches .community-video-outline / .community-mask (58.85%/10.2%/35.9%/78.7%).
+                video_left, video_top = 0.5885, 0.1019
+                video_w, video_h = 0.3594, 0.7870
+                video_scale = max(video_w, video_h)
+                face_center_x = 0.47
+                video_x = (video_left + video_w / 2) - face_center_x * video_scale
+                video_y = video_top
+                video_in, video_out = 0.55, 0.4
+                exit_d = 0.28
+                timeline_lines.append(
+                    f'tl.set("#{element_id} [data-semantic-path]", {{opacity:1}}, {entry_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("#main-video", {{scale:{video_scale:.4f},'
+                    f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
+                    f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .community-mask", {{opacity:0}}, '
+                    f'{{opacity:1,duration:0.25,ease:"power2.out"}}, {entry_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .community-band", '
+                    f'{{scaleX:0,opacity:1}}, '
+                    f'{{scaleX:1,opacity:1,duration:0.72,ease:"power4.out",'
+                    f'transformOrigin:"left center",immediateRender:false}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .community-logo", {{x:-70,opacity:0}}, '
+                    f'{{x:0,opacity:1,duration:0.55,ease:"expo.out",immediateRender:false}}, '
+                    f'{(start + 0.2):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .community-copy", {{y:58,opacity:0}}, '
+                    f'{{y:0,opacity:1,duration:0.58,ease:"back.out(1.35)",immediateRender:false}}, '
+                    f'{(start + 0.55):.4f});'
+                )
+                # URL lands mid-cue (matches 7-20 spoken "link" beat when present).
+                url_at = start + min(5.6, max(1.4, duration * 0.35))
+                url_match = next(
+                    (
+                        item
+                        for item in cue.get("semanticItems", [])
+                        if str(item.get("parameterPath") or "") == "parameters.destination"
+                    ),
+                    None,
+                )
+                if url_match is not None:
+                    spoken = float(url_match.get("spokenStartSec") or 0.0)
+                    url_at = max(start + 1.0, max(spoken, range_start) - range_start)
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .community-url", {{scale:0.65,opacity:0}}, '
+                    f'{{scale:1,opacity:1,duration:0.42,ease:"back.out(1.9)",'
+                    f'transformOrigin:"left center",immediateRender:false}}, {url_at:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .community-video-outline", {{opacity:0}}, '
+                    f'{{opacity:1,duration:0.35,ease:"power2.out"}}, {(start + 0.15):.4f});'
+                )
+                restore_at = start + duration - video_out
+                timeline_lines.append(
+                    f'tl.to("#{element_id} .community-stage > *", {{opacity:0,duration:{exit_d:.3f},'
+                    f'ease:"power2.in"}}, {(start + duration - exit_d):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},'
+                    f'ease:"power3.inOut"}}, {restore_at:.4f});'
+                )
+            elif module_id == "robot-rocket-sign":
+                # Soft CTA gag (L→R), slightly slower for readability:
+                #   1) blast in fast to ~1/3
+                #   2) misfire: black puffs + slow crawl; face → confused
+                #   3) linger confused ~1s mid-screen
+                #   4) couple of fist smacks on the hull
+                #   5) face → shocked, full-force exit off the right
+                rig = f'#{element_id} .rocket-rig'
+                smoke = f'#{element_id} .rocket-smoke'
+                flame = f'#{element_id} .rocket-flame'
+                fist = f'#{element_id} .rocket-fist'
+                face_n = f'#{element_id} .rocket-face-normal'
+                face_c = f'#{element_id} .rocket-face-confused'
+                face_s = f'#{element_id} .rocket-face-shocked'
+                # Pixel flight path (GSAP x is not % of stage). Larger rig → start farther off-left.
+                x_start = -0.42 * width
+                x_third = 0.12 * width
+                x_mid = 0.32 * width
+                x_end = 1.20 * width
+                y_lane = 0.04 * height  # shifted up
+                # Ideal gag clock (seconds from cue start) — slower than first pass.
+                t_fast_end = 0.55
+                t_misfire_end = 1.85
+                t_confused_end = 2.95  # ~1.1s confused linger
+                t_pound_end = 3.85     # a couple of smacks
+                t_exit_end = 4.65
+                ideal_total = t_exit_end
+                scale = min(1.0, max(0.55, (duration - 0.05) / ideal_total)) if duration < ideal_total else 1.0
+
+                def _t(sec: float) -> float:
+                    return start + sec * scale
+
+                timeline_lines.append(
+                    f'tl.set("#{element_id} [data-semantic-path]", {{opacity:1}}, {entry_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("{rig}", {{x:{x_start:.1f},y:{y_lane:.1f},opacity:1,rotation:-6}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("{smoke}", {{opacity:0}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("{face_n}", {{opacity:1}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("{face_c}, {face_s}", {{opacity:0}}, {start:.4f});'
+                )
+                # 1) Fast entry to 1/3
+                timeline_lines.append(
+                    f'tl.to("{rig}", {{x:{x_third:.1f},rotation:-3,duration:{0.55 * scale:.3f},'
+                    f'ease:"power3.out"}}, {_t(0):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("{flame}", {{scale:1.15,transformOrigin:"100% 50%",duration:0.14,'
+                    f'repeat:3,yoyo:true,ease:"sine.inOut"}}, {_t(0):.4f});'
+                )
+                # 2) Misfire: puffs + slow to middle + confused face
+                timeline_lines.append(
+                    f'tl.to("{smoke}", {{opacity:1,duration:0.14,ease:"power1.out"}}, {_t(t_fast_end):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("{face_n}", {{opacity:0}}, {_t(t_fast_end):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("{face_c}", {{opacity:1}}, {_t(t_fast_end):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("#{element_id} .rocket-puff-a", {{x:-18,y:10,scale:1.35,opacity:0.35,'
+                    f'duration:{1.15 * scale:.3f},ease:"power1.out"}}, {_t(t_fast_end):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("#{element_id} .rocket-puff-b", {{x:-28,y:16,scale:1.5,opacity:0.25,'
+                    f'duration:{1.2 * scale:.3f},ease:"power1.out"}}, {_t(t_fast_end + 0.1):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("#{element_id} .rocket-puff-c", {{x:-22,y:22,scale:1.4,opacity:0.2,'
+                    f'duration:{1.25 * scale:.3f},ease:"power1.out"}}, {_t(t_fast_end + 0.16):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("{flame}", {{scale:0.5,opacity:0.4,duration:{0.4 * scale:.3f},'
+                    f'ease:"power2.inOut"}}, {_t(t_fast_end):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("{rig}", {{x:{x_mid:.1f},rotation:4,'
+                    f'duration:{(t_misfire_end - t_fast_end) * scale:.3f},'
+                    f'ease:"power1.inOut"}}, {_t(t_fast_end):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("{rig}", {{y:"+=12",duration:0.14,repeat:7,yoyo:true,ease:"sine.inOut"}}, '
+                    f'{_t(t_fast_end):.4f});'
+                )
+                # 3) Confused linger mid-screen
+                timeline_lines.append(
+                    f'tl.to("{rig}", {{x:{x_mid:.1f},rotation:2,'
+                    f'duration:{(t_confused_end - t_misfire_end) * scale:.3f},'
+                    f'ease:"none"}}, {_t(t_misfire_end):.4f});'
+                )
+                # 4) A couple of solid smacks (fist is at arm end; pivot at shoulder)
+                timeline_lines.append(
+                    f'tl.to("{fist}", {{rotation:42,transformOrigin:"50% 0%",'
+                    f'duration:0.12,repeat:3,yoyo:true,ease:"power2.inOut"}}, '
+                    f'{_t(t_confused_end):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("{rig}", {{x:"+=10",rotation:7,duration:0.1,repeat:3,yoyo:true,'
+                    f'ease:"power1.inOut"}}, {_t(t_confused_end + 0.02):.4f});'
+                )
+                # 5) Shocked face + full force blast off right
+                timeline_lines.append(
+                    f'tl.set("{face_c}", {{opacity:0}}, {_t(t_pound_end):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("{face_s}", {{opacity:1}}, {_t(t_pound_end):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("{smoke}", {{opacity:0,duration:0.14}}, {_t(t_pound_end):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("{flame}", {{scale:1.95,opacity:1,duration:0.2,ease:"power2.out"}}, '
+                    f'{_t(t_pound_end):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("{rig}", {{x:{x_end:.1f},y:{(y_lane - 0.03 * height):.1f},rotation:-12,'
+                    f'duration:{(t_exit_end - t_pound_end) * scale:.3f},ease:"power3.in"}}, '
+                    f'{_t(t_pound_end):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("{rig}", {{opacity:0}}, {_t(t_exit_end):.4f});'
+                )
+            elif module_id in ROBOT_MODULE_IDS:
+                # Recovered mascot motion: wrap enters, bubble pops, robot loops bounce.
+                # Hard cap: at most ROBOT_HOLD_AFTER_DRAWN_SEC after fully drawn, then exit
+                # (even if the placement cue is longer). Shorter cues still exit at cue end.
+                exit_d = 0.28
+                if module_id == "robot-roast":
+                    drawn_at = start + 0.35 + 0.5  # bubble land
+                    bounce_at = start + 0.85
+                    bounce_period = 0.5
+                else:
+                    drawn_at = start + 0.28 + 0.45  # bubble land
+                    bounce_at = start + 0.65
+                    bounce_period = 0.42 if module_id == "robot-cheer" else 0.4
+                hold_end = drawn_at + ROBOT_HOLD_AFTER_DRAWN_SEC
+                exit_at = min(start + duration - exit_d, hold_end)
+                exit_at = max(exit_at, drawn_at + 0.35)
+                hold = max(0.35, exit_at - bounce_at)
+                bounce_repeats = max(1, int(hold / bounce_period))
+                wrap = f'#{element_id} .robot-wrap'
+                bubble = f'#{element_id} .robot-bubble'
+                body = f'#{element_id} .robot-body'
+                timeline_lines.append(
+                    f'tl.set("#{element_id} [data-semantic-path]", {{opacity:1}}, {entry_start:.4f});'
+                )
+                if module_id == "robot-roast":
+                    timeline_lines.append(
+                        f'tl.fromTo("{wrap}", {{x:90,opacity:0}}, '
+                        f'{{x:0,opacity:1,duration:0.55,ease:"power3.out"}}, {entry_start:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.fromTo("{bubble}", {{scale:0,opacity:0}}, '
+                        f'{{scale:1,opacity:1,duration:0.5,ease:"back.out(1.8)",'
+                        f'transformOrigin:"60% 100%",immediateRender:false}}, {(start + 0.35):.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("{body}", {{y:"-=16",duration:0.5,repeat:{bounce_repeats},'
+                        f'yoyo:true,ease:"sine.inOut"}}, {bounce_at:.4f});'
+                    )
+                    point_reps = max(1, int(hold / 0.4))
+                    timeline_lines.append(
+                        f'tl.to("#{element_id} .robot-point", {{rotation:-13,svgOrigin:"216 400",'
+                        f'duration:0.4,repeat:{point_reps},yoyo:true,ease:"sine.inOut"}}, '
+                        f'{bounce_at:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("{bubble}", {{rotation:2.5,transformOrigin:"60% 100%",'
+                        f'duration:0.55,repeat:{max(1, bounce_repeats - 1)},yoyo:true,'
+                        f'ease:"sine.inOut"}}, {(bounce_at + 0.1):.4f});'
+                    )
+                else:
+                    timeline_lines.append(
+                        f'tl.fromTo("{wrap}", {{y:60,opacity:0}}, '
+                        f'{{y:0,opacity:1,duration:0.5,ease:"power3.out"}}, {entry_start:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.fromTo("{bubble}", {{scale:0,opacity:0}}, '
+                        f'{{scale:1,opacity:1,duration:0.45,ease:"back.out(1.9)",'
+                        f'transformOrigin:"20% 100%",immediateRender:false}}, {(start + 0.28):.4f});'
+                    )
+                    if module_id == "robot-cheer":
+                        timeline_lines.append(
+                            f'tl.to("{body}", {{y:"-=18",duration:0.42,repeat:{bounce_repeats},'
+                            f'yoyo:true,ease:"sine.inOut"}}, {bounce_at:.4f});'
+                        )
+                        timeline_lines.append(
+                            f'tl.to("{bubble}", {{scale:1.04,transformOrigin:"20% 100%",'
+                            f'duration:0.42,repeat:{bounce_repeats},yoyo:true,ease:"sine.inOut"}}, '
+                            f'{bounce_at:.4f});'
+                        )
+                    else:
+                        # robot-defiant: body bounce + fist pump + bubble wiggle
+                        timeline_lines.append(
+                            f'tl.to("{body}", {{y:"-=12",duration:0.4,repeat:{bounce_repeats},'
+                            f'yoyo:true,ease:"sine.inOut"}}, {bounce_at:.4f});'
+                        )
+                        fist_reps = max(2, int(hold / 0.3))
+                        timeline_lines.append(
+                            f'tl.to("#{element_id} .robot-fist", {{y:"-=24",duration:0.3,'
+                            f'repeat:{fist_reps},yoyo:true,ease:"power1.inOut"}}, '
+                            f'{bounce_at:.4f});'
+                        )
+                        timeline_lines.append(
+                            f'tl.to("{bubble}", {{rotation:-2.5,transformOrigin:"20% 100%",'
+                            f'duration:0.4,repeat:{bounce_repeats},yoyo:true,ease:"sine.inOut"}}, '
+                            f'{bounce_at:.4f});'
+                        )
+                timeline_lines.append(
+                    f'tl.to("{wrap}", {{opacity:0,duration:{exit_d:.3f},ease:"power2.in"}}, '
+                    f'{exit_at:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("{wrap}", {{opacity:0}}, {(exit_at + exit_d):.4f});'
+                )
+            elif module_id in PORTED_MODULE_IDS and module_id not in {
+                "brand-cta-lockup",
+                "windows-prompt-typing",
+            }:
                 shell = ".pf-card, #%s .pf-triptych, #%s .pf-window, #%s .pf-sunrise, #%s .pf-kinetic, #%s .pf-rise-thesis" % ((element_id,) * 5)
-                kids = (".pf-step, #%s .pf-path-row, #%s .pf-pin-row, #%s .pf-tri-card, #%s .pf-rise-item, "
-                        "#%s .pf-bubble, #%s .pf-cmd, #%s .pf-payoff, #%s .pf-verdict, #%s .pf-final-action") % ((element_id,) * 9)
+                kids = (".pf-path-row, #%s .pf-pin-row, #%s .pf-rise-item, "
+                        "#%s .pf-payoff, #%s .pf-verdict, #%s .pf-final-action") % ((element_id,) * 5)
                 drift = 44 if str(params.get("side")) == "right" else -44
+                # Production default ~0.1s. Library samples slow this and also stagger semantic
+                # anchors (~1s); skip the group kids tween in sample mode so it does not fight
+                # per-item semantic reveals on the same nodes.
+                sample_mode = sample_reveal_stagger_sec is not None and sample_reveal_stagger_sec > 0
+                kid_stagger = max(0.05, min(2.0, float(sample_reveal_stagger_sec))) if sample_mode else 0.1
                 timeline_lines.append(f'tl.fromTo("#{element_id} {shell}", {{opacity:0,x:{drift},scale:0.97}}, {{opacity:1,x:0,scale:1,duration:0.44,ease:"power3.out"}}, {entry_start:.4f});')
-                timeline_lines.append(f'tl.fromTo("#{element_id} {kids}", {{opacity:0,y:18}}, {{opacity:1,y:0,duration:0.3,stagger:0.1,ease:"power2.out"}}, {(start + .24):.4f});')
+                if not sample_mode:
+                    timeline_lines.append(f'tl.fromTo("#{element_id} {kids}", {{opacity:0,y:18}}, {{opacity:1,y:0,duration:0.35,stagger:{kid_stagger:.3f},ease:"power2.out"}}, {(start + .24):.4f});')
                 if module_id == "tradeoff-meter":
                     timeline_lines.append(f'tl.fromTo("#{element_id} .pf-meter-fill", {{scaleX:0}}, {{scaleX:1,duration:0.6,ease:"power2.inOut"}}, {(start + .3):.4f});')
-                if module_id == "three-step-celebration":
-                    timeline_lines.append(f'tl.fromTo("#{element_id} .pf-spark", {{opacity:0,scale:0}}, {{opacity:1,scale:1,y:-90,rotation:180,duration:0.7,stagger:0.03,ease:"power2.out"}}, {(start + duration - 1.1):.4f});')
                 timeline_lines.append(f'tl.to("#{element_id} {shell}", {{opacity:0,duration:0.28,ease:"power2.in"}}, {(start + duration - 0.28):.4f});')
                 timeline_lines.append(f'tl.set("#{element_id} {shell}", {{opacity:0}}, {(start + duration):.4f});')
-            elif module_id in LIBRARY_MODULE_IDS:
-                card = ".lib-panel, #%s .lib-badge, #%s .lib-chip, #%s .lib-path, #%s .lib-grade, #%s .lib-lower" % ((element_id,) * 5)
-                rows = ".lib-row, #%s .lib-result-line, #%s .lib-stop, #%s .lib-words span, #%s .lib-flow-item" % ((element_id,) * 4)
-                offset = -40 if str(params.get("side")) != "right" else 40
-                timeline_lines.append(f'tl.fromTo("#{element_id} {card}", {{opacity:0,x:{offset}}}, {{opacity:1,x:0,duration:0.42,ease:"power3.out"}}, {entry_start:.4f});')
-                timeline_lines.append(f'tl.fromTo("#{element_id} {rows}", {{opacity:0,y:16}}, {{opacity:1,y:0,duration:0.3,stagger:0.09,ease:"power2.out"}}, {(start + .22):.4f});')
-                timeline_lines.append(f'tl.to("#{element_id} {card}", {{opacity:0,x:{offset // 2},duration:0.28,ease:"power2.in"}}, {(start + duration - 0.28):.4f});')
-                timeline_lines.append(f'tl.set("#{element_id} {card}", {{opacity:0}}, {(start + duration):.4f});')
             elif module_id == "ui-callout":
                 timeline_lines.append(f'tl.fromTo("#{element_id} .callout-ring", {{opacity:0,scale:1.12}}, {{opacity:1,scale:1,transformOrigin:"center center",duration:0.32,ease:"power3.out"}}, {entry_start:.4f});')
                 timeline_lines.append(f'tl.fromTo("#{element_id} .callout-label", {{opacity:0,y:10}}, {{opacity:1,y:0,duration:0.28,ease:"power2.out"}}, {(start + .16):.4f});')
@@ -2380,8 +3387,6 @@ def build_hyperframes_composition(
                 timeline_lines.append(f'tl.fromTo("#{element_id} .example-pip-filled", {{scale:0}}, {{scale:1,duration:0.22,stagger:0.04,ease:"back.out(2)"}}, {(start + .5):.4f});')
                 timeline_lines.append(f'tl.to("#{element_id} .example-card", {{opacity:0,x:-28,duration:0.3,ease:"power2.in"}}, {(start + duration - 0.3):.4f});')
                 timeline_lines.append(f'tl.set("#{element_id} .example-card", {{opacity:0}}, {(start + duration):.4f});')
-            elif module_id == "source-footage-hold":
-                timeline_lines.append(f'tl.to("#main-video", {{opacity:1,scale:1,x:0,y:0,duration:0.2}}, {start:.4f});')
         else:
             asset = assets_by_id[cue["assetId"]]
             markup, audio = _asset_markup(asset, cue, element_id, staged_assets[asset["id"]], start, duration, track)
@@ -2425,9 +3430,7 @@ def build_hyperframes_composition(
 :root{{--white:#fff;--paper:#fbfbfd;--ink:#1a1a2e;--body:#4a4a5a;--line:#dedee6;--magenta:#ff00ce;--magenta-deep:#c700a1;--magenta-tint:#fff0fb;--teal:#007c7d;--teal-tint:#e6f5f5;}}
 .cue-motion{{position:absolute;inset:0;width:100%;height:100%;}}
 {runtime_css}
-.module-progress-scale .stat-title{{font-size:94px;line-height:.88;}}
-.lib-grade-foot{{min-height:52px;padding-bottom:12px;align-items:flex-start;}}
-.joke-card-approved{{position:absolute;left:3.96%;top:12.41%;width:39.58%;height:48.15%;background:var(--paper);border:4px solid var(--ink);box-shadow:18px 20px 0 rgba(255,0,206,.22);overflow:hidden}}.joke-image-approved{{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}}.joke-copy-approved{{position:absolute;left:24px;right:24px;bottom:24px;padding:18px 22px;background:rgba(251,251,253,.95);border:3px solid var(--ink)}}.joke-copy-approved .kicker{{font-size:17px;color:var(--teal)}}.joke-line-approved{{margin-top:10px;color:var(--magenta);font-size:42px;font-weight:900;line-height:.92;letter-spacing:-.045em}}.pf-step-no-num{{padding-top:38px}}.pf-step-no-num .pf-step-title{{margin-top:0}}.pf-community{{top:7.2%;width:33.85%;min-height:48.15%;padding:46px;text-align:left;border-width:4px;box-shadow:18px 20px 0 rgba(0,124,125,.3)}}.pf-community::before{{content:"";position:absolute;left:0;top:0;bottom:0;width:22px;background:var(--teal)}}.pf-logo-image{{display:block;width:min(330px,82%);height:110px;object-fit:contain;object-position:left center}}.pf-community .pf-action{{margin-top:44px;font-size:43px}}.pf-community .pf-dest{{font-size:18px}}.lib-track span.lib-long{{font-size:54px;letter-spacing:-.055em;padding:0 8px}}
+.pf-step-no-num{{padding-top:38px}}.pf-step-no-num .pf-step-title{{margin-top:0}}.pf-community{{top:7.2%;width:33.85%;min-height:48.15%;padding:46px;text-align:left;border-width:4px;box-shadow:18px 20px 0 rgba(0,124,125,.3)}}.pf-community::before{{content:"";position:absolute;left:0;top:0;bottom:0;width:22px;background:var(--teal)}}.pf-logo-image{{display:block;width:min(330px,82%);height:110px;object-fit:contain;object-position:left center}}.pf-community .pf-action{{margin-top:44px;font-size:43px}}.pf-community .pf-dest{{font-size:18px}}
 .callout-align-right.callout-below{{transform:translate(-100%,14px)}}.callout-align-right.callout-above{{transform:translate(-100%,calc(-100% - 14px))}}
 </style></head><body><div id="root" data-composition-id="vcg-visual-plan" data-start="0" data-width="{width}" data-height="{height}" data-duration="{render_duration:.4f}" data-fps="{fps}"><div class="base"></div><video id="main-video" class="clip" src="source.mp4" muted playsinline data-start="0" data-duration="{render_duration:.4f}" data-track-index="0"></video><audio id="main-audio" src="source.mp4" data-start="0" data-duration="{render_duration:.4f}" data-track-index="10" data-volume="1"></audio>{''.join(clip_markup)}{''.join(audio_markup)}<script src="vendor/gsap.min.js"></script><script>(function(){{window.__timelines=window.__timelines||{{}};var tl=gsap.timeline({{paused:true}});{''.join(timeline_lines)}window.__timelines["vcg-visual-plan"]=tl;}})();</script></div></body></html>'''
     (public / "index.html").write_text(index_html, encoding="utf-8")
