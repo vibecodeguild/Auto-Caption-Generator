@@ -37,7 +37,10 @@ def test_visual_plan_round_trip_stays_inside_marked_private_project(tmp_path: Pa
         "startSec": 4,
         "endSec": 6,
         "enabled": True,
-        "parameters": {"text": "Reveal after delivery"},
+        "parameters": {
+            "text": "Reveal after delivery",
+            "imageAssetId": "demo-joke-image",
+        },
     })
 
     saved = visual_production.save_visual_plan(plan_path, plan)
@@ -259,24 +262,27 @@ def test_validate_visual_plan_rejects_unknown_module(tmp_path: Path) -> None:
         visual_production.save_visual_plan(plan_path, plan)
 
 
-@pytest.mark.parametrize("module_id", ["punchline-reveal"])
-def test_sustained_modules_render_only_inside_the_audited_speaker_safe_region(module_id: str) -> None:
-    cue = {
-        "moduleId": module_id,
-        "parameters": {
-            "text": "Keep the speaker visible",
-            "speakerSafety": {
-                "overlayOcclusionBounds": [
-                    {"x": .18, "y": .02, "width": .78, "height": .62},
-                ],
+def test_punchline_reveal_is_full_joke_stage_not_overlay_bounds() -> None:
+    """Joke card docks video left — not a speaker-safe overlay fill."""
+
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "punchline-reveal",
+            "parameters": {
+                "text": "Keep the speaker visible",
+                "imageAssetId": "demo-joke-image",
             },
         },
-    }
+        "safe-overlay",
+        10,
+        8,
+        20,
+        staged_assets={"demo-joke-image": "demo-joke-image.png"},
+    )
 
-    markup = visual_production._module_markup(cue, "safe-overlay", 10, 8, 20)
-
-    assert "left:18.000%;top:2.000%;width:78.000%;height:62.000%" in markup
-    assert 'class="module-fill"' not in markup or 'style="left:18.000%' in markup
+    assert "joke-stage" in markup
+    assert "joke-video-outline" in markup
+    assert "module-fill" not in markup
 
 
 def test_progress_scale_renders_full_white_stage_with_video_window() -> None:
@@ -401,19 +407,24 @@ def test_punchline_reveal_with_image_is_joke_card() -> None:
     assert "module-fill" not in markup
 
 
-def test_punchline_reveal_without_image_stays_text_path() -> None:
-    markup = visual_production._module_markup(
-        {
-            "moduleId": "punchline-reveal",
-            "parameters": {"kicker": "PUNCH", "text": "JUST START"},
-        },
-        "punch",
-        1,
-        4,
-        20,
-    )
-    assert "joke-card" not in markup
-    assert "punchline" in markup
+def test_punchline_reveal_requires_image_no_text_only_mode() -> None:
+    """One engine, one look — missing imageAssetId is an error, not a second mode."""
+
+    try:
+        visual_production._module_markup(
+            {
+                "moduleId": "punchline-reveal",
+                "parameters": {"kicker": "PUNCH", "text": "JUST START"},
+            },
+            "punch",
+            1,
+            4,
+            20,
+        )
+        raise AssertionError("expected ValueError for punchline-reveal without imageAssetId")
+    except ValueError as exc:
+        assert "imageAssetId" in str(exc)
+        assert "kinetic-word-punctuation" in str(exc)
 
 
 def test_robot_rocket_sign_markup_has_rig_and_sign() -> None:
@@ -542,11 +553,9 @@ def test_windows_prompt_typing_docks_head_and_types_chars() -> None:
     assert "prompt-typed-text" in markup
     assert 'data-full-prompt="Hi there"' in markup
     # Live text starts empty; GSAP fills textContent letter-by-letter.
+    # Caret is CSS ::after on .prompt-typed-text (not a sibling that fails on wrap).
     assert 'class="prompt-typed-text"></span>' in markup
-    # Caret trails the typed text node inside .prompt-typed.
-    text_idx = markup.find('class="prompt-typed-text"')
-    cursor_idx = markup.find('class="prompt-cursor"')
-    assert text_idx != -1 and cursor_idx > text_idx
+    assert "prompt-cursor" not in markup
     assert "pf-window" not in markup
     # Windows caption buttons, not Mac traffic-light dots.
     assert "win-min" in markup
@@ -861,7 +870,12 @@ def test_production_gate_blocks_unanchored_visible_text(tmp_path: Path) -> None:
     plan_path, plan = _private_project(tmp_path)
     plan["cues"] = [{
         "id": "cue-1", "kind": "module", "moduleId": "punchline-reveal", "startSec": 1, "endSec": 4,
-        "enabled": True, "parameters": {"text": "SYNC THIS", "kicker": "VOICE"},
+        "enabled": True,
+        "parameters": {
+            "text": "SYNC THIS",
+            "kicker": "VOICE",
+            "imageAssetId": "demo-joke-image",
+        },
     }]
     saved = visual_production.save_visual_plan(plan_path, plan)
 
@@ -876,7 +890,12 @@ def test_visual_plan_rejects_module_parameters_outside_the_module_contract(tmp_p
     plan_path, plan = _private_project(tmp_path)
     plan["cues"] = [{
         "id": "cue-1", "kind": "module", "moduleId": "punchline-reveal", "startSec": 1, "endSec": 4,
-        "enabled": True, "parameters": {"text": "SYNC THIS", "leftItems": ["not allowed"]},
+        "enabled": True,
+        "parameters": {
+            "text": "SYNC THIS",
+            "imageAssetId": "demo-joke-image",
+            "leftItems": ["not allowed"],
+        },
     }]
 
     with pytest.raises(ValueError, match="unsupported parameters: leftItems"):

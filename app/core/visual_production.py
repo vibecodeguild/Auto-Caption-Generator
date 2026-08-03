@@ -86,7 +86,8 @@ COMMON_MODULE_PARAMETERS = {
     "placementBounds",
 }
 MODULE_PARAMETER_KEYS = {
-    # Image path = joke card (imageAssetId + kicker + text); head docks left, art right.
+    # One engine = one look: joke card only (required imageAssetId + text; head docks left, art right).
+    # There is no text-only mode — kinetic phrase work uses kinetic-word-punctuation.
     "punchline-reveal": COMMON_MODULE_PARAMETERS | {"text", "kicker", "accentColor", "imageAssetId"},
     "speaker-side-panel": COMMON_MODULE_PARAMETERS | {"text", "kicker", "accentColor", "side", "panelWidth", "videoBounds", "frameStyle", "items"},
     "progress-scale": COMMON_MODULE_PARAMETERS | {"text", "kicker", "startLabel", "targetLabel", "accentColor", "milestones"},
@@ -1820,10 +1821,11 @@ def _ported_markup(
     if module_id == "windows-prompt-typing":
         # Full stage: talking head cover-docks RIGHT (dependency-stack frame);
         # Windows terminal fades in on the LEFT and types the prompt like a CLI.
-        # Typed text starts empty; GSAP writes textContent letter-by-letter so the caret
-        # (sibling after the text node) advances right/down with a real typewriter.
+        # Typed text starts empty; GSAP writes textContent letter-by-letter.
+        # Caret is CSS ::after on .prompt-typed-text (same inline box as the glyphs) so it
+        # always trails the last character — including when the line wraps. A sibling
+        # <span class="prompt-cursor"> does NOT track wrapped lines in Chromium.
         app_name = html.escape(str(params.get("appName") or "Windows PowerShell"))
-        # Full prompt kept in data-full-prompt for debugging / future hooks; live text is empty.
         full_prompt = str(params.get("prompt") or "").replace("\r\n", "\n").replace("\r", "\n")
         full_attr = html.escape(full_prompt, quote=True)
         return (
@@ -1846,7 +1848,6 @@ def _ported_markup(
             f'<span class="prompt-typed" data-semantic-path="parameters.prompt" '
             f'data-full-prompt="{full_attr}">'
             f'<span class="prompt-typed-text"></span>'
-            f'<span class="prompt-cursor" aria-hidden="true"></span>'
             f'</span>'
             f'</div></div></div>'
             f'<div class="prompt-video-outline" aria-hidden="true"></div>'
@@ -2122,34 +2123,29 @@ def _module_markup(
         return _robot_module_markup(module_id, params, common)
     safe_overlay_style = _speaker_safe_overlay_style(params)
     if module_id == "punchline-reveal":
-        # Image path = recovered 7-22 joke card (custom generated image + caption box).
-        # Text-only path stays a simple kinetic punchline for non-image lands.
-        image_asset_id = str(params.get("imageAssetId") or "")
-        staged_image = (staged_assets or {}).get(image_asset_id)
-        if image_asset_id and not staged_image:
-            raise ValueError(f"punchline-reveal references unknown imageAssetId: {image_asset_id}")
-        if staged_image:
-            # Transposed dependency-stack: talking head docks left; image+copy on the right.
-            return (
-                f'<section {common} style="--cue-accent:{accent_color}">'
-                f'<div class="joke-stage">'
-                f'<div class="joke-mask" aria-hidden="true"></div>'
-                f'<div class="joke-video-outline" aria-hidden="true"></div>'
-                f'<div class="joke-panel">'
-                f'<div class="joke-card">'
-                f'<img class="joke-image" src="assets/{html.escape(staged_image)}" alt="" />'
-                f'<div class="joke-copy">'
-                f'<div class="joke-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
-                f'<div class="joke-line" data-semantic-path="parameters.text">{text}</div>'
-                f'</div></div></div></div></section>'
+        # Single product look: 7-22 joke card (image required). No alternate text-only mode.
+        image_asset_id = str(params.get("imageAssetId") or "").strip()
+        if not image_asset_id:
+            raise ValueError(
+                "punchline-reveal requires imageAssetId (joke-card engine). "
+                "Use kinetic-word-punctuation for text-only kinetic phrases."
             )
+        staged_image = (staged_assets or {}).get(image_asset_id)
+        if not staged_image:
+            raise ValueError(f"punchline-reveal references unknown imageAssetId: {image_asset_id}")
+        # Transposed dependency-stack: talking head docks left; image+copy on the right.
         return (
             f'<section {common} style="--cue-accent:{accent_color}">'
-            f'<div class="module-fill" style="{safe_overlay_style}">'
-            f'<div class="grid"></div>'
-            f'<div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
-            f'<div class="punchline" data-semantic-path="parameters.text">{text}</div>'
-            f'<div class="rule"></div></div></section>'
+            f'<div class="joke-stage">'
+            f'<div class="joke-mask" aria-hidden="true"></div>'
+            f'<div class="joke-video-outline" aria-hidden="true"></div>'
+            f'<div class="joke-panel">'
+            f'<div class="joke-card">'
+            f'<img class="joke-image" src="assets/{html.escape(staged_image)}" alt="" />'
+            f'<div class="joke-copy">'
+            f'<div class="joke-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
+            f'<div class="joke-line" data-semantic-path="parameters.text">{text}</div>'
+            f'</div></div></div></div></section>'
         )
     if module_id == "speaker-side-panel":
         return f'<section {common} style="--cue-accent:{accent_color}"><div class="side-copy"><div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div><div class="side-title" data-semantic-path="parameters.text">{text}</div></div><div class="video-outline"></div></section>'
@@ -2364,6 +2360,52 @@ def _entry_preroll_time(start: float, fps: int) -> float:
     return max(0.0, start - (1.0 / max(1, fps)))
 
 
+def _replace_directory_tree(path: Path) -> None:
+    """Remove a directory tree, surviving Windows file locks (WinError 32).
+
+    Live HyperFrames players often keep ``public/source.mp4`` open. ``rmtree``
+    then fails mid-delete. Renaming the tree out of the way frees the path name
+    so a fresh workspace can be created; the stale rename is deleted best-effort.
+    """
+
+    path = Path(path)
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path)
+        return
+    except OSError:
+        pass
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    stale = parent / f".{path.name}.stale-{uuid.uuid4().hex[:10]}"
+    try:
+        path.rename(stale)
+    except OSError as exc:
+        # Last resort: try to remove just the locked media and leave the rest.
+        for locked_name in ("source.mp4",):
+            locked = path / "public" / locked_name
+            if locked.is_file():
+                try:
+                    locked.rename(parent / f".{locked_name}.stale-{uuid.uuid4().hex[:8]}")
+                except OSError:
+                    pass
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+        if path.exists():
+            raise RuntimeError(
+                f"Could not clear HyperFrames workspace (file in use): {path}. "
+                "Close the live preview or retry."
+            ) from exc
+    # Best-effort cleanup of the renamed tree (may still be locked briefly).
+    try:
+        shutil.rmtree(stale, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def build_hyperframes_composition(
     plan_path: Path,
     *,
@@ -2393,8 +2435,11 @@ def build_hyperframes_composition(
     if not _is_within(workspace, root):
         raise ValueError("HyperFrames workspace must stay inside the private visual project.")
     public = workspace / "public"
+    # Wipe prior workspace. On Windows a live hyperframes-player may still hold
+    # public/source.mp4 open — rmtree then fails with WinError 32. Rename the
+    # locked tree aside and continue into a fresh directory with the same path.
     if workspace.exists():
-        shutil.rmtree(workspace)
+        _replace_directory_tree(workspace)
     (public / "assets").mkdir(parents=True, exist_ok=True)
     (public / "fonts").mkdir(parents=True, exist_ok=True)
     (public / "vendor").mkdir(parents=True, exist_ok=True)
@@ -2466,8 +2511,13 @@ def build_hyperframes_composition(
             # Engines that own full enter/exit skip the shell slide.
             owns_shell = (
                 module_id in ROBOT_MODULE_IDS
-                or module_id in {"brand-cta-lockup", "robot-rocket-sign", "windows-prompt-typing"}
-                or (module_id == "punchline-reveal" and bool(params.get("imageAssetId")))
+                or module_id
+                in {
+                    "brand-cta-lockup",
+                    "robot-rocket-sign",
+                    "windows-prompt-typing",
+                    "punchline-reveal",
+                }
             )
             if owns_shell:
                 transition_in = "none"
@@ -2502,11 +2552,9 @@ def build_hyperframes_composition(
                     "brand-cta-lockup",
                     "robot-rocket-sign",
                     "windows-prompt-typing",
+                    "punchline-reveal",  # joke card owns kicker/line reveals
                     *ROBOT_MODULE_IDS,
                 }
-                # Joke-image card owns kicker/line reveals.
-                if module_id == "punchline-reveal" and (cue.get("parameters") or {}).get("imageAssetId"):
-                    skip_semantic = {*skip_semantic, "punchline-reveal"}
                 if module_id not in skip_semantic:
                     timeline_lines.extend(_semantic_timeline_lines(cue, element_id, range_start, range_end, start))
                 elif module_id == "progress-scale":
@@ -2540,73 +2588,71 @@ def build_hyperframes_composition(
                             _semantic_timeline_lines(filtered, element_id, range_start, range_end, start)
                         )
             if module_id == "punchline-reveal":
-                # Joke-image path: dock head LEFT (transpose of dependency-stack),
-                # image + caption panel enters from the right.
-                if (cue.get("parameters") or {}).get("imageAssetId"):
-                    # Must match .joke-video-outline / .joke-mask (left tall frame).
-                    video_left, video_top = 0.08, 0.10
-                    video_w, video_h = 0.42, 0.78
-                    video_scale = max(video_w, video_h)
-                    face_center_x = 0.47
-                    video_x = (video_left + video_w / 2) - face_center_x * video_scale
-                    video_y = video_top
-                    video_in, video_out = 0.55, 0.42
-                    panel = f'#{element_id} .joke-panel'
-                    card = f'#{element_id} .joke-card'
-                    img = f'#{element_id} .joke-image'
-                    exit_d = min(0.32, max(0.22, duration * 0.12))
-                    timeline_lines.append(
-                        f'tl.set("#{element_id} [data-semantic-path]", {{opacity:0}}, {start:.4f});'
-                    )
-                    timeline_lines.append(
-                        f'tl.to("#main-video", {{scale:{video_scale:.4f},'
-                        f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
-                        f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
-                    )
-                    timeline_lines.append(
-                        f'tl.fromTo("#{element_id} .joke-mask", {{opacity:0}}, '
-                        f'{{opacity:1,duration:0.28,ease:"power2.out"}}, {entry_start:.4f});'
-                    )
-                    timeline_lines.append(
-                        f'tl.fromTo("#{element_id} .joke-video-outline", {{opacity:0}}, '
-                        f'{{opacity:1,duration:0.35,ease:"power2.out"}}, {(start + 0.12):.4f});'
-                    )
-                    timeline_lines.append(
-                        f'tl.fromTo("{panel}", {{opacity:0,x:70}}, '
-                        f'{{opacity:1,x:0,duration:0.52,ease:"power3.out"}}, {entry_start:.4f});'
-                    )
-                    timeline_lines.append(
-                        f'tl.fromTo("{img}", {{scale:1.08,x:18}}, '
-                        f'{{scale:1,x:0,duration:{max(0.8, duration - 0.4):.3f},'
-                        f'ease:"sine.inOut",immediateRender:false}}, {(start + 0.1):.4f});'
-                    )
-                    timeline_lines.append(
-                        f'tl.fromTo("#{element_id} .joke-kicker", {{opacity:0,y:16}}, '
-                        f'{{opacity:1,y:0,duration:0.34,ease:"power2.out",immediateRender:false}}, '
-                        f'{(start + 0.32):.4f});'
-                    )
-                    timeline_lines.append(
-                        f'tl.fromTo("#{element_id} .joke-line", {{opacity:0,y:18}}, '
-                        f'{{opacity:1,y:0,duration:0.38,ease:"power2.out",immediateRender:false}}, '
-                        f'{(start + 0.52):.4f});'
-                    )
-                    restore_at = start + duration - video_out
-                    timeline_lines.append(
-                        f'tl.to("{panel}", {{opacity:0,x:48,duration:{exit_d:.3f},ease:"power2.in"}}, '
-                        f'{(start + duration - exit_d):.4f});'
-                    )
-                    timeline_lines.append(
-                        f'tl.to("#{element_id} .joke-mask, #{element_id} .joke-video-outline", '
-                        f'{{opacity:0,duration:{exit_d:.3f},ease:"power2.in"}}, '
-                        f'{(start + duration - exit_d):.4f});'
-                    )
-                    timeline_lines.append(
-                        f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},'
-                        f'ease:"power3.inOut"}}, {restore_at:.4f});'
-                    )
-                    timeline_lines.append(
-                        f'tl.set("{card}", {{opacity:0}}, {(start + duration):.4f});'
-                    )
+                # Joke card only: dock head LEFT, image + caption panel from the right.
+                # Must match .joke-video-outline / .joke-mask (left tall frame).
+                video_left, video_top = 0.08, 0.10
+                video_w, video_h = 0.42, 0.78
+                video_scale = max(video_w, video_h)
+                face_center_x = 0.47
+                video_x = (video_left + video_w / 2) - face_center_x * video_scale
+                video_y = video_top
+                video_in, video_out = 0.55, 0.42
+                panel = f'#{element_id} .joke-panel'
+                card = f'#{element_id} .joke-card'
+                img = f'#{element_id} .joke-image'
+                exit_d = min(0.32, max(0.22, duration * 0.12))
+                timeline_lines.append(
+                    f'tl.set("#{element_id} [data-semantic-path]", {{opacity:0}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("#main-video", {{scale:{video_scale:.4f},'
+                    f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
+                    f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .joke-mask", {{opacity:0}}, '
+                    f'{{opacity:1,duration:0.28,ease:"power2.out"}}, {entry_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .joke-video-outline", {{opacity:0}}, '
+                    f'{{opacity:1,duration:0.35,ease:"power2.out"}}, {(start + 0.12):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("{panel}", {{opacity:0,x:70}}, '
+                    f'{{opacity:1,x:0,duration:0.52,ease:"power3.out"}}, {entry_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("{img}", {{scale:1.08,x:18}}, '
+                    f'{{scale:1,x:0,duration:{max(0.8, duration - 0.4):.3f},'
+                    f'ease:"sine.inOut",immediateRender:false}}, {(start + 0.1):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .joke-kicker", {{opacity:0,y:16}}, '
+                    f'{{opacity:1,y:0,duration:0.34,ease:"power2.out",immediateRender:false}}, '
+                    f'{(start + 0.32):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .joke-line", {{opacity:0,y:18}}, '
+                    f'{{opacity:1,y:0,duration:0.38,ease:"power2.out",immediateRender:false}}, '
+                    f'{(start + 0.52):.4f});'
+                )
+                restore_at = start + duration - video_out
+                timeline_lines.append(
+                    f'tl.to("{panel}", {{opacity:0,x:48,duration:{exit_d:.3f},ease:"power2.in"}}, '
+                    f'{(start + duration - exit_d):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("#{element_id} .joke-mask, #{element_id} .joke-video-outline", '
+                    f'{{opacity:0,duration:{exit_d:.3f},ease:"power2.in"}}, '
+                    f'{(start + duration - exit_d):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},'
+                    f'ease:"power3.inOut"}}, {restore_at:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("{card}", {{opacity:0}}, {(start + duration):.4f});'
+                )
             elif module_id == "speaker-rise-callouts":
                 # Explicit sequence: thesis bar first, then each emphasis word one-by-one.
                 # Library samples pass sample_reveal_stagger_sec≈1.0 so you can see each land.
@@ -3014,8 +3060,8 @@ def build_hyperframes_composition(
                 # Force typed shell visible (CSS zeros [data-semantic-path] until set).
                 timeline_lines.append(
                     f'tl.set("#{element_id} .prompt-app, #{element_id} .prompt-typed, '
-                    f'#{element_id} .prompt-typed-text, #{element_id} .prompt-prefix, '
-                    f'#{element_id} .prompt-cursor", {{opacity:1}}, {entry_start:.4f});'
+                    f'#{element_id} .prompt-typed-text, #{element_id} .prompt-prefix", '
+                    f'{{opacity:1}}, {entry_start:.4f});'
                 )
                 timeline_lines.append(
                     f'tl.set("#{element_id} .prompt-typed-text", {{textContent:""}}, {start:.4f});'
@@ -3039,8 +3085,8 @@ def build_hyperframes_composition(
                     f'{{opacity:1,duration:0.35,ease:"power2.out"}}, {(start + 0.15):.4f});'
                 )
                 if type_count > 0:
-                    # Progressive textContent — seek-safe, no display/opacity tricks.
-                    # Caret is the next sibling, so it tracks the growing string (incl. wraps).
+                    # Progressive textContent — seek-safe. Caret is ::after on this node
+                    # so it rides the last glyph even when the string wraps to line 2+.
                     step = type_duration / type_count
                     for index in range(1, type_count + 1):
                         appear_at = type_start + (index - 1) * step

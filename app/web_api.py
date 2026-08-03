@@ -4,6 +4,7 @@ import copy
 import json
 import mimetypes
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -13,7 +14,7 @@ from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
@@ -90,9 +91,23 @@ from app.core.graphics_library import (
     update_entry as update_graphics_usage,
     entry_public_view,
 )
+from app.core.assignment import (
+    merge_visual_package_status,
+    run_assignment_for_video_project,
+    save_assignment_override_for_video_project,
+)
+from app.core.placement import (
+    build_placement_live_preview,
+    run_placement_for_video_project,
+    save_placement_beat_for_video_project,
+)
+from app.core.scenelayer import (
+    run_scenelayer_for_video_project,
+    save_scenelayer_override_for_video_project,
+)
 from app.core.masterbeater import (
     run_masterbeater_for_video_project,
-    status_for_video_project as masterbeater_status_for_video_project,
+    save_masterbeater_edits_for_video_project,
 )
 from app.core.transcriber import transcribe_audio
 from app.core.transcript_history import build_edit_analysis, build_generation_metadata, with_initial_repeat_suggestions
@@ -196,6 +211,10 @@ class ApiState:
     audio_preview_corrected: Path | None = None
     rendered_cut_preview_id: str | None = None
     rendered_cut_preview_path: Path | None = None
+    placement_preview_root: Path | None = None
+    placement_preview_entry: Path | None = None
+    placement_preview_cache_key: str | None = None
+    placement_preview_beat_id: str | None = None
     transcription_jobs: dict[str, TranscriptionJob]
     visual_plan_path: Path | None = None
     visual_plan: dict | None = None
@@ -226,6 +245,10 @@ class ApiState:
         self.audio_preview_corrected = None
         self.rendered_cut_preview_id = None
         self.rendered_cut_preview_path = None
+        self.placement_preview_root = None
+        self.placement_preview_entry = None
+        self.placement_preview_cache_key = None
+        self.placement_preview_beat_id = None
         self.transcription_jobs = {}
         self.visual_plan_path = None
         self.visual_plan = None
@@ -378,6 +401,50 @@ class VisualRenderJob:
 
 state = ApiState()
 LOCAL_UI_ORIGINS = {"http://127.0.0.1:3000", "http://localhost:3000"}
+# HyperFrames compositions are served from the API host; browsers send Origin: API
+# for iframe subresources (fonts, etc.). Allow those same-host origins too.
+LOCAL_API_ORIGINS = {
+    "http://127.0.0.1:8731",
+    "http://localhost:8731",
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+}
+LOCAL_BROWSER_ORIGINS = LOCAL_UI_ORIGINS | LOCAL_API_ORIGINS
+
+
+def _silence_windows_proactor_connection_reset() -> None:
+    """Quiet benign WinError 10054 when browsers abort video range requests.
+
+    On Windows + asyncio Proactor, client-closed partial GETs (seek/replay of
+    source.mp4) surface as ConnectionResetError in
+    ``_ProactorBasePipeTransport._call_connection_lost``. Harmless, noisy.
+    """
+
+    if sys.platform != "win32":
+        return
+    try:
+        from asyncio.proactor_events import _ProactorBasePipeTransport
+    except ImportError:
+        return
+    if getattr(_ProactorBasePipeTransport, "_vcg_connection_lost_patched", False):
+        return
+    original = _ProactorBasePipeTransport._call_connection_lost
+
+    def _call_connection_lost(self, exc):  # type: ignore[no-untyped-def]
+        try:
+            original(self, exc)
+        except ConnectionResetError:
+            pass
+        except OSError as err:
+            if getattr(err, "winerror", None) in {10054, 10053}:
+                return
+            raise
+
+    _ProactorBasePipeTransport._call_connection_lost = _call_connection_lost  # type: ignore[method-assign]
+    _ProactorBasePipeTransport._vcg_connection_lost_patched = True  # type: ignore[attr-defined]
+
+
+_silence_windows_proactor_connection_reset()
 
 app = FastAPI(
     title="VCG AutoCaption Local API",
@@ -388,7 +455,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=sorted(LOCAL_UI_ORIGINS),
+    allow_origins=sorted(LOCAL_BROWSER_ORIGINS),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -402,7 +469,7 @@ app.add_middleware(
 @app.middleware("http")
 async def enforce_local_browser_origin(request: Request, call_next):
     origin = request.headers.get("origin")
-    if origin is not None and origin not in LOCAL_UI_ORIGINS:
+    if origin is not None and origin not in LOCAL_BROWSER_ORIGINS:
         return JSONResponse(
             status_code=403,
             content={"detail": "Requests are only accepted from the local VCG interface."},
@@ -738,14 +805,32 @@ def _activate_video_project(manifest_path: Path, manifest: dict) -> dict:
         state.project = None
         state.edits = EditDecisionList()
         state.project_path = editor_path
+    # Visual plan is optional at open time. Historical plans may reference retired
+    # engines (e.g. link-chip); that must not block opening the parent project or
+    # Visual Package / Masterbeater review.
     visual_path = resolve_video_project_path(manifest_path, manifest, "visualPlan")
+    visual_plan_warning: str | None = None
     if visual_path.is_file():
-        state.visual_plan_path = visual_path
-        state.visual_plan = load_visual_plan(visual_path)
+        try:
+            state.visual_plan_path = visual_path
+            state.visual_plan = load_visual_plan(visual_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            state.visual_plan_path = None
+            state.visual_plan = None
+            visual_plan_warning = (
+                f"Visual plan exists but was not loaded ({exc}). "
+                "Parent project, transcript, and Visual Package still open."
+            )
     else:
         state.visual_plan_path = None
         state.visual_plan = None
-    return {"videoProject": video_project_response(manifest_path, manifest), "editorProject": editor_response}
+    response = {
+        "videoProject": video_project_response(manifest_path, manifest),
+        "editorProject": editor_response,
+    }
+    if visual_plan_warning:
+        response["visualPlanWarning"] = visual_plan_warning
+    return response
 
 
 def _activate_rebuilt_sequence(manifest_path: Path, manifest: dict) -> dict:
@@ -827,13 +912,13 @@ def video_project_visual_prompt() -> dict:
 
 @app.get("/api/visual-package/status")
 def visual_package_status() -> dict:
-    """Status + last Masterbeater result for the open private video project."""
+    """Status + Masterbeater + Assignment for the open private video project."""
 
     active = _active_video_project()
     if active is None:
         raise HTTPException(status_code=404, detail="No private video project is open.")
     try:
-        return masterbeater_status_for_video_project(active[0], active[1])
+        return merge_visual_package_status(active[0], active[1])
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -851,6 +936,236 @@ def visual_package_run_masterbeater() -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/visual-package/masterbeater/beats")
+def visual_package_save_masterbeater_beats(payload: dict = Body(...)) -> dict:
+    """Auto-save Stage 1 word edits to masterbeater-beats-reviewed.json + ledger.
+
+    Original masterbeater-beats.json is never overwritten by this endpoint.
+    """
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        return save_masterbeater_edits_for_video_project(active[0], active[1], payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/visual-package/scenelayer/run")
+def visual_package_run_scenelayer() -> dict:
+    """Stage 2: label each beat with an OBS layout from its first frame."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        return run_scenelayer_for_video_project(active[0], active[1])
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/visual-package/scenelayer/override")
+def visual_package_scenelayer_override(payload: dict = Body(...)) -> dict:
+    """Human layout dropdown → scenelayer-reviewed.json + ledger.
+
+    Original scenelayer.json is never overwritten by this endpoint.
+    """
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        return save_scenelayer_override_for_video_project(active[0], active[1], payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/visual-package/assignment/run")
+def visual_package_run_assignment() -> dict:
+    """Stage 2: deal golden usages onto working Masterbeater beats."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        return run_assignment_for_video_project(active[0], active[1])
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/visual-package/assignment/override")
+def visual_package_assignment_override(payload: dict = Body(...)) -> dict:
+    """Human swap of usage on one beat → assignment-reviewed.json + ledger.
+
+    Original assignment.json is never overwritten by this endpoint.
+    """
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        return save_assignment_override_for_video_project(active[0], active[1], payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/visual-package/placement/run")
+def visual_package_run_placement() -> dict:
+    """Stage 3: draft placements for assigned beats (skips locked on re-run)."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        return run_placement_for_video_project(active[0], active[1])
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/visual-package/placement/preview")
+def visual_package_build_placement_preview(payload: dict = Body(...)) -> dict:
+    """Build live Tier B HyperFrames composition for one placement beat (no encode)."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    beat_id = str((payload or {}).get("beatId") or "").strip()
+    if not beat_id:
+        raise HTTPException(status_code=400, detail="beatId is required.")
+    try:
+        result = build_placement_live_preview(
+            active[0],
+            active[1],
+            beat_id=beat_id,
+            lines=payload.get("lines") if isinstance(payload.get("lines"), list) else None,
+            meta=payload.get("meta") if isinstance(payload.get("meta"), dict) else None,
+            assets=payload.get("assets") if isinstance(payload.get("assets"), dict) else None,
+            motion=payload.get("motion") if isinstance(payload.get("motion"), dict) else None,
+            start_frame=payload.get("startFrame") if payload.get("startFrame") is not None else None,
+            end_frame_exclusive=(
+                payload.get("endFrameExclusive")
+                if payload.get("endFrameExclusive") is not None
+                else None
+            ),
+            force=bool(payload.get("force")),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Surface real build failures (including unexpected types) so the studio can show them.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not build placement preview: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    workspace = Path(str(result.get("workspace") or ""))
+    entry = Path(str(result.get("compositionEntry") or (workspace / "index.html")))
+    if not workspace.is_dir() or not entry.is_file():
+        raise HTTPException(status_code=500, detail="Placement preview composition is missing after build.")
+    state.placement_preview_root = workspace
+    state.placement_preview_entry = entry
+    state.placement_preview_cache_key = str(result.get("cacheKey") or "")
+    state.placement_preview_beat_id = beat_id
+    # Do not leak absolute filesystem paths to the browser.
+    public = {
+        key: value
+        for key, value in result.items()
+        if key not in {"workspace", "compositionEntry"}
+    }
+    public["compositionUrl"] = (
+        f"/api/visual-package/placement/preview/composition/index.html"
+        f"?revision={result.get('cacheKey') or ''}"
+    )
+    return public
+
+
+@app.get("/api/visual-package/placement/preview/composition/{relative_path:path}")
+def visual_package_placement_preview_composition(
+    relative_path: str,
+    range_header: str | None = Header(default=None, alias="Range"),
+) -> Response:
+    """Serve the active single-beat HyperFrames composition for placement live preview."""
+
+    runtime_root = state.placement_preview_root
+    runtime_entry = state.placement_preview_entry
+    if runtime_root is None or runtime_entry is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No placement live preview is ready. Build preview for a beat first.",
+        )
+    runtime_root = runtime_root.resolve()
+    runtime_entry = runtime_entry.resolve()
+    requested = relative_path or runtime_entry.name
+    target = (runtime_root / requested).resolve()
+    try:
+        target.relative_to(runtime_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Preview path escapes the composition workspace.") from exc
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Placement preview file not found.")
+    suffix = target.suffix.lower()
+    if suffix == ".html" and target == runtime_entry:
+        document = target.read_text(encoding="utf-8")
+        runtime_script = (
+            '<script src="/api/visual/runtime/core.js" data-vcg-runtime="hyperframes"></script>'
+        )
+        document = (
+            document.replace("</body>", f"{runtime_script}</body>")
+            if "</body>" in document
+            else f"{document}{runtime_script}"
+        )
+        return HTMLResponse(document, headers={"Cache-Control": "no-store"})
+    # Video/audio must use byte-range streaming — browsers abort partials on seek/replay.
+    if suffix in {".mp4", ".webm", ".mov", ".m4v", ".m4a", ".mp3", ".wav", ".ogg"}:
+        return _range_response(target, range_header)
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    if suffix == ".woff2":
+        media_type = "font/woff2"
+    elif suffix == ".woff":
+        media_type = "font/woff"
+    # Static composition assets (fonts/vendor/images) — short cache; HTML/video stay no-store.
+    cache = (
+        "public, max-age=300"
+        if suffix in {".woff2", ".woff", ".js", ".css", ".png", ".jpg", ".jpeg", ".svg", ".webp"}
+        else "no-store"
+    )
+    return FileResponse(
+        target,
+        media_type=media_type,
+        headers={"Cache-Control": cache, "Accept-Ranges": "bytes"},
+    )
+
+
+@app.put("/api/visual-package/placement/beat")
+def visual_package_save_placement_beat(payload: dict = Body(...)) -> dict:
+    """Save lines/timing/lock for one placement beat. Original file untouched."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        return save_placement_beat_for_video_project(active[0], active[1], payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -3773,21 +4088,34 @@ def _range_response(path: Path, range_header: str | None) -> Response:
     file_size = path.stat().st_size
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     if not range_header:
-        return FileResponse(path, media_type=media_type, headers={"Accept-Ranges": "bytes"})
+        return FileResponse(
+            path,
+            media_type=media_type,
+            headers={"Accept-Ranges": "bytes", "Cache-Control": "no-store"},
+        )
 
     start, end = _parse_range(range_header, file_size)
     length = end - start + 1
 
     def iterator():
-        with path.open("rb") as handle:
-            handle.seek(start)
-            remaining = length
-            while remaining > 0:
-                chunk = handle.read(min(1024 * 1024, remaining))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
-                yield chunk
+        # Client aborts mid-range are normal on seek/replay; do not explode the server.
+        try:
+            with path.open("rb") as handle:
+                handle.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = handle.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, GeneratorExit):
+            return
+        except OSError as exc:
+            # WinError 10054 / 10053 — remote host closed during scrub.
+            if getattr(exc, "winerror", None) in {10054, 10053}:
+                return
+            raise
 
     return StreamingResponse(
         iterator(),
@@ -3797,6 +4125,7 @@ def _range_response(path: Path, range_header: str | None) -> Response:
             "Accept-Ranges": "bytes",
             "Content-Range": f"bytes {start}-{end}/{file_size}",
             "Content-Length": str(length),
+            "Cache-Control": "no-store",
         },
     )
 

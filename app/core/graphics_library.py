@@ -38,6 +38,9 @@ from app.core.visual_production import (
 
 # Private folder holding one recorded OBS layout clip per layout id (full frame).
 LAYOUT_CLIPS_DIRNAME = "layout-clips"
+# Static full-frame screenshots used by Scenelayer template match (preferred over clips).
+LAYOUT_REFS_DIRNAME = "layout-refs"
+LAYOUT_REF_STILL_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 LIBRARY_SCHEMA_VERSION = 1
 GOLDEN_RECORD_VERSION = LIBRARY_SCHEMA_VERSION  # legacy alias
@@ -553,10 +556,65 @@ def layout_clips_dir(root: Path | None = None) -> Path:
     return (root or default_graphics_library_root()).resolve() / LAYOUT_CLIPS_DIRNAME
 
 
+def layout_refs_dir(root: Path | None = None) -> Path:
+    """Directory for full-frame OBS layout screenshots (Scenelayer references)."""
+
+    return (root or default_graphics_library_root()).resolve() / LAYOUT_REFS_DIRNAME
+
+
 def layout_clip_path(layout_id: str, root: Path | None = None) -> Path:
     if layout_id not in ALLOWED_LAYOUT_IDS:
         raise ValueError(f"Unknown layout id: {layout_id}")
     return layout_clips_dir(root) / f"{layout_id}.mp4"
+
+
+def layout_ref_still_path(layout_id: str, root: Path | None = None) -> Path | None:
+    """Existing screenshot path for a layout, if any (png/jpg/webp under layout-refs/)."""
+
+    if layout_id not in ALLOWED_LAYOUT_IDS:
+        raise ValueError(f"Unknown layout id: {layout_id}")
+    base = layout_refs_dir(root)
+    for ext in LAYOUT_REF_STILL_EXTS:
+        path = base / f"{layout_id}{ext}"
+        if path.is_file() and path.stat().st_size > 0:
+            return path
+    return None
+
+
+def layout_ref_still_target_path(layout_id: str, root: Path | None = None) -> Path:
+    """Canonical path to write a new layout screenshot (PNG)."""
+
+    if layout_id not in ALLOWED_LAYOUT_IDS:
+        raise ValueError(f"Unknown layout id: {layout_id}")
+    return layout_refs_dir(root) / f"{layout_id}.png"
+
+
+def list_layout_refs(root: Path | None = None) -> dict[str, Any]:
+    """Report which of the eight OBS layout screenshots are present for Scenelayer."""
+
+    root = (root or default_graphics_library_root()).resolve()
+    refs: list[dict[str, Any]] = []
+    for layout_id in sorted(ALLOWED_LAYOUT_IDS):
+        path = layout_ref_still_path(layout_id, root)
+        present = path is not None
+        item: dict[str, Any] = {
+            "layoutId": layout_id,
+            "relativePath": f"{LAYOUT_REFS_DIRNAME}/{layout_id}.png",
+            "present": present,
+        }
+        if present and path is not None:
+            item["path"] = str(path)
+            item["bytes"] = path.stat().st_size
+        refs.append(item)
+    present_ids = [item["layoutId"] for item in refs if item["present"]]
+    missing_ids = [item["layoutId"] for item in refs if not item["present"]]
+    return {
+        "root": str(layout_refs_dir(root)),
+        "refs": refs,
+        "present": present_ids,
+        "missing": missing_ids,
+        "complete": len(missing_ids) == 0,
+    }
 
 
 def list_layout_clips(root: Path | None = None) -> dict[str, Any]:

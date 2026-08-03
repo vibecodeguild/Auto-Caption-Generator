@@ -17,6 +17,10 @@ dist-*/
 *.spec~
 *.log
 screenshots/
+# Local scratch scripts (often contain absolute user paths).
+tmp_*.py
+tmp_*.json
+/tmp_*.*
 internal/
 visual-production/
 .tmp-vcg-analysis/
