@@ -231,7 +231,12 @@ export default function Home() {
     setStatus(data.project_path ? `Opened ${data.project_path}` : "Project loaded");
   }, []);
 
-  const applyVideoProject = useCallback((data: { videoProject: VideoProjectResponse; editorProject: EditorProjectResponse | null }) => {
+  const applyVideoProject = useCallback(
+    (data: {
+      videoProject: VideoProjectResponse;
+      editorProject: EditorProjectResponse | null;
+      visualPlanWarning?: string | null;
+    }) => {
     setVideoProject(data.videoProject);
     if (data.editorProject) {
       applyProject(data.editorProject);
@@ -243,8 +248,15 @@ export default function Home() {
       setActiveSplice(null);
       setActiveWorkflowStage(1);
     }
-    setStatus(`Opened private project: ${data.videoProject.name}`);
-  }, [applyProject]);
+    const warning = data.visualPlanWarning?.trim();
+    setStatus(
+      warning
+        ? `Opened private project: ${data.videoProject.name}. ${warning}`
+        : `Opened private project: ${data.videoProject.name}`,
+    );
+  },
+  [applyProject],
+);
 
   const updatePreviewBox = useCallback((aspect = previewAspect) => {
     const panelWidth = previewPanelRef.current?.clientWidth ?? 420;

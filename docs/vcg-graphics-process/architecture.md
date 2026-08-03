@@ -15,7 +15,7 @@ Related: [README.md](./README.md), [beat-universe.md](./beat-universe.md),
 | **Engine** | **Draw** one graphic type. One purpose, one input interface. | When it may be used; which video; instance copy |
 | **Usage** | Graphics library **when/where** contract + human proof | Drawing; episode instance values |
 | **Placement** | Put a usage on a **specific** locked cut (later) | Library policy; inventing draw code |
-| **Assignment** | After Masterbeater: match beats → golden usages (later) | Drawing; labeling speech |
+| **Assignment** | After Masterbeater: match beats → golden usages ([assignment.md](./assignment.md) **APPROVED**) | Drawing; labeling speech |
 
 ```text
 Usage  ──engineId──►  Engine.draw(content, timingChannels)
@@ -93,11 +93,13 @@ Old `implementationId` seed/alias mess → clean **`engineId`** on usage.
 ```text
 [0] Locked cut + final transcript
 [1] Masterbeater              → ordered beats (speech jobs)
-[2] Assignment (later)        → golden usages by beat type / layout / variety
-[3] Placement (later)         → instance content + timing
-[4] Engine.draw               → same path as library samples
+[2] Scenelayer → Assignment   → layoutId per beat, then golden usages ([scenelayer.md](./scenelayer.md), [assignment.md](./assignment.md))
+[3] Placement                 → lines + reveal frames, live Tier-B preview, lock; final full render ([placement.md](./placement.md))
+[4] Engine.draw               → same path as library samples (powers live preview + final)
 [5] Review → fix → export
 ```
+
+**Placement (approved 2026-08-02; studio + live preview built):** single-beat studio; content = lines `{text, revealFrame, slot}` (no kickers); live HyperFrames preview only (no Tier-A sticker path, no draft encode for timing); explicit lock; final = one full re-render when all assigned locked. Authority: [placement.md](./placement.md).
 
 Production selection: **usages where status is golden** — not “select the golden record.”
 
@@ -160,8 +162,8 @@ Usage
 Beat                // Masterbeater
   type, word span, …
 
-Assignment          // later
-  match(beats, goldenUsages) → draft usage picks
+Assignment          // Stage 2 — see assignment.md
+  deal(beats, goldenUsages) → draft usageId per beat (bag per type)
 
 Placement           // later
   beatId, usageId

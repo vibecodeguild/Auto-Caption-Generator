@@ -5,11 +5,19 @@ from pathlib import Path
 
 from app.core.masterbeater import (
     BEAT_TYPES,
+    LEDGER_FILENAME,
+    OUTPUT_FILENAME,
+    REVIEWED_FILENAME,
     canonicalize_word_id,
     extract_words,
+    load_masterbeater_ledger,
+    load_masterbeater_output,
+    load_masterbeater_reviewed,
     normalize_masterbeater_result,
     resolve_word_span,
     resolve_word_span_from_seconds,
+    save_masterbeater_edits_for_video_project,
+    write_masterbeater_output,
 )
 
 
@@ -148,6 +156,97 @@ def test_canonicalize_word_id_variants() -> None:
     assert canonicalize_word_id("W000001", words) == "w000001"
     assert canonicalize_word_id("1", words) == "w000001"
     assert canonicalize_word_id("w24", words) == "w000024"
+
+
+def test_save_masterbeater_edits_writes_reviewed_not_original(tmp_path: Path) -> None:
+    """Human trims endWordId; auto-save updates reviewed + ledger; original stays put."""
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / ".vcg-private").write_text("private\n", encoding="utf-8")
+    transcript = root / "final-transcript.json"
+    document = _sample_document()
+    transcript.write_text(json.dumps(document), encoding="utf-8")
+    manifest_path = root / "manifest.json"
+    manifest = {
+        "paths": {
+            "finalTranscript": "final-transcript.json",
+            "lockedCut": "locked.mp4",
+            "sourceVideo": "source.mp4",
+        }
+    }
+    # Original agent suggestion: full span including PowerPoint (w4).
+    prior = normalize_masterbeater_result(
+        {
+            "mode": "tutorial",
+            "beats": [
+                {
+                    "id": "b1",
+                    "beatType": "hook",
+                    "startWordId": "w1",
+                    "endWordId": "w4",
+                    "rationale": "Cold open.",
+                }
+            ],
+        },
+        project_root=root,
+        transcript_path=transcript,
+        document=document,
+    )
+    write_masterbeater_output(root, prior)
+    original_before = json.loads((root / OUTPUT_FILENAME).read_text(encoding="utf-8"))
+
+    saved = save_masterbeater_edits_for_video_project(
+        manifest_path,
+        manifest,
+        {
+            "mode": "tutorial",
+            "beats": [
+                {
+                    "id": "b1",
+                    "beatType": "hook",
+                    "startWordId": "w1",
+                    "endWordId": "w3",
+                    "rationale": "Cold open.",
+                }
+            ],
+            "edit": {
+                "op": "removeWord",
+                "beatId": "b1",
+                "wordId": "w4",
+                "wordText": "PowerPoint",
+            },
+        },
+    )
+    assert saved["ok"] is True
+    assert saved["edited"] is True
+    assert saved["role"] == "reviewed"
+    assert saved["beatCount"] == 1
+    beat = saved["beats"][0]
+    assert beat["endWordId"] == "w3"
+    assert beat["wordsText"] == "Soul-crushing jobs in"
+    assert beat["endFrame"] == 32
+
+    # Original agent file is unchanged.
+    original_after = json.loads((root / OUTPUT_FILENAME).read_text(encoding="utf-8"))
+    assert original_after["beats"][0]["endWordId"] == "w4"
+    assert original_after == original_before
+    assert load_masterbeater_output(root)["beats"][0]["endWordId"] == "w4"
+
+    # Working copy holds the edit.
+    assert (root / REVIEWED_FILENAME).is_file()
+    reviewed = load_masterbeater_reviewed(root)
+    assert reviewed is not None
+    assert reviewed["beats"][0]["endWordId"] == "w3"
+
+    # Ledger records the membership change for process refinement.
+    assert (root / LEDGER_FILENAME).is_file()
+    ledger = load_masterbeater_ledger(root)
+    assert ledger["entryCount"] == 1
+    entry = ledger["entries"][0]
+    assert entry["op"] == "removeWord"
+    assert entry["wordText"] == "PowerPoint"
+    assert entry["before"]["endWordId"] == "w4"
+    assert entry["after"]["endWordId"] == "w3"
 
 
 def test_legacy_seconds_fallback_maps_to_words(tmp_path: Path) -> None:

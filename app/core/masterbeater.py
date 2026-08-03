@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,12 @@ BEAT_TYPES = frozenset(
     }
 )
 
+# Agent Stage 1 suggestion — never overwritten by human UI edits.
 OUTPUT_FILENAME = "masterbeater-beats.json"
+# Human working copy (auto-saved as membership edits are made).
+REVIEWED_FILENAME = "masterbeater-beats-reviewed.json"
+# Append-only log of membership edits for process refinement.
+LEDGER_FILENAME = "masterbeater-edit-ledger.json"
 
 # LLM returns word anchors; app resolves frames + exact text.
 OUTPUT_SCHEMA: dict[str, Any] = {
@@ -104,7 +110,18 @@ def universe_path(root: Path | None = None) -> Path:
 
 
 def output_path_for_project(project_root: Path) -> Path:
+    """Original Masterbeater agent output (immutable from the review UI)."""
     return Path(project_root).expanduser().resolve() / OUTPUT_FILENAME
+
+
+def reviewed_path_for_project(project_root: Path) -> Path:
+    """Human-edited working copy used by Visual Package Stage 1."""
+    return Path(project_root).expanduser().resolve() / REVIEWED_FILENAME
+
+
+def ledger_path_for_project(project_root: Path) -> Path:
+    """Append-only edit ledger for comparing human fixes vs agent suggestions."""
+    return Path(project_root).expanduser().resolve() / LEDGER_FILENAME
 
 
 def final_transcript_path(manifest_path: Path, manifest: dict) -> Path:
@@ -501,10 +518,219 @@ def normalize_masterbeater_result(
 
 
 def load_masterbeater_output(project_root: Path) -> dict | None:
+    """Load the original agent Masterbeater suggestion."""
     path = output_path_for_project(project_root)
     if not path.is_file():
         return None
     return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def load_masterbeater_reviewed(project_root: Path) -> dict | None:
+    """Load the human-edited working copy, if any."""
+    path = reviewed_path_for_project(project_root)
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def load_masterbeater_ledger(project_root: Path) -> dict[str, Any]:
+    path = ledger_path_for_project(project_root)
+    if not path.is_file():
+        return {
+            "schemaVersion": 1,
+            "agent": "masterbeater-edit-ledger",
+            "originalFile": OUTPUT_FILENAME,
+            "reviewedFile": REVIEWED_FILENAME,
+            "entries": [],
+        }
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("Edit ledger must be a JSON object.")
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        data["entries"] = []
+    return data
+
+
+def write_masterbeater_output(project_root: Path, result: dict[str, Any]) -> Path:
+    """Write original agent output (Masterbeater run only)."""
+    path = output_path_for_project(project_root)
+    path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
+
+
+def write_masterbeater_reviewed(project_root: Path, result: dict[str, Any]) -> Path:
+    path = reviewed_path_for_project(project_root)
+    path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
+
+
+def write_masterbeater_ledger(project_root: Path, ledger: dict[str, Any]) -> Path:
+    path = ledger_path_for_project(project_root)
+    path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
+
+
+def _beat_span_snapshot(beat: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(beat, dict):
+        return None
+    return {
+        "id": beat.get("id"),
+        "beatType": beat.get("beatType"),
+        "startWordId": beat.get("startWordId"),
+        "endWordId": beat.get("endWordId"),
+        "wordsText": beat.get("wordsText"),
+        "wordIds": list(beat.get("wordIds") or []),
+    }
+
+
+def append_edit_ledger_entry(
+    project_root: Path,
+    *,
+    edit: dict[str, Any] | None,
+    previous_beats: list[dict[str, Any]],
+    next_beats: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Append one membership edit to the process ledger (auto-save side effect)."""
+
+    ledger = load_masterbeater_ledger(project_root)
+    entries: list[Any] = list(ledger.get("entries") or [])
+    prev_by_id = {
+        str(b.get("id")): b for b in previous_beats if isinstance(b, dict) and b.get("id")
+    }
+    next_by_id = {
+        str(b.get("id")): b for b in next_beats if isinstance(b, dict) and b.get("id")
+    }
+    edit = edit if isinstance(edit, dict) else {}
+    op = str(edit.get("op") or "membershipChange").strip() or "membershipChange"
+    beat_id = str(edit.get("beatId") or "").strip() or None
+    word_id = str(edit.get("wordId") or "").strip() or None
+    word_text = str(edit.get("wordText") or "").strip() or None
+    side = str(edit.get("side") or "").strip() or None
+
+    # Capture before/after for the primary beat when known.
+    before = _beat_span_snapshot(prev_by_id.get(beat_id or "")) if beat_id else None
+    after = _beat_span_snapshot(next_by_id.get(beat_id or "")) if beat_id else None
+    if beat_id and before is None and after is None:
+        # Beat may have been dropped or split — record id presence.
+        before = {"id": beat_id, "present": beat_id in prev_by_id}
+        after = {"id": beat_id, "present": beat_id in next_by_id}
+
+    entry = {
+        "id": f"e-{len(entries) + 1:04d}",
+        "at": datetime.now(timezone.utc).isoformat(),
+        "op": op,
+        "beatId": beat_id,
+        "wordId": word_id,
+        "wordText": word_text,
+        "side": side,
+        "before": before,
+        "after": after,
+        "beatCountBefore": len(previous_beats),
+        "beatCountAfter": len(next_beats),
+    }
+    if edit.get("detail"):
+        entry["detail"] = str(edit.get("detail"))
+    entries.append(entry)
+    ledger["schemaVersion"] = 1
+    ledger["agent"] = "masterbeater-edit-ledger"
+    ledger["originalFile"] = OUTPUT_FILENAME
+    ledger["reviewedFile"] = REVIEWED_FILENAME
+    ledger["entries"] = entries
+    ledger["entryCount"] = len(entries)
+    ledger["updatedAt"] = entry["at"]
+    write_masterbeater_ledger(project_root, ledger)
+    return entry
+
+
+def save_masterbeater_edits_for_video_project(
+    manifest_path: Path,
+    manifest: dict,
+    payload: dict,
+) -> dict[str, Any]:
+    """Auto-save human word-bound edits to the reviewed working copy.
+
+    The original ``masterbeater-beats.json`` is left untouched. Each save also
+    appends an entry to ``masterbeater-edit-ledger.json`` for process review.
+    """
+
+    root = video_project_root(manifest_path)
+    transcript = final_transcript_path(manifest_path, manifest)
+    if not transcript.is_file():
+        raise FileNotFoundError(
+            f"Locked final transcript not found at {transcript}. "
+            "Finish Transcript Edit export first."
+        )
+
+    original = load_masterbeater_output(root)
+    if original is None:
+        raise FileNotFoundError(
+            f"Original Masterbeater output missing at {output_path_for_project(root)}. "
+            "Run Masterbeater before editing."
+        )
+
+    previous = load_masterbeater_reviewed(root) or original
+    previous_beats = list(previous.get("beats") or [])
+
+    beats_in = payload.get("beats")
+    if not isinstance(beats_in, list):
+        raise ValueError("Request must include a beats array.")
+    if not beats_in:
+        raise ValueError("Beats array is empty — refuse to wipe the reviewed working copy.")
+
+    mode = str(
+        payload.get("mode")
+        or previous.get("mode")
+        or original.get("mode")
+        or "tutorial"
+    ).strip()
+    gaps_source = (
+        payload["gaps"]
+        if "gaps" in payload
+        else previous.get("gaps")
+        if previous.get("gaps") is not None
+        else original.get("gaps")
+        or []
+    )
+    normalize_payload = {
+        "mode": mode,
+        "beats": beats_in,
+        "gaps": gaps_source if isinstance(gaps_source, list) else [],
+    }
+    document = load_transcript_document(transcript)
+    result = normalize_masterbeater_result(
+        normalize_payload,
+        project_root=root,
+        transcript_path=transcript,
+        document=document,
+    )
+    if not result.get("beats"):
+        raise ValueError(
+            "No beats could be bound to transcript words after edit. "
+            "Check startWordId/endWordId values."
+        )
+
+    result["agent"] = "masterbeater-reviewed"
+    result["edited"] = True
+    result["originalFile"] = OUTPUT_FILENAME
+    result["originalBeatCount"] = int(original.get("beatCount") or len(original.get("beats") or []))
+    result["basedOnOriginal"] = True
+    ledger_entry = append_edit_ledger_entry(
+        root,
+        edit=payload.get("edit") if isinstance(payload.get("edit"), dict) else None,
+        previous_beats=previous_beats,
+        next_beats=list(result.get("beats") or []),
+    )
+    out_path = write_masterbeater_reviewed(root, result)
+    # Original must remain byte-stable for this save path.
+    result["outputPath"] = str(out_path)
+    result["originalPath"] = str(output_path_for_project(root))
+    result["ledgerPath"] = str(ledger_path_for_project(root))
+    result["ledgerEntry"] = ledger_entry
+    result["ledgerEntryCount"] = int(load_masterbeater_ledger(root).get("entryCount") or 0)
+    result["ok"] = True
+    result["role"] = "reviewed"
+    return result
 
 
 def run_masterbeater_for_video_project(
@@ -688,12 +914,35 @@ def status_for_video_project(manifest_path: Path, manifest: dict) -> dict[str, A
     root = video_project_root(manifest_path)
     transcript = final_transcript_path(manifest_path, manifest)
     output = output_path_for_project(root)
-    existing = None
+    reviewed_path = reviewed_path_for_project(root)
+    ledger_path = ledger_path_for_project(root)
+
+    original = None
     if output.is_file():
         try:
-            existing = load_masterbeater_output(root)
+            original = load_masterbeater_output(root)
         except (OSError, json.JSONDecodeError):
-            existing = None
+            original = None
+
+    reviewed = None
+    if reviewed_path.is_file():
+        try:
+            reviewed = load_masterbeater_reviewed(root)
+        except (OSError, json.JSONDecodeError):
+            reviewed = None
+
+    # Working set for the UI: reviewed if present, else original agent suggestion.
+    working = reviewed if reviewed is not None else original
+
+    ledger_entry_count = 0
+    if ledger_path.is_file():
+        try:
+            ledger_entry_count = int(load_masterbeater_ledger(root).get("entryCount") or 0)
+            if not ledger_entry_count:
+                ledger_entry_count = len(load_masterbeater_ledger(root).get("entries") or [])
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            ledger_entry_count = 0
+
     review_video = preferred_stage_source(manifest_path, manifest)
     locked = resolve_video_project_path(manifest_path, manifest, "lockedCut")
     review_kind = (
@@ -701,17 +950,51 @@ def status_for_video_project(manifest_path: Path, manifest: dict) -> dict[str, A
         if review_video.resolve() == locked.resolve() and locked.is_file()
         else "sourceVideo"
     )
+    # Compact word list for Stage 1 UI (inline transcript + beat cards).
+    transcript_words: list[dict[str, Any]] = []
+    transcript_fps_value = float((working or original or {}).get("fps") or 30)
+    if transcript.is_file():
+        try:
+            document = load_transcript_document(transcript)
+            transcript_fps_value = float(transcript_fps(document) or transcript_fps_value)
+            transcript_words = [
+                {
+                    "id": word["id"],
+                    "text": word["text"],
+                    "startFrame": word["startFrame"],
+                    "endFrame": word["endFrame"],
+                    "startSec": word["startSec"],
+                    "endSec": word["endSec"],
+                }
+                for word in extract_words(document)
+            ]
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            transcript_words = []
+
+    original_count = int((original or {}).get("beatCount") or len((original or {}).get("beats") or []))
+    working_count = int((working or {}).get("beatCount") or len((working or {}).get("beats") or []))
     return {
         "ok": True,
         "projectRoot": str(root),
         "transcriptPath": str(transcript),
         "transcriptExists": transcript.is_file(),
+        "transcriptWords": transcript_words,
+        "transcriptWordCount": len(transcript_words),
         "outputPath": str(output),
         "outputExists": output.is_file(),
-        "result": existing,
-        "beatCount": (existing or {}).get("beatCount") if existing else 0,
+        "reviewedPath": str(reviewed_path),
+        "reviewedExists": reviewed is not None,
+        "ledgerPath": str(ledger_path),
+        "ledgerExists": ledger_path.is_file(),
+        "ledgerEntryCount": ledger_entry_count,
+        # Backward-compatible: result = working set the UI edits.
+        "result": working,
+        "original": original,
+        "reviewed": reviewed,
+        "beatCount": working_count,
+        "originalBeatCount": original_count,
         "reviewVideoPath": str(review_video),
         "reviewVideoExists": review_video.is_file(),
         "reviewVideoKind": review_kind,
-        "fps": (existing or {}).get("fps") or 30,
+        "fps": (working or original or {}).get("fps") or transcript_fps_value or 30,
     }

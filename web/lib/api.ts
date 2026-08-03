@@ -512,6 +512,8 @@ export type VideoProjectResponse = {
 export type VideoProjectOpenResponse = {
   videoProject: VideoProjectResponse;
   editorProject: EditorProjectResponse | null;
+  /** Set when visual-plan.json exists but cannot load (e.g. retired module ids). */
+  visualPlanWarning?: string | null;
 };
 
 export type CaptionPresetPayload = {
@@ -1198,6 +1200,43 @@ export type MasterbeaterBeat = {
   endSec?: number;
 };
 
+export type MasterbeaterEditOp =
+  | "removeWord"
+  | "removeWordRange"
+  | "addWordPrev"
+  | "addWordNext"
+  | "changeBeatType"
+  | "deleteBeat"
+  | "addBeat"
+  | "mergeBeats"
+  | "splitBeat"
+  | "membershipChange"
+  | string;
+
+export type MasterbeaterEditEvent = {
+  op: MasterbeaterEditOp;
+  beatId?: string;
+  wordId?: string;
+  wordText?: string;
+  side?: "prev" | "next";
+  detail?: string;
+};
+
+export type MasterbeaterLedgerEntry = {
+  id?: string;
+  at?: string;
+  op?: string;
+  beatId?: string | null;
+  wordId?: string | null;
+  wordText?: string | null;
+  side?: string | null;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  beatCountBefore?: number;
+  beatCountAfter?: number;
+  detail?: string;
+};
+
 export type MasterbeaterResult = {
   agent?: string;
   schemaVersion?: number;
@@ -1210,6 +1249,15 @@ export type MasterbeaterResult = {
   gaps?: string[];
   notes?: string;
   outputPath?: string;
+  originalPath?: string;
+  ledgerPath?: string;
+  ledgerEntry?: MasterbeaterLedgerEntry;
+  ledgerEntryCount?: number;
+  originalFile?: string;
+  originalBeatCount?: number;
+  basedOnOriginal?: boolean;
+  edited?: boolean;
+  role?: string;
   ok?: boolean;
   source?: {
     projectRoot?: string;
@@ -1219,19 +1267,231 @@ export type MasterbeaterResult = {
   };
 };
 
+/** Compact word row for Visual Package Stage 1 (not the editor TranscriptWord). */
+export type VisualPackageTranscriptWord = {
+  id: string;
+  text: string;
+  startFrame?: number;
+  endFrame?: number;
+  startSec?: number;
+  endSec?: number;
+};
+
+export type ScenelayerPick = {
+  beatId: string;
+  layoutId?: string | null;
+  source?: "algorithm" | "human" | string;
+};
+
+export type ScenelayerResult = {
+  ok?: boolean;
+  firstRun?: boolean;
+  agent?: string;
+  schemaVersion?: number;
+  role?: string;
+  beatCount?: number;
+  labeledCount?: number;
+  unlabeledCount?: number;
+  beats?: ScenelayerPick[];
+  originalPath?: string;
+  reviewedPath?: string;
+  ledgerPath?: string;
+  ledgerEntry?: Record<string, unknown>;
+  ledgerEntryCount?: number;
+  layoutIds?: string[];
+  edited?: boolean;
+  result?: ScenelayerResult;
+};
+
+export type ScenelayerStatus = {
+  ok?: boolean;
+  originalPath?: string;
+  originalExists?: boolean;
+  reviewedPath?: string;
+  reviewedExists?: boolean;
+  ledgerPath?: string;
+  ledgerExists?: boolean;
+  ledgerEntryCount?: number;
+  beatCount?: number;
+  labeledCount?: number;
+  unlabeledCount?: number;
+  result?: ScenelayerResult | null;
+  byBeatId?: Record<string, ScenelayerPick>;
+  /** First algorithm labels (immutable original file). */
+  originalByBeatId?: Record<string, ScenelayerPick>;
+  layoutIds?: string[];
+};
+
+export type AssignmentPick = {
+  beatId: string;
+  usageId?: string | null;
+  source?: "algorithm" | "human" | string;
+  layoutId?: string | null;
+  displayName?: string | null;
+  posterUrl?: string | null;
+  hasPoster?: boolean;
+  engineId?: string | null;
+  missingUsage?: boolean;
+};
+
+export type AssignmentEligibleUsage = {
+  id: string;
+  displayName?: string;
+  posterUrl?: string | null;
+  hasPoster?: boolean;
+  engineId?: string;
+};
+
+export type AssignmentResult = {
+  agent?: string;
+  schemaVersion?: number;
+  role?: string;
+  beatCount?: number;
+  assignedCount?: number;
+  unassignedCount?: number;
+  beats?: AssignmentPick[];
+  ok?: boolean;
+  firstRun?: boolean;
+  originalPath?: string;
+  reviewedPath?: string;
+  ledgerPath?: string;
+  ledgerEntry?: Record<string, unknown>;
+  ledgerEntryCount?: number;
+  goldenUsageCount?: number;
+  edited?: boolean;
+};
+
+export type AssignmentStatus = {
+  ok?: boolean;
+  originalPath?: string;
+  originalExists?: boolean;
+  reviewedPath?: string;
+  reviewedExists?: boolean;
+  ledgerPath?: string;
+  ledgerExists?: boolean;
+  ledgerEntryCount?: number;
+  goldenUsageCount?: number;
+  beatCount?: number;
+  assignedCount?: number;
+  unassignedCount?: number;
+  result?: AssignmentResult | null;
+  byBeatId?: Record<string, AssignmentPick>;
+  eligibleByBeatType?: Record<string, AssignmentEligibleUsage[]>;
+  usages?: Record<
+    string,
+    {
+      id: string;
+      displayName?: string | null;
+      posterUrl?: string | null;
+      hasPoster?: boolean;
+      beatTypes?: string[];
+      allowedLayouts?: string[];
+      engineId?: string;
+    }
+  >;
+  layoutByBeatId?: Record<string, string | null>;
+};
+
 export type VisualPackageStatus = {
   ok: boolean;
   projectRoot: string;
   transcriptPath: string;
   transcriptExists: boolean;
+  /** Ordered final-transcript words for inline Stage 1 review. */
+  transcriptWords?: VisualPackageTranscriptWord[];
+  transcriptWordCount?: number;
+  /** Original agent suggestion path (immutable from UI). */
   outputPath: string;
   outputExists: boolean;
+  reviewedPath?: string;
+  reviewedExists?: boolean;
+  ledgerPath?: string;
+  ledgerExists?: boolean;
+  ledgerEntryCount?: number;
   beatCount: number;
+  originalBeatCount?: number;
+  /** Working set (reviewed if present, else original). */
   result: MasterbeaterResult | null;
+  original?: MasterbeaterResult | null;
+  reviewed?: MasterbeaterResult | null;
   reviewVideoPath?: string;
   reviewVideoExists?: boolean;
   reviewVideoKind?: string;
   fps?: number;
+  /** Stage 2 scenelayer (layout labels). */
+  scenelayer?: ScenelayerStatus;
+  /** Stage 2 assignment slice. */
+  assignment?: AssignmentStatus;
+  /** Stage 3 placement. */
+  placement?: PlacementStatus;
+};
+
+export type PlacementLine = {
+  slot: string;
+  text: string;
+  revealFrame: number;
+};
+
+export type PlacementBeat = {
+  beatId: string;
+  usageId?: string | null;
+  engineId?: string;
+  locked?: boolean;
+  startFrame?: number;
+  endFrameExclusive?: number;
+  lines?: PlacementLine[];
+  meta?: Record<string, unknown>;
+  assets?: Record<string, unknown>;
+  motion?: Record<string, unknown>;
+  source?: string;
+  displayName?: string;
+  beatType?: string;
+  wordsText?: string;
+};
+
+export type PlacementEngineInterface = {
+  engineId: string;
+  fixedLineSlots?: string[];
+  listSlot?: string | null;
+  listMin?: number;
+  listMax?: number;
+  metaKeys?: string[];
+  assetKeys?: string[];
+  motionKeys?: string[];
+  notes?: string;
+  kicker?: boolean;
+  error?: string;
+};
+
+export type PlacementResult = {
+  ok?: boolean;
+  firstRun?: boolean;
+  placementCount?: number;
+  lockedCount?: number;
+  unlockedCount?: number;
+  allLocked?: boolean;
+  finalRenderReady?: boolean;
+  beats?: PlacementBeat[];
+  result?: PlacementResult;
+  engineInterfaces?: Record<string, PlacementEngineInterface>;
+  placement?: PlacementBeat;
+  engineParameters?: Record<string, unknown>;
+  ledgerEntryCount?: number;
+};
+
+export type PlacementStatus = {
+  ok?: boolean;
+  originalExists?: boolean;
+  reviewedExists?: boolean;
+  placementCount?: number;
+  lockedCount?: number;
+  unlockedCount?: number;
+  allLocked?: boolean;
+  finalRenderReady?: boolean;
+  ledgerEntryCount?: number;
+  result?: { beats?: PlacementBeat[] } | null;
+  byBeatId?: Record<string, PlacementBeat>;
+  engineInterfaces?: Record<string, PlacementEngineInterface>;
 };
 
 export function getVisualPackageStatus() {
@@ -1243,6 +1503,141 @@ export function runMasterbeater() {
     method: "POST",
     body: "{}",
   });
+}
+
+/**
+ * Auto-save Stage 1 word-bound edits to the reviewed working copy.
+ * Original masterbeater-beats.json is never overwritten. Optional `edit` is
+ * appended to masterbeater-edit-ledger.json for process refinement.
+ */
+export function saveMasterbeaterBeats(payload: {
+  beats: MasterbeaterBeat[];
+  mode?: string;
+  gaps?: string[];
+  edit?: MasterbeaterEditEvent;
+}) {
+  return request<MasterbeaterResult>("/api/visual-package/masterbeater/beats", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** Stage 2: label each beat layout from first frame (before Assign). */
+export function runScenelayer() {
+  return request<ScenelayerResult>("/api/visual-package/scenelayer/run", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+/** Human override of one beat's OBS layout. */
+export function saveScenelayerOverride(payload: {
+  beatId: string;
+  layoutId: string | null;
+  detail?: string;
+}) {
+  return request<ScenelayerResult>("/api/visual-package/scenelayer/override", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** Stage 2: deal golden usages onto working Masterbeater beats. */
+export function runAssignment() {
+  return request<AssignmentResult>("/api/visual-package/assignment/run", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+/** Stage 3: draft placements for assigned beats (skips locked on re-run). */
+export function runPlacement() {
+  return request<PlacementResult>("/api/visual-package/placement/run", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+/** Save one beat placement (lines / lock / meta). */
+export function savePlacementBeat(payload: {
+  beatId: string;
+  lines?: PlacementLine[];
+  meta?: Record<string, unknown>;
+  assets?: Record<string, unknown>;
+  motion?: Record<string, unknown>;
+  startFrame?: number;
+  endFrameExclusive?: number;
+  locked?: boolean;
+  detail?: string;
+}) {
+  return request<PlacementResult>("/api/visual-package/placement/beat", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** Live Tier B HyperFrames composition for one placement beat (no FFmpeg encode). */
+export type PlacementPreview = {
+  ok?: boolean;
+  available?: boolean;
+  reused?: boolean;
+  beatId?: string;
+  engineId?: string;
+  cacheKey?: string;
+  durationSec?: number;
+  startFrame?: number;
+  endFrameExclusive?: number;
+  startSec?: number;
+  endSec?: number;
+  rangeStartSec?: number;
+  rangeEndSec?: number;
+  fps?: number;
+  width?: number;
+  height?: number;
+  compositionUrl?: string;
+};
+
+export function buildPlacementPreview(payload: {
+  beatId: string;
+  lines?: PlacementLine[];
+  meta?: Record<string, unknown>;
+  assets?: Record<string, unknown>;
+  motion?: Record<string, unknown>;
+  startFrame?: number;
+  endFrameExclusive?: number;
+  force?: boolean;
+}) {
+  return request<PlacementPreview>("/api/visual-package/placement/preview", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function placementPreviewCompositionUrl(cacheKey?: string | null) {
+  const suffix = cacheKey ? `?revision=${encodeURIComponent(cacheKey)}` : "";
+  return `${API_BASE}/api/visual-package/placement/preview/composition/index.html${suffix}`;
+}
+
+/**
+ * Human override of one beat's usage. Original assignment.json is never
+ * overwritten; working copy + ledger update only.
+ */
+export function saveAssignmentOverride(payload: {
+  beatId: string;
+  usageId: string | null;
+  detail?: string;
+}) {
+  return request<AssignmentResult>("/api/visual-package/assignment/override", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** Resolve Graphics Library media path (API-relative) to a full URL. */
+export function assignmentPosterUrl(posterUrl: string | null | undefined): string | null {
+  if (!posterUrl) return null;
+  if (posterUrl.startsWith("http://") || posterUrl.startsWith("https://")) return posterUrl;
+  return `${API_BASE}${posterUrl.startsWith("/") ? "" : "/"}${posterUrl}`;
 }
 
 export function visualPackageSourceVideoUrl() {

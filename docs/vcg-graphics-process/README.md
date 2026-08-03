@@ -8,8 +8,11 @@ This folder stays **small on purpose**: only durable product authority. No expla
 | File | Role |
 | --- | --- |
 | **This README** | Goal, stages, what is real, product stance |
-| [architecture.md](./architecture.md) | **APPROVED** engine / usage / placement / assignment |
+| [architecture.md](./architecture.md) | **APPROVED** engine / usage / placement / assignment vernacular |
 | [beat-universe.md](./beat-universe.md) | **APPROVED** portable beat contract (13 types + spotting rules only) |
+| [assignment.md](./assignment.md) | **APPROVED** Stage 2 assignment design (algorithm + UI + artifacts) |
+| [scenelayer.md](./scenelayer.md) | **APPROVED** Stage 2 layout label per beat (before Assign) |
+| [placement.md](./placement.md) | **APPROVED / LOCKED** Stage 3 (studio UI, live Tier B, reveal UX, lock, final) |
 
 Stage 1 skill (Grok): **`masterbeater`** — `.grok/skills/masterbeater` — loads [beat-universe.md](./beat-universe.md).
 
@@ -36,8 +39,8 @@ Perfect zero-touch labeling is **not** the near-term goal. Efficient review is.
 ```text
 [0] Locked cut + final transcript     (existing product)
 [1] Masterbeater                      → ordered beats (speech jobs)
-[2] Assignment (later)                → match beats → golden usages (when/where)
-[3] Placement (later)                 → instance copy + timing on this cut
+[2] Scenelayer → Assignment           → layout per beat, then golden usages ([scenelayer.md](./scenelayer.md), [assignment.md](./assignment.md))
+[3] Placement                         → lines + reveal frames, lock, full render ([placement.md](./placement.md))
 [4] Engine draw                       → same production engine as library samples
 [5] Review → fix → export
 ```
@@ -71,7 +74,7 @@ Authority: [architecture.md](./architecture.md).
 | **Seconds** | Human-facing only |
 | **`wordsText`** | Exact transcript text between the word IDs (for review) |
 
-Do not invent frame numbers. Edit anchors (when we add an editor); frames follow.
+Do not invent frame numbers. Edit word anchors in the UI; frames always re-resolve from the transcript.
 
 ### Full speech act (binding for Stage 1)
 
@@ -82,49 +85,103 @@ Beats must **not** be 4–5 word keyword snippets (any type).
 - Sparse **count** of beats is correct. Sparse **word spans** are not.
 - Full type-by-type span rules live in the Masterbeater skill (not duplicated here).
 
-### Production artifact
+### Production artifacts
 
 On the private video project root:
 
-- `masterbeater-beats.json` — production record (`schemaVersion` 2 shape via app normalize):  
-  `agent`, `mode`, `timingAuthority`, `fps`, `beats[]` (type, word IDs, frames, `wordsText`, rationale, optional label), `gaps`, `notes`.
+- `masterbeater-beats.json` — **original** agent suggestion (`schemaVersion` 2). Never overwritten by the review UI.
+- `masterbeater-beats-reviewed.json` — **working copy** the UI edits (auto-saved on membership + structure changes).
+- `masterbeater-edit-ledger.json` — append-only log of human edits (for future process learning).
+- `masterbeater-raw.json` — optional debug dump from in-app API runs (stdout/stderr/parsed).
 
-### How to run today
+Shape (original / reviewed): `agent`, `mode`, `timingAuthority`, `fps`, `beats[]` (type, word IDs, frames, `wordsText`, rationale, optional label), `gaps`, `notes`.
 
-| Path | Notes |
+---
+
+## Daily run process (tight)
+
+**Goal:** One reliable path from locked transcript → reviewable beats. No one-off scripts, no free-form JSON inventing frames.
+
+### Prerequisites
+
+1. Private video project open.
+2. **Locked cut** available (preferred stage source).
+3. **Final transcript** exported (`transcripts/final-transcript.json` with word IDs + frames).
+
+If either is missing, stop. Do not label against a draft transcript.
+
+### Canonical path (use this)
+
+| Step | Who | What |
+| --- | --- | --- |
+| 1. Label | **Grok + `masterbeater` skill** | Load skill + [beat-universe.md](./beat-universe.md). Point at the project’s **final transcript word index**. Return **anchors-only** JSON: `mode`, `beats[]` with `id`, `beatType`, `startWordId`, `endWordId`, `rationale`, optional `span` / `gaps`. |
+| 2. Normalize | **App** (`normalize_masterbeater_result`) | Bind word IDs → frames + exact `wordsText`. Drop invalid beats into `gaps` with reasons. Write **`masterbeater-beats.json`** (original). |
+| 3. Review | **Human** in Visual Package | Refresh → edit membership + structure → auto-save to **reviewed** + **ledger**. Original stays untouched. |
+
+**Binding output rule for the agent:** only word IDs and labels — never invent `startFrame` / times as authority. The app is the only resolver.
+
+### Practical host workflow (today)
+
+1. Open a Grok session with the **masterbeater** skill on the project.
+2. Confirm transcript path and that word IDs look like `w000001` (copy exactly, keep zeros).
+3. Produce the anchors-only JSON (full speech acts, sparse beat *count*).
+4. Hand off through app normalize so production fields are filled:
+   - Preferred long-term: single **import/normalize** into the open project (see *Tighten further* below).
+   - Until that exists: same normalize path used by `POST /api/visual-package/masterbeater/run` and unit helpers — **do not** hand-edit frames into `masterbeater-beats.json`.
+5. Visual Package → **Refresh** → review.
+
+### In-app “API run” (experimental only)
+
+| | |
 | --- | --- |
-| **Preferred for quality** | Grok session with **masterbeater** skill against the locked transcript → write/normalize into the project (or re-run a known-good project pass) |
-| **In-app** | Tools → **Visual Package** → **Run Masterbeater** | LLM path exists but has been **fragile**; skill/host pass is the reliable kickoff |
-| **Status / video** | `GET /api/visual-package/status`, `GET /api/visual-package/source-video` |
-| **Run API** | `POST /api/visual-package/masterbeater/run` |
+| **UI** | Visual Package Stage 1 → **API run** |
+| **API** | `POST /api/visual-package/masterbeater/run` |
+| **What it does** | Bundles skill + beat universe + full word index → Grok CLI (`--json-schema`, short turn budget) → parse → normalize → write original |
+| **Status** | **Experimental.** Quality and reliability trail a focused skill-host pass on long cuts (prompt size, turn budget, CLI packaging). |
+| **Use when** | Quick smoke on a short project, or no host session available. Prefer skill host for production drafts. |
 
-Requires active project with locked cut + final transcript. Preferred stage source is the locked cut when available.
+Do not treat a weak API run as “Masterbeater failed forever” — re-run via skill host with the same transcript.
 
-### Visual Package UI (Stage 1) — **review, not edit**
+### Re-run policy
+
+| Action | Effect |
+| --- | --- |
+| New Masterbeater run (skill or API) | Rewrites **`masterbeater-beats.json`** (original suggestion). |
+| Review UI edits | Touch **only** `masterbeater-beats-reviewed.json` + ledger. |
+| After a re-run | **Refresh.** Working set is reviewed if present, else original. A stale reviewed copy can disagree with a new original — delete or replace reviewed deliberately when accepting a fresh draft. |
+
+Never “fix” original by pasting human edits into `masterbeater-beats.json`.
+
+### APIs (Stage 1)
+
+| Endpoint | Role |
+| --- | --- |
+| `GET /api/visual-package/status` | Project readiness + original / reviewed / ledger presence |
+| `GET /api/visual-package/source-video` | Locked-cut (or preferred) video for the player |
+| `POST /api/visual-package/masterbeater/run` | Experimental end-to-end LLM run → original |
+| `PUT /api/visual-package/masterbeater/beats` | Auto-save reviewed + ledger only |
+
+---
+
+### Visual Package UI (Stage 1) — **review editor**
 
 **Built:**
 
 - Tools → Visual Package stage rail (Stage 1 active)
-- Load status for active project (`beatCount`, path, fps, etc.)
-- Beat list + type filter
-- Selection: type, id, frames, clock times, word IDs, word count, full `wordsText`, label, rationale
-- Source video player: seek to beat, play beat span (stop at end)
-- Keyboard next/prev among filtered beats
-
-**Not built (accepted gap):**
-
-- Retarget start/end word
-- Change type, delete/add, split/merge
-- Save edits back to `masterbeater-beats.json`
-- Keyboard-first edit loop
-
-Human adjustment today still means editing the JSON or regenerating outside the app. **Next software investment for Stage 1** (not started): make boundary/type/drop/add fixes in-app and cheap.
+- Load status for active project (`beatCount`, original/reviewed/ledger, fps, etc.)
+- Inline transcript stream: beat cards + yellow gap blocks
+- **Select-only** word clicks; **↑ / ↓** for membership (gap → neighbor beat; in-beat → eject to gap)
+- Multi-word selection for phrase moves
+- **Beat structure:** change type, add from selection, delete, merge with neighbor, split after selection
+- Auto-save each change to `masterbeater-beats-reviewed.json` + append ledger entry
+- Original `masterbeater-beats.json` preserved
+- Source video: seek to beat, play span, **loop beat**, **autoplay on select** (pill toggles, not native checkboxes)
 
 ### Proven
 
 - Project `2026-07-23-15-33-08` used as the Stage 1 test bed.
 - Keyword-snippet pass replaced with a **full speech-act** pass (longer spans across **all** types, including `example` and `prompt`).
-- Viewer is good enough to judge quality; editor is the remaining Stage 1 product hole.
+- Review editor is good enough for daily human correction; remaining Stage 1 gaps are quality-of-life only.
 
 ---
 
@@ -136,11 +193,19 @@ Human adjustment today still means editing the JSON or regenerating outside the 
 | Full speech-act span policy | **APPROVED** in Masterbeater skill (all types) |
 | Timing: word IDs → app frames | **BUILT** |
 | Masterbeater normalize + project write | **BUILT** — `app/core/masterbeater.py` |
-| Visual Package Stage 1 **viewer** | **BUILT** — list, select, words/frames, play span |
-| Visual Package Stage 1 **editor** | **Not done** — priority for efficient human correction |
-| In-app Masterbeater LLM run | **Fragile** — Grok skill host preferred |
+| Visual Package Stage 1 **viewer** | **BUILT** |
+| Visual Package Stage 1 **editor** | **BUILT** — membership + structure + auto-save |
+| Daily run path | **Skill host label → app normalize → review** (canonical) |
+| In-app Masterbeater LLM run | **Experimental** — skill host preferred for quality |
 | Plan JSON + validator | **BUILT** in code — not daily workflow |
-| Graphics Library (usages + engines) | **BUILT** surface — assignment/placement later |
+| Graphics Library (usages + engines) | **BUILT** surface |
+| Assignment design (Stage 2) | **APPROVED** — [assignment.md](./assignment.md) |
+| Assignment (deal + UI + artifacts) | **BUILT** — type + layout filter, card poster/name, original/working/ledger |
+| Scenelayer | **BUILT** — Stage 2 button before Assign; layout dropdown; artifacts |
+| Placement design | **APPROVED / LOCKED** — [placement.md](./placement.md) §2 decision table |
+| Placement (draft, lines, lock APIs) | **BUILT** — Place / Save / Lock; Final gated |
+| Placement studio UI + live Tier B preview + reveal nudges | **BUILT** — single-beat studio, word chips, ±1/5/10, pin, live HyperFrames |
+| Final full episode render | **Not built** — gate ready when all locked |
 | Full daily “go” button | **Not done** |
 | Creator Production / old multi-agent VP essays | **Not** daily authority |
 
@@ -154,7 +219,9 @@ Human adjustment today still means editing the JSON or regenerating outside the 
 | Masterbeater skill | `.grok/skills/masterbeater/SKILL.md` |
 | Normalize + status + run | `app/core/masterbeater.py` |
 | HTTP | `app/web_api.py` — `/api/visual-package/*` |
-| Stage 1 UI | `web/app/visual-package.tsx` |
+| Stage 1–2 UI | `web/app/visual-package.tsx` |
+| Assignment deal + artifacts | `app/core/assignment.py` |
+| Scenelayer classify + artifacts | `app/core/scenelayer.py` |
 | Allowed plan shape + beat types | `visual-production/schemas/editorial-beats.v1.schema.json` (`schemaVersion: 2`) |
 | Validate a plan | `app/core/editorial_beats.py` · `python scripts/editorial_beats.py validate --plan …` |
 | Production graphics set | Graphics Library golden usages (`app/core/graphics_library.py` + UI) |
@@ -165,9 +232,22 @@ Do not add process docs that only restate those paths.
 
 ## Deliberate next focuses
 
-1. **Graphics Library** — Stage 2 material (usages + engines; user’s active track).
-2. **Stage 1 editor** (when returning to beats) — retarget words, change type, delete/add, persist; keep frames derived from word IDs.
-3. Later stages stay blocked on solid beats + a real graphic library, not more Stage 1 theory.
+1. **Final full-episode render** from locked placements (gate ready; encode path next).
+2. **Final full render** from locked placements.
+3. **Deferred:** engine kicker CSS cleanup (operator); goldens coverage.
+
+### Tighten the run further (**proposed** eng — not approved until scheduled)
+
+Process is already tight if skill host + normalize + review are followed. Remaining friction is **handoff**, not labeling rules:
+
+| Improvement | Why |
+| --- | --- |
+| **Import / normalize-only API + UI** | Accept anchors-only JSON for the active project → normalize → write original. Removes one-off scripts and “did we paste frames?” mistakes. |
+| **Clear re-run UX** | Warn when reviewed exists; option to keep reviewed, reset reviewed, or archive previous original. |
+| **Surface drop reasons** | If normalize drops beats, show `gaps` / drop sample in Visual Package (already stored on the result). |
+| **API-run reliability** | Only if daily use needs it: larger turn budget, chunked long transcripts, fail loud when Grok CLI missing — still secondary to skill host. |
+
+Do not invent parallel run pipelines. One normalize path; two producers (skill host preferred, API experimental).
 
 ---
 
@@ -175,6 +255,9 @@ Do not add process docs that only restate those paths.
 
 | Item | Why deferred | When it matters |
 | --- | --- | --- |
-| **Joke image aspect ratio / generation contract** (`punchline-reveal` with `imageAssetId`) | Layout is fixed: head docks left (~42%×78% tall frame), art + caption panel on the right (~40% width × ~84% height). Custom generated images must be created to a known ratio so they crop well under `object-fit: cover` without cutting faces or punchlines. | Before daily production of joke cards, or before any “generate joke still” helper. Separate process: measure the live right-panel media box (post CSS), publish a target aspect + safe margins, then wire image gen / authoring to that. |
+| **In-app original vs reviewed diff UI** | Original + reviewed + ledger already on disk; daily review uses the working stream. | Process audits, teaching the skill from systematic human fixes. |
+| **Keyboard-first edit loop** | Mouse select + structure strip is fast enough for current volume. | High-volume review days / power-user speed. |
+| **Process refinement from the ledger** | Ledger is append-only capture only; no analytics yet. | After enough reviewed episodes to spot repeated agent mistakes. |
+| **Joke image aspect ratio / generation contract** (`punchline-reveal` with `imageAssetId`) | Layout is fixed: head docks left (~42%×78% tall frame), art + caption panel on the right (~40% width × ~84% height). Custom generated images need a known ratio for `object-fit: cover`. | Before daily joke cards or any “generate joke still” helper. Measure live media box → publish target aspect + safe margins → wire gen. |
 
 Do not invent ad-hoc ratios per episode. Land one contract, then sample.
