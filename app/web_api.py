@@ -98,6 +98,7 @@ from app.core.assignment import (
 )
 from app.core.placement import (
     build_placement_live_preview,
+    import_placement_image,
     run_placement_for_video_project,
     save_placement_beat_for_video_project,
 )
@@ -181,6 +182,7 @@ from app.core.video_project import (
     video_project_root,
 )
 from app.core.windows_dialog import (
+    choose_image_file as _windows_choose_image_file,
     choose_output_folder as _windows_choose_output_folder,
     choose_project_file as _windows_choose_project_file,
     choose_project_save_file as _windows_choose_project_save_file,
@@ -1153,6 +1155,30 @@ def visual_package_placement_preview_composition(
         media_type=media_type,
         headers={"Cache-Control": cache, "Accept-Ranges": "bytes"},
     )
+
+
+@app.post("/api/visual-package/placement/import-image-dialog")
+def visual_package_import_placement_image() -> dict:
+    """Pick an image file and copy it into the project's placement image store."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        source = _windows_choose_image_file()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Windows image picker error ({type(exc).__name__}): {exc}",
+        ) from exc
+    if source is None:
+        raise HTTPException(status_code=400, detail="No image selected.")
+    try:
+        return import_placement_image(active[0], source)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.put("/api/visual-package/placement/beat")

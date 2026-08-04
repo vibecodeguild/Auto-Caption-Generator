@@ -1558,6 +1558,14 @@ export function runPlacement() {
   });
 }
 
+/** Native image picker → copies into the project's placement image store. */
+export function importPlacementImageDialog() {
+  return request<{ assetId: string; fileName: string; sourceName: string }>(
+    "/api/visual-package/placement/import-image-dialog",
+    { method: "POST", body: "{}" },
+  );
+}
+
 /** Save one beat placement (lines / lock / meta). */
 export function savePlacementBeat(payload: {
   beatId: string;
@@ -1586,9 +1594,13 @@ export type PlacementPreview = {
   cacheKey?: string;
   durationSec?: number;
   startFrame?: number;
+  /** Full speech-beat end (preview window). */
   endFrameExclusive?: number;
+  /** When the graphic undocks; may be earlier than endFrameExclusive. */
+  graphicEndFrameExclusive?: number;
   startSec?: number;
   endSec?: number;
+  graphicEndSec?: number;
   rangeStartSec?: number;
   rangeEndSec?: number;
   fps?: number;
@@ -1616,6 +1628,16 @@ export function buildPlacementPreview(payload: {
 export function placementPreviewCompositionUrl(cacheKey?: string | null) {
   const suffix = cacheKey ? `?revision=${encodeURIComponent(cacheKey)}` : "";
   return `${API_BASE}/api/visual-package/placement/preview/composition/index.html${suffix}`;
+}
+
+/**
+ * Trimmed beat audio/video source for the Stage 3 studio's app-owned audio element.
+ * The preview composition itself has no <audio> (the HyperFrames transport clock can
+ * freeze on in-composition audio); speech playback is the app's job.
+ */
+export function placementPreviewSourceUrl(cacheKey?: string | null) {
+  const suffix = cacheKey ? `?revision=${encodeURIComponent(cacheKey)}` : "";
+  return `${API_BASE}/api/visual-package/placement/preview/composition/source.mp4${suffix}`;
 }
 
 /**
@@ -2237,6 +2259,15 @@ export type GraphicsLibraryMetricRow = GraphicsLibraryMetricBucket & {
   id: string;
 };
 
+export type GraphicsLibraryMatrixCell = GraphicsLibraryMetricBucket & {
+  layoutId: string;
+};
+
+export type GraphicsLibraryMatrixRow = {
+  beatType: string;
+  cells: GraphicsLibraryMatrixCell[];
+};
+
 export type GraphicsLibraryMetrics = {
   root: string;
   exists: boolean;
@@ -2245,6 +2276,8 @@ export type GraphicsLibraryMetrics = {
   byLayout: GraphicsLibraryMetricRow[];
   untaggedBeatTypes: GraphicsLibraryMetricBucket;
   untaggedLayouts: GraphicsLibraryMetricBucket;
+  /** Beat type × layout cross-tab — a zero cell is an Assignment coverage gap. */
+  matrix?: { layouts: string[]; rows: GraphicsLibraryMatrixRow[] };
 };
 
 export function getGraphicsLibraryMetrics() {

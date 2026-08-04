@@ -5214,6 +5214,55 @@ label {
   gap: 10px;
   justify-content: flex-end;
 }
+/* Beat type × layout heat map — compact, shares the row with the bar charts. */
+.graphics-library-heatmap-scroll {
+  overflow-x: auto;
+}
+.graphics-library-heatmap {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 2px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  table-layout: fixed;
+}
+.graphics-library-heatmap th {
+  color: #9aa3b8;
+  font-weight: 600;
+  text-align: left;
+  padding: 3px 4px;
+}
+.graphics-library-heatmap thead th {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  vertical-align: bottom;
+  line-height: 1.2;
+  /* Long layout names wrap to fit the shared row. */
+  white-space: normal;
+  overflow-wrap: break-word;
+  text-align: center;
+}
+.graphics-library-heatmap thead th:first-child,
+.graphics-library-heatmap tbody th {
+  width: 74px;
+  white-space: nowrap;
+  font-size: 11px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.graphics-library-heatmap td {
+  text-align: center;
+  padding: 6px 2px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: #eef1f8;
+  font-weight: 700;
+}
+.graphics-library-heatmap td.is-gap {
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+}
 .graphics-library-metrics-totals span {
   padding: 8px 12px;
   border-radius: 12px;
@@ -5229,9 +5278,19 @@ label {
   margin-right: 4px;
 }
 .graphics-library-metrics-grid {
+  /* Three cards on one row: beat types · layouts · coverage heat map. */
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.35fr);
   gap: 16px;
+  align-items: start;
+}
+@media (max-width: 1250px) {
+  .graphics-library-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .graphics-library-metrics-heatmap {
+    grid-column: 1 / -1;
+  }
 }
 @media (max-width: 1100px) {
   .graphics-library-metrics-grid {
@@ -6973,6 +7032,16 @@ button.graphics-library-beat-help-row.is-selected .graphics-library-beat-help-ch
   color: #f3d6ef;
   font-size: 13px;
 }
+/* Constant-height footer slot: messages come and go without moving anything. */
+.visual-package-message-footer {
+  flex: 0 0 auto;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+}
+.visual-package-message-footer .visual-package-message {
+  flex: 1 1 auto;
+}
 
 .visual-package-stage-body {
   display: flex;
@@ -7165,11 +7234,42 @@ button.graphics-library-beat-help-row.is-selected .graphics-library-beat-help-ch
 /* Stage 3 (images/6.jpg): craft LEFT (primary) · live preview RIGHT · one beat */
 .visual-package-review.is-stage-3 {
   grid-template-columns: minmax(360px, 0.92fr) minmax(420px, 1.15fr);
+  /* Row 1: craft + preview columns. Row 2: full-width spoken-words card.
+     Rows hug content and pack to the top — the words card sits right under
+     the columns, not at the bottom of the page. */
+  grid-template-rows: auto auto;
+  align-content: start;
   max-width: 1280px;
   margin: 0 auto;
   width: 100%;
   gap: 16px;
   align-items: stretch;
+}
+.visual-package-review.is-stage-3 .visual-package-placement-editor {
+  grid-column: 1;
+  grid-row: 1;
+  /* Height hugs the content — no dead space under the nudges when the
+     preview column is taller. */
+  align-self: start;
+}
+.visual-package-review.is-stage-3 .visual-package-player-panel {
+  grid-column: 2;
+  grid-row: 1;
+}
+.visual-package-placement-speech-card {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  overflow-y: auto;
+  max-height: 30vh;
+}
+/* Bigger chips in the full-width card — this is a primary timing control. */
+.visual-package-placement-speech-card .visual-package-placement-word-chip {
+  font-size: 16px;
+  padding: 6px 12px;
 }
 .visual-package-review.is-stage-3 .visual-package-player-panel {
   gap: 12px;
@@ -7177,14 +7277,195 @@ button.graphics-library-beat-help-row.is-selected .graphics-library-beat-help-ch
   overflow: hidden;
 }
 .visual-package-review.is-stage-3 .visual-package-player-frame.is-placement-live {
+  /* True 16:9 pinned to the top of the panel — flex-stretching past the video's
+     aspect ratio produced a dead black band above the picture. */
   max-height: none;
-  flex: 1 1 auto;
-  min-height: 280px;
+  flex: 0 0 auto;
+  min-height: 0;
   aspect-ratio: 16 / 9;
+  width: 100%;
+}
+.visual-package-review.is-stage-3 .visual-package-player-panel {
+  justify-content: flex-start;
 }
 .visual-package-review.is-stage-3 .visual-package-player-controls {
   justify-content: center;
   flex: 0 0 auto;
+}
+/* Image / non-timing knobs — neutral (not pink). Ends uses a line-row instead. */
+.visual-package-placement-knobs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #10141e;
+}
+.visual-package-placement-knob {
+  display: grid;
+  grid-template-columns: minmax(56px, 72px) 1fr auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  min-width: 0;
+}
+.visual-package-placement-knob-label {
+  color: #8b93a7;
+  font-size: 11px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.visual-package-placement-knob-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #f0f2f8;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #0b0d14;
+}
+.visual-package-placement-knob input {
+  grid-column: 2 / -1;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #0b0d14;
+  color: #f0f2f8;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.visual-package-placement-knob input:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+.visual-package-placement-knob-action {
+  min-height: 32px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: #c8cde0;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.visual-package-placement-knob-action:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+.visual-package-placement-knob-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.visual-package-placement-end-hint {
+  min-width: 0;
+  font-size: 12px;
+  color: #9aa3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.visual-package-placement-line-row.is-armed .visual-package-placement-end-hint {
+  color: #ffb0ef;
+}
+.visual-package-placement-reset-end-inline {
+  min-height: 28px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: transparent;
+  color: #9aa3b8;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.visual-package-placement-reset-end-inline:hover:not(:disabled) {
+  color: #eef1f8;
+  border-color: rgba(255, 255, 255, 0.28);
+}
+.visual-package-placement-reset-end-inline:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.visual-package-placement-autosave {
+  align-self: center;
+  font-size: 12px;
+  color: #9aa3bd;
+  font-style: italic;
+}
+/* Lock rides the far right of the Stage 3 transport row. */
+.visual-package-transport-lock {
+  margin-left: auto;
+}
+/* Padlock state indicator, top-right of the craft panel header. VCG teal. */
+.visual-package-placement-lock-indicator {
+  display: inline-flex;
+  align-items: center;
+  color: var(--teal);
+  flex: 0 0 auto;
+}
+.visual-package-placement-graphic-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  flex: 0 0 auto;
+}
+/* 2x the compact poster size, scoped to this card only. 16:9 box + contain so
+   the full sample frame is always visible (cover was cropping it). */
+.visual-package-placement-graphic-card .visual-package-assignment-poster-wrap.compact {
+  width: 160px;
+  min-height: 90px;
+}
+.visual-package-placement-graphic-card
+  .visual-package-assignment-poster-wrap.compact
+  .visual-package-assignment-poster,
+.visual-package-placement-graphic-card
+  .visual-package-assignment-poster-wrap.compact
+  .visual-package-assignment-poster-empty {
+  width: 160px;
+  height: 90px;
+  object-fit: contain;
+  background: #0b0d14;
+}
+.visual-package-placement-graphic-card .visual-package-assignment-name {
+  font-size: 19px;
+  font-weight: 800;
+  color: #f0f2f8;
+}
+.visual-package-placement-graphic-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.visual-package-placement-transport-cluster {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 2px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.visual-package-placement-transport-cluster .visual-package-player-controls {
+  justify-content: center;
+  flex-wrap: wrap;
 }
 .visual-package-placement-transport-readout {
   display: flex;
@@ -7208,6 +7489,60 @@ button.graphics-library-beat-help-row.is-selected .graphics-library-beat-help-ch
 .visual-package-placement-local-time {
   font-weight: 700;
   color: #9ef0d6;
+}
+.visual-package-beat-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: #c8cde0;
+}
+.visual-package-beat-progress-endlabel {
+  flex: 0 0 auto;
+  font-weight: 700;
+  color: #9aa3bd;
+  white-space: nowrap;
+}
+.visual-package-beat-progress-rail {
+  position: relative;
+  flex: 1 1 auto;
+  height: 14px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-left: 3px solid #c8cde0;
+  border-right: 3px solid #c8cde0;
+  /* No overflow clipping — reveal ticks overhang the rail on purpose. */
+}
+.visual-package-beat-progress-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: 2px 0 0 2px;
+  background: linear-gradient(
+    90deg,
+    rgba(158, 240, 214, 0.25),
+    rgba(158, 240, 214, 0.55)
+  );
+  border-right: 2px solid #9ef0d6;
+}
+.visual-package-beat-progress-tick {
+  position: absolute;
+  top: -5px;
+  bottom: -5px;
+  width: 2px;
+  margin-left: -1px;
+  background: #f7c86b;
+  box-shadow: 0 0 4px rgba(247, 200, 107, 0.5);
+}
+/* Graphic Ends tick — same yellow family, slightly thicker so it reads vs reveal. */
+.visual-package-beat-progress-tick.is-graphic-end {
+  width: 3px;
+  margin-left: -1.5px;
+  background: #ffd36a;
+  box-shadow: 0 0 6px rgba(255, 211, 106, 0.65);
 }
 .visual-package-assignment-poster-wrap.compact {
   width: 72px;
@@ -7445,6 +7780,13 @@ button.graphics-library-beat-help-row.is-selected .graphics-library-beat-help-ch
 @media (max-width: 1100px) {
   .visual-package-review.is-stage-3 {
     grid-template-columns: 1fr;
+    grid-template-rows: none;
+  }
+  .visual-package-review.is-stage-3 .visual-package-placement-editor,
+  .visual-package-review.is-stage-3 .visual-package-player-panel,
+  .visual-package-review.is-stage-3 .visual-package-placement-speech-card {
+    grid-column: 1;
+    grid-row: auto;
   }
   .visual-package-review.is-stage-3 .visual-package-player-frame.is-placement-live {
     max-height: min(42vh, 400px);

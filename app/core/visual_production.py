@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from app.core.ffmpeg_locator import find_ffmpeg, find_ffprobe
 from app.core.file_utils import bounds_intersect, is_within, normalized_bounds, sha256_file, slug
@@ -29,30 +29,268 @@ SPEAKER_SAFETY_MODES = {
     "corner-container",
 }
 BRAND_ID = "vcg-white-editorial"
-MODULE_IDS = {
-    "punchline-reveal",
-    "speaker-side-panel",
-    "progress-scale",
-    "dependency-stack",
-    "numbered-example-card",
+
+# --- Engine registry: single source of truth for every engine's interface -----
+#
+# One entry per engine, declared next to the draw code that honors it. Each
+# entry owns BOTH:
+#   • "placement" — the placement interface: how Stage 3 instantiates this
+#     design. fixed_line_slots are ordered human-copy slots (text + revealFrame
+#     each); list_slot is an optional repeating slot with list_min/list_max
+#     bounds; meta/asset/motion keys are the per-episode knobs the engine
+#     exposes. Everything the Placement studio shows is derived from here.
+#   • "legacy_parameter_keys" — draw-accepted keys placement must NEVER expose.
+#     Today that is only "kicker" chrome awaiting the deferred D5 CSS cleanup.
+#
+# MODULE_IDS and MODULE_PARAMETER_KEYS are DERIVED from this registry below —
+# do not hand-edit parallel lists. app/core/placement_roles.py is a thin
+# adapter over this registry: it owns placement policy (e.g. never emit
+# kicker) but declares no engine facts of its own.
+#
+# Design authority: docs/vcg-graphics-process/architecture.md §3.
+ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
+    # One engine = one look: joke card only (required imageAssetId + text;
+    # head docks left, art right). There is no text-only mode — kinetic
+    # phrase work uses kinetic-word-punctuation.
+    "punchline-reveal": {
+        "placement": {
+            "fixed_line_slots": ["text"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            # Graphic end is placement endFrameExclusive (default = beat end), not a
+            # meta duration. Trim the span earlier to undock before the beat ends.
+            "meta_keys": [],
+            "asset_keys": ["imageAssetId"],  # required — joke card is the only mode
+            "motion_keys": ["accentColor"],
+            "notes": (
+                "Joke card only (image + caption, head docks left). "
+                "Stage/dock starts at the beat; Title reveal is when the whole card "
+                "(borders + image + caption) lands. Graphic ends at placement "
+                "endFrameExclusive (default beat end) — trim earlier to return to "
+                "full talking-head before the beat ends. Not a text-only kinetic."
+            ),
+        },
+        # kicker / holdSec: accepted-and-ignored so old plans still validate.
+        "legacy_parameter_keys": {"kicker", "holdSec"},
+    },
+    "speaker-side-panel": {
+        "placement": {
+            "fixed_line_slots": ["text"],
+            "list_slot": "items",
+            "list_min": 0,
+            "list_max": 12,
+            "meta_keys": [],
+            "asset_keys": [],
+            "motion_keys": ["side", "frameStyle", "panelWidth", "accentColor", "videoBounds"],
+            "notes": "Title + bullet items; each item is lines slot items.i.",
+        },
+        "legacy_parameter_keys": {"kicker"},
+    },
+    "progress-scale": {
+        "placement": {
+            "fixed_line_slots": ["text", "startLabel", "targetLabel"],
+            "list_slot": "milestones",
+            "list_min": 0,
+            "list_max": 8,
+            "meta_keys": [],
+            "asset_keys": [],
+            "motion_keys": ["accentColor"],
+            "notes": "No kicker. Title + end labels + milestone lines.",
+        },
+        "legacy_parameter_keys": {"kicker"},
+    },
+    # No kicker. Title (`text`) + up to 6 stack nodes; video floats into right frame.
+    "dependency-stack": {
+        "placement": {
+            "fixed_line_slots": ["text"],
+            "list_slot": "nodes",
+            "list_min": 0,
+            "list_max": 6,
+            "meta_keys": [],
+            "asset_keys": [],
+            "motion_keys": [],
+            "notes": "Title + stack nodes.",
+        },
+    },
+    "numbered-example-card": {
+        "placement": {
+            "fixed_line_slots": [],
+            "list_slot": "titleLines",
+            "list_min": 1,
+            "list_max": 8,
+            "meta_keys": ["exampleNumber", "totalExamples", "accentLineIndex"],
+            "asset_keys": [],
+            "motion_keys": ["accentColor", "tags"],
+            "notes": "No kicker. Body is title lines only.",
+        },
+        "legacy_parameter_keys": {"kicker"},
+    },
     # Screen-share motion / callouts (without these, long demos go bare).
-    "source-punch-zoom",
-    "ui-callout",
+    "source-punch-zoom": {
+        "placement": {
+            "fixed_line_slots": [],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": [],
+            "asset_keys": [],
+            "motion_keys": ["focusX", "focusY", "zoom", "settleSec", "motion"],
+            "notes": "Motion-only engine; no copy lines.",
+        },
+    },
+    "ui-callout": {
+        "placement": {
+            "fixed_line_slots": ["label", "detail"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": [],
+            "asset_keys": [],
+            "motion_keys": ["targetBounds", "pointer", "accentColor"],
+            "notes": "",
+        },
+    },
     # Ported July-22 families: edge-anchored overlays that leave UI readable.
-    "kinetic-word-punctuation",
-    "numbered-step-intro",
-    "problem-card-triptych",
-    "speaker-rise-callouts",
-    "tradeoff-meter",
-    "brand-cta-lockup",
-    "windows-prompt-typing",
+    "kinetic-word-punctuation": {
+        "placement": {
+            "fixed_line_slots": ["phrase"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": [],
+            "asset_keys": [],
+            "motion_keys": ["side", "anchor", "accentColor"],
+            "notes": "Single kinetic phrase.",
+        },
+    },
+    "numbered-step-intro": {
+        "placement": {
+            "fixed_line_slots": ["title", "action"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": ["stepNumber", "showNumber"],
+            "asset_keys": [],
+            "motion_keys": ["side"],
+            "notes": "",
+        },
+    },
+    "problem-card-triptych": {
+        "placement": {
+            "fixed_line_slots": ["cards.0", "cards.1", "cards.2"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": [],
+            "asset_keys": [],
+            "motion_keys": [],
+            "notes": "Exactly three card strings (v1).",
+        },
+    },
+    "speaker-rise-callouts": {
+        "placement": {
+            "fixed_line_slots": ["thesis"],
+            "list_slot": "callouts",
+            "list_min": 0,
+            "list_max": 8,
+            "meta_keys": ["accentCalloutIndex"],
+            "asset_keys": [],
+            "motion_keys": [],
+            "notes": "Thesis + rising callout lines.",
+        },
+    },
+    "tradeoff-meter": {
+        "placement": {
+            "fixed_line_slots": ["leftLabel", "rightLabel", "verdict"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": ["value"],
+            "asset_keys": [],
+            "motion_keys": ["side"],
+            "notes": "No kicker. Meter value is meta 0–1.",
+        },
+        "legacy_parameter_keys": {"kicker"},
+    },
+    "brand-cta-lockup": {
+        "placement": {
+            "fixed_line_slots": ["logoText", "action", "destination"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": [],
+            "asset_keys": ["logoAssetId"],
+            "motion_keys": [],
+            "notes": "",
+        },
+    },
+    "windows-prompt-typing": {
+        "placement": {
+            "fixed_line_slots": ["prompt"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": ["appName"],
+            "asset_keys": [],
+            "motion_keys": ["side"],
+            "notes": "Prompt is one timed line (typing channel).",
+        },
+    },
     # VCG mascot overlays (cheer / defiant / roast).
-    "robot-cheer",
-    "robot-defiant",
-    "robot-roast",
+    "robot-cheer": {
+        "placement": {
+            "fixed_line_slots": ["text", "tagline"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": [],
+            "asset_keys": [],
+            "motion_keys": [],
+            "notes": "Bubble + optional energy tagline (not a kicker eyebrow).",
+        },
+    },
+    "robot-defiant": {
+        "placement": {
+            "fixed_line_slots": ["text"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": [],
+            "asset_keys": [],
+            "motion_keys": [],
+            "notes": "",
+        },
+    },
+    "robot-roast": {
+        "placement": {
+            "fixed_line_slots": ["text"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": [],
+            "asset_keys": [],
+            "motion_keys": [],
+            "notes": "",
+        },
+    },
     # Soft CTA: rocket fly-by with placard (description / prior video pointer).
-    "robot-rocket-sign",
+    "robot-rocket-sign": {
+        "placement": {
+            "fixed_line_slots": ["text"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": [],
+            "asset_keys": [],
+            "motion_keys": [],
+            "notes": "Placard line on rocket CTA.",
+        },
+    },
 }
+
+# Derived view — the set of production engine ids. Never hand-edit.
+MODULE_IDS = set(ENGINE_REGISTRY)
 ROBOT_MODULE_IDS = frozenset({"robot-cheer", "robot-defiant", "robot-roast"})
 # Engine-fixed: after the mascot is fully drawn, max on-screen hold before exit.
 ROBOT_HOLD_AFTER_DRAWN_SEC = 3.0
@@ -85,32 +323,31 @@ COMMON_MODULE_PARAMETERS = {
     # Layout-aware sample / placement free region (normalized bounds).
     "placementBounds",
 }
+def _derive_engine_parameter_keys(entry: dict[str, Any]) -> set[str]:
+    """Draw-accepted keys = common + everything the placement interface exposes + legacy.
+
+    Single-source rule: an engine's parameters are whatever its registry entry
+    declares. There is no second hand-maintained key list to drift.
+    """
+
+    placement = entry["placement"]
+    keys = set(COMMON_MODULE_PARAMETERS)
+    for slot in placement["fixed_line_slots"]:
+        # cards.0 / cards.1 / cards.2 → parameter key "cards"
+        keys.add(str(slot).split(".", 1)[0])
+    if placement["list_slot"]:
+        keys.add(str(placement["list_slot"]))
+    keys.update(placement["meta_keys"])
+    keys.update(placement["asset_keys"])
+    keys.update(placement["motion_keys"])
+    keys.update(entry.get("legacy_parameter_keys") or ())
+    return keys
+
+
+# Derived view — allowed draw parameters per engine. Never hand-edit.
 MODULE_PARAMETER_KEYS = {
-    # One engine = one look: joke card only (required imageAssetId + text; head docks left, art right).
-    # There is no text-only mode — kinetic phrase work uses kinetic-word-punctuation.
-    "punchline-reveal": COMMON_MODULE_PARAMETERS | {"text", "kicker", "accentColor", "imageAssetId"},
-    "speaker-side-panel": COMMON_MODULE_PARAMETERS | {"text", "kicker", "accentColor", "side", "panelWidth", "videoBounds", "frameStyle", "items"},
-    "progress-scale": COMMON_MODULE_PARAMETERS | {"text", "kicker", "startLabel", "targetLabel", "accentColor", "milestones"},
-    # No kicker. Title (`text`) + up to 6 stack nodes; video floats into right frame.
-    "dependency-stack": COMMON_MODULE_PARAMETERS | {"text", "nodes"},
-    "numbered-example-card": COMMON_MODULE_PARAMETERS | {
-        "kicker", "exampleNumber", "totalExamples", "titleLines", "accentLineIndex", "tags", "accentColor",
-    },
-    "source-punch-zoom": COMMON_MODULE_PARAMETERS | {"focusX", "focusY", "zoom", "settleSec", "motion"},
-    "ui-callout": COMMON_MODULE_PARAMETERS | {"label", "detail", "targetBounds", "accentColor", "pointer"},
-    "kinetic-word-punctuation": COMMON_MODULE_PARAMETERS | {"phrase", "anchor", "side", "accentColor"},
-    "numbered-step-intro": COMMON_MODULE_PARAMETERS | {"stepNumber", "title", "action", "side", "showNumber"},
-    # No kicker/eyebrow — three cards only. Highlight is sequential (pink → white).
-    "problem-card-triptych": COMMON_MODULE_PARAMETERS | {"cards"},
-    "speaker-rise-callouts": COMMON_MODULE_PARAMETERS | {"thesis", "callouts", "accentCalloutIndex"},
-    "tradeoff-meter": COMMON_MODULE_PARAMETERS | {"kicker", "leftLabel", "rightLabel", "value", "verdict", "side"},
-    "brand-cta-lockup": COMMON_MODULE_PARAMETERS | {"logoText", "logoAssetId", "action", "destination"},
-    "windows-prompt-typing": COMMON_MODULE_PARAMETERS | {"appName", "prompt", "side"},
-    # Mascot reaction: bubble line (cheer also has a fixed-energy tagline).
-    "robot-cheer": COMMON_MODULE_PARAMETERS | {"text", "tagline"},
-    "robot-defiant": COMMON_MODULE_PARAMETERS | {"text"},
-    "robot-roast": COMMON_MODULE_PARAMETERS | {"text"},
-    "robot-rocket-sign": COMMON_MODULE_PARAMETERS | {"text"},
+    engine_id: _derive_engine_parameter_keys(entry)
+    for engine_id, entry in ENGINE_REGISTRY.items()
 }
 SIDE_ANCHORS = {"left", "right"}
 MAX_PUNCH_ZOOM = 2.0
@@ -191,6 +428,38 @@ def probe_visual_source(path: Path) -> dict:
         "fps": round(fps, 3),
         "durationSec": round(float(data["format"]["duration"]), 3),
     }
+
+
+def probe_has_audio_stream(path: Path) -> bool:
+    """True when the media file carries at least one audio stream."""
+    ffprobe = find_ffprobe()
+    if ffprobe is None:
+        raise RuntimeError("FFprobe is required to inspect audio streams.")
+    result = subprocess.run(
+        [
+            str(ffprobe),
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        creationflags=hidden_subprocess_flags(),
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(f"Could not inspect audio streams in {path.name}. {details[-600:]}")
+    try:
+        return bool(json.loads(result.stdout).get("streams"))
+    except json.JSONDecodeError:
+        return False
 
 
 def scene_frame_preview(plan_path: Path, time_sec: float) -> Path:
@@ -2134,6 +2403,7 @@ def _module_markup(
         if not staged_image:
             raise ValueError(f"punchline-reveal references unknown imageAssetId: {image_asset_id}")
         # Transposed dependency-stack: talking head docks left; image+copy on the right.
+        # No kicker (D5): the caption is the Title line only.
         return (
             f'<section {common} style="--cue-accent:{accent_color}">'
             f'<div class="joke-stage">'
@@ -2143,7 +2413,6 @@ def _module_markup(
             f'<div class="joke-card">'
             f'<img class="joke-image" src="assets/{html.escape(staged_image)}" alt="" />'
             f'<div class="joke-copy">'
-            f'<div class="joke-kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
             f'<div class="joke-line" data-semantic-path="parameters.text">{text}</div>'
             f'</div></div></div></div></section>'
         )
@@ -2316,6 +2585,36 @@ def _asset_markup(asset: dict, cue: dict, element_id: str, staged_name: str, sta
     return video, audio
 
 
+def _punchline_title_content_at(
+    cue: dict,
+    *,
+    range_start: float,
+    start: float,
+    duration: float,
+) -> float:
+    """Composition-local time when the whole right joke card should land.
+
+    Driven by the Title line's ``parameters.text`` semantic anchor. Stage/dock
+    (white + head + head outline) always starts at the beat (``start``). At this
+    time the card borders, image, and caption enter together.
+    """
+
+    content_at = start
+    for semantic in cue.get("semanticItems") or []:
+        if not isinstance(semantic, dict):
+            continue
+        if str(semantic.get("parameterPath") or "") != "parameters.text":
+            continue
+        try:
+            spoken = float(semantic.get("spokenStartSec") or 0.0)
+        except (TypeError, ValueError):
+            spoken = 0.0
+        content_at = max(spoken, range_start) - range_start
+        break
+    # Keep a little room before cue end for content entrance + exit.
+    return max(start, min(content_at, start + max(0.0, duration - 0.8)))
+
+
 def _semantic_timeline_lines(cue: dict, element_id: str, range_start: float, range_end: float, clip_start: float) -> list[str]:
     lines: list[str] = []
     for semantic in cue.get("semanticItems", []):
@@ -2360,20 +2659,23 @@ def _entry_preroll_time(start: float, fps: int) -> float:
     return max(0.0, start - (1.0 / max(1, fps)))
 
 
-def _replace_directory_tree(path: Path) -> None:
+def _replace_directory_tree(path: Path) -> bool:
     """Remove a directory tree, surviving Windows file locks (WinError 32).
 
     Live HyperFrames players often keep ``public/source.mp4`` open. ``rmtree``
     then fails mid-delete. Renaming the tree out of the way frees the path name
     so a fresh workspace can be created; the stale rename is deleted best-effort.
+
+    Returns True when ``path`` no longer exists, False when locks prevent clear.
+    Callers must not treat False as fatal — claim a sibling workspace instead.
     """
 
     path = Path(path)
     if not path.exists():
-        return
+        return True
     try:
         shutil.rmtree(path)
-        return
+        return not path.exists()
     except OSError:
         pass
     parent = path.parent
@@ -2381,8 +2683,8 @@ def _replace_directory_tree(path: Path) -> None:
     stale = parent / f".{path.name}.stale-{uuid.uuid4().hex[:10]}"
     try:
         path.rename(stale)
-    except OSError as exc:
-        # Last resort: try to remove just the locked media and leave the rest.
+    except OSError:
+        # Last resort: try to move just the locked media and leave the rest.
         for locked_name in ("source.mp4",):
             locked = path / "public" / locked_name
             if locked.is_file():
@@ -2394,16 +2696,33 @@ def _replace_directory_tree(path: Path) -> None:
             shutil.rmtree(path, ignore_errors=True)
         except OSError:
             pass
-        if path.exists():
-            raise RuntimeError(
-                f"Could not clear HyperFrames workspace (file in use): {path}. "
-                "Close the live preview or retry."
-            ) from exc
+        return not path.exists()
     # Best-effort cleanup of the renamed tree (may still be locked briefly).
     try:
         shutil.rmtree(stale, ignore_errors=True)
     except OSError:
         pass
+    return not path.exists()
+
+
+def _claim_empty_workspace(path: Path) -> Path:
+    """Return an empty directory path ready for a HyperFrames workspace write.
+
+    Prefer ``path``. If it already exists, try to clear it (rename-aside on
+    Windows locks). If the live preview still holds files open, divert to a
+    unique sibling so the build never fails with "file in use".
+    """
+
+    path = Path(path)
+    if not path.exists():
+        return path
+    if _replace_directory_tree(path):
+        return path
+    sibling = path.parent / f"{path.name}-w{uuid.uuid4().hex[:10]}"
+    # Extremely unlikely collision; one more try keeps the contract.
+    if sibling.exists():
+        sibling = path.parent / f"{path.name}-w{uuid.uuid4().hex[:12]}"
+    return sibling
 
 
 def build_hyperframes_composition(
@@ -2416,6 +2735,11 @@ def build_hyperframes_composition(
     # Library samples only: seconds between multi-item reveals (lists, callouts, etc.).
     # Production keeps engine defaults when this is None.
     sample_reveal_stagger_sec: float | None = None,
+    # Placement live preview omits #main-audio: the HyperFrames transport derives its
+    # master clock from in-composition audio and can pin (freeze) on it mid-play.
+    # With no audio element the clock is pure monotonic time and cannot freeze; the
+    # studio plays speech through an app-owned <audio> instead. Renders keep True.
+    include_source_audio: bool = True,
 ) -> tuple[Path, float]:
     progress = progress or (lambda _value, _message: None)
     root = find_visual_root(plan_path)
@@ -2434,12 +2758,13 @@ def build_hyperframes_composition(
     workspace = workspace_override.resolve() if workspace_override is not None else root / "working" / "hyperframes"
     if not _is_within(workspace, root):
         raise ValueError("HyperFrames workspace must stay inside the private visual project.")
+    # Wipe prior workspace when possible. On Windows a live hyperframes-player may
+    # still hold public/source.mp4 open — if clear fails, divert to a sibling path
+    # instead of erroring out of placement preview / sample rebuilds.
+    workspace = _claim_empty_workspace(workspace)
+    if not _is_within(workspace, root):
+        raise ValueError("HyperFrames workspace must stay inside the private visual project.")
     public = workspace / "public"
-    # Wipe prior workspace. On Windows a live hyperframes-player may still hold
-    # public/source.mp4 open — rmtree then fails with WinError 32. Rename the
-    # locked tree aside and continue into a fresh directory with the same path.
-    if workspace.exists():
-        _replace_directory_tree(workspace)
     (public / "assets").mkdir(parents=True, exist_ok=True)
     (public / "fonts").mkdir(parents=True, exist_ok=True)
     (public / "vendor").mkdir(parents=True, exist_ok=True)
@@ -2590,6 +2915,13 @@ def build_hyperframes_composition(
             if module_id == "punchline-reveal":
                 # Joke card only: dock head LEFT, image + caption panel from the right.
                 # Must match .joke-video-outline / .joke-mask (left tall frame).
+                #
+                # Timing contract:
+                # - Beat start: white stage, head docks left, mask + head outline only.
+                # - Title reveal: the whole right card lands together — black borders
+                #   (card + caption plate), image, and Title line. No empty shell first.
+                # - Graphic ends at cue end = placement endFrameExclusive (default beat
+                #   end). Trim that span earlier to undock back to full talking-head.
                 video_left, video_top = 0.08, 0.10
                 video_w, video_h = 0.42, 0.78
                 video_scale = max(video_w, video_h)
@@ -2600,10 +2932,37 @@ def build_hyperframes_composition(
                 panel = f'#{element_id} .joke-panel'
                 card = f'#{element_id} .joke-card'
                 img = f'#{element_id} .joke-image'
+                line = f'#{element_id} .joke-line'
+                chrome = f'#{element_id} .joke-mask, #{element_id} .joke-video-outline'
                 exit_d = min(0.32, max(0.22, duration * 0.12))
+
+                content_at = _punchline_title_content_at(
+                    cue,
+                    range_start=range_start,
+                    start=start,
+                    duration=duration,
+                )
+                # Caption fade finishes slightly after image starts — "fully shown".
+                content_shown = content_at + 0.40
+                # Exit at placement span end (cue duration). No separate holdSec.
+                cue_end = start + duration
+                end_at = cue_end
+                if end_at < content_shown + 0.2:
+                    # Span was cut very tight after Title — still exit at cue end.
+                    end_at = cue_end
+
+                # Card shell, image, and caption stay hidden until Title.
                 timeline_lines.append(
                     f'tl.set("#{element_id} [data-semantic-path]", {{opacity:0}}, {start:.4f});'
                 )
+                timeline_lines.append(
+                    f'tl.set("{img}", {{opacity:0}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("{panel}", {{opacity:0}}, {start:.4f});'
+                )
+
+                # --- Beat start: stage move + head chrome only ---
                 timeline_lines.append(
                     f'tl.to("#main-video", {{scale:{video_scale:.4f},'
                     f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
@@ -2617,41 +2976,41 @@ def build_hyperframes_composition(
                     f'tl.fromTo("#{element_id} .joke-video-outline", {{opacity:0}}, '
                     f'{{opacity:1,duration:0.35,ease:"power2.out"}}, {(start + 0.12):.4f});'
                 )
+
+                # --- Title reveal: whole card (borders + image + caption) ---
                 timeline_lines.append(
                     f'tl.fromTo("{panel}", {{opacity:0,x:70}}, '
-                    f'{{opacity:1,x:0,duration:0.52,ease:"power3.out"}}, {entry_start:.4f});'
+                    f'{{opacity:1,x:0,duration:0.52,ease:"power3.out",immediateRender:false}}, '
+                    f'{content_at:.4f});'
+                )
+                img_settle = max(0.55, min(1.1, end_at - content_at - 0.25))
+                timeline_lines.append(
+                    f'tl.fromTo("{img}", {{opacity:0,scale:1.08,x:18}}, '
+                    f'{{opacity:1,scale:1,x:0,duration:{img_settle:.3f},'
+                    f'ease:"sine.inOut",immediateRender:false}}, {content_at:.4f});'
                 )
                 timeline_lines.append(
-                    f'tl.fromTo("{img}", {{scale:1.08,x:18}}, '
-                    f'{{scale:1,x:0,duration:{max(0.8, duration - 0.4):.3f},'
-                    f'ease:"sine.inOut",immediateRender:false}}, {(start + 0.1):.4f});'
-                )
-                timeline_lines.append(
-                    f'tl.fromTo("#{element_id} .joke-kicker", {{opacity:0,y:16}}, '
-                    f'{{opacity:1,y:0,duration:0.34,ease:"power2.out",immediateRender:false}}, '
-                    f'{(start + 0.32):.4f});'
-                )
-                timeline_lines.append(
-                    f'tl.fromTo("#{element_id} .joke-line", {{opacity:0,y:18}}, '
+                    f'tl.fromTo("{line}", {{opacity:0,y:18}}, '
                     f'{{opacity:1,y:0,duration:0.38,ease:"power2.out",immediateRender:false}}, '
-                    f'{(start + 0.52):.4f});'
+                    f'{content_at:.4f});'
                 )
-                restore_at = start + duration - video_out
+
+                # --- Exit ---
                 timeline_lines.append(
                     f'tl.to("{panel}", {{opacity:0,x:48,duration:{exit_d:.3f},ease:"power2.in"}}, '
-                    f'{(start + duration - exit_d):.4f});'
+                    f'{(end_at - exit_d):.4f});'
                 )
                 timeline_lines.append(
-                    f'tl.to("#{element_id} .joke-mask, #{element_id} .joke-video-outline", '
+                    f'tl.to("{chrome}", '
                     f'{{opacity:0,duration:{exit_d:.3f},ease:"power2.in"}}, '
-                    f'{(start + duration - exit_d):.4f});'
+                    f'{(end_at - exit_d):.4f});'
                 )
                 timeline_lines.append(
                     f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},'
-                    f'ease:"power3.inOut"}}, {restore_at:.4f});'
+                    f'ease:"power3.inOut"}}, {max(start, end_at - video_out):.4f});'
                 )
                 timeline_lines.append(
-                    f'tl.set("{card}", {{opacity:0}}, {(start + duration):.4f});'
+                    f'tl.set("{card}", {{opacity:0}}, {end_at:.4f});'
                 )
             elif module_id == "speaker-rise-callouts":
                 # Explicit sequence: thesis bar first, then each emphasis word one-by-one.
@@ -3470,6 +3829,11 @@ def build_hyperframes_composition(
         .replace("__WIDTH__", str(width))
         .replace("__HEIGHT__", str(height))
     )
+    source_audio_markup = (
+        f'<audio id="main-audio" src="source.mp4" data-start="0" data-duration="{render_duration:.4f}" data-track-index="10" data-volume="1"></audio>'
+        if include_source_audio
+        else ""
+    )
     index_html = f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8" /><style>
 {font_faces}
@@ -3478,7 +3842,7 @@ def build_hyperframes_composition(
 {runtime_css}
 .pf-step-no-num{{padding-top:38px}}.pf-step-no-num .pf-step-title{{margin-top:0}}.pf-community{{top:7.2%;width:33.85%;min-height:48.15%;padding:46px;text-align:left;border-width:4px;box-shadow:18px 20px 0 rgba(0,124,125,.3)}}.pf-community::before{{content:"";position:absolute;left:0;top:0;bottom:0;width:22px;background:var(--teal)}}.pf-logo-image{{display:block;width:min(330px,82%);height:110px;object-fit:contain;object-position:left center}}.pf-community .pf-action{{margin-top:44px;font-size:43px}}.pf-community .pf-dest{{font-size:18px}}
 .callout-align-right.callout-below{{transform:translate(-100%,14px)}}.callout-align-right.callout-above{{transform:translate(-100%,calc(-100% - 14px))}}
-</style></head><body><div id="root" data-composition-id="vcg-visual-plan" data-start="0" data-width="{width}" data-height="{height}" data-duration="{render_duration:.4f}" data-fps="{fps}"><div class="base"></div><video id="main-video" class="clip" src="source.mp4" muted playsinline data-start="0" data-duration="{render_duration:.4f}" data-track-index="0"></video><audio id="main-audio" src="source.mp4" data-start="0" data-duration="{render_duration:.4f}" data-track-index="10" data-volume="1"></audio>{''.join(clip_markup)}{''.join(audio_markup)}<script src="vendor/gsap.min.js"></script><script>(function(){{window.__timelines=window.__timelines||{{}};var tl=gsap.timeline({{paused:true}});{''.join(timeline_lines)}window.__timelines["vcg-visual-plan"]=tl;}})();</script></div></body></html>'''
+</style></head><body><div id="root" data-composition-id="vcg-visual-plan" data-start="0" data-width="{width}" data-height="{height}" data-duration="{render_duration:.4f}" data-fps="{fps}"><div class="base"></div><video id="main-video" class="clip" src="source.mp4" muted playsinline data-start="0" data-duration="{render_duration:.4f}" data-track-index="0"></video>{source_audio_markup}{''.join(clip_markup)}{''.join(audio_markup)}<script src="vendor/gsap.min.js"></script><script>(function(){{window.__timelines=window.__timelines||{{}};var tl=gsap.timeline({{paused:true}});{''.join(timeline_lines)}window.__timelines["vcg-visual-plan"]=tl;}})();</script></div></body></html>'''
     (public / "index.html").write_text(index_html, encoding="utf-8")
     return public, render_duration
 

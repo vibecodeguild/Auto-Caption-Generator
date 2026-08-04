@@ -398,13 +398,85 @@ def test_punchline_reveal_with_image_is_joke_card() -> None:
     assert "joke-card" in markup
     assert "joke-image" in markup
     assert "joke-copy" in markup
-    assert "joke-kicker" in markup
+    # Kicker retired from the joke card (D5, 2026-08-03): the caption is the
+    # Title line only — a passed-in legacy kicker param must not render.
+    assert "joke-kicker" not in markup
+    assert "RARE MARKETING SKILL" not in markup
     assert "joke-line" in markup
     assert "WORD LAYOUT DARK ARTS" in markup
     assert "COMEDY BREAK" not in markup
     assert "joke-tab" not in markup
     assert "demo-joke-image.png" in markup
     assert "module-fill" not in markup
+
+
+def test_punchline_title_content_at_uses_title_semantic_not_beat_start() -> None:
+    """Title reveal times image+caption; stage/dock still starts at the beat."""
+    cue = {
+        "semanticItems": [
+            {
+                "parameterPath": "parameters.text",
+                "spokenStartSec": 12.5,
+                "fullyVisibleSec": 12.8,
+            }
+        ]
+    }
+    # Cue window 10–18 in absolute source; composition local start=0 for a range
+    # that begins at 10 → content at 2.5 local.
+    content_at = visual_production._punchline_title_content_at(
+        cue,
+        range_start=10.0,
+        start=0.0,
+        duration=8.0,
+    )
+    assert content_at == pytest.approx(2.5)
+
+    # Missing title semantic → content lands with beat start.
+    assert (
+        visual_production._punchline_title_content_at(
+            {"semanticItems": []},
+            range_start=10.0,
+            start=0.0,
+            duration=8.0,
+        )
+        == 0.0
+    )
+
+
+def test_punchline_beat2_stage_at_177_content_at_247() -> None:
+    """Regression: beat-002 frames must not collapse stage+content onto Title.
+
+    Stage/dock at startFrame 177; whole card (borders+image+caption) at Title 247.
+    """
+    fps = 30.0
+    start_f, reveal_f, end_f = 177, 247, 395
+    range_start = start_f / fps - 0.05
+    start = start_f / fps - range_start  # ~0.05 composition-local
+    duration = (end_f - start_f) / fps
+    content_at = visual_production._punchline_title_content_at(
+        {
+            "semanticItems": [
+                {
+                    "parameterPath": "parameters.text",
+                    "spokenStartSec": reveal_f / fps,
+                    "fullyVisibleSec": reveal_f / fps + 0.35,
+                }
+            ]
+        },
+        range_start=range_start,
+        start=start,
+        duration=duration,
+    )
+
+    # Absolute frame back from composition-local times.
+    stage_abs_frame = (start + range_start) * fps
+    content_abs_frame = (content_at + range_start) * fps
+    assert stage_abs_frame == pytest.approx(177.0)
+    assert content_abs_frame == pytest.approx(247.0)
+    assert content_at - start == pytest.approx((247 - 177) / fps)
+
+    # Contract the helper encodes: stage time != content time for this beat.
+    assert content_at > start + 1.0
 
 
 def test_punchline_reveal_requires_image_no_text_only_mode() -> None:
@@ -900,3 +972,26 @@ def test_visual_plan_rejects_module_parameters_outside_the_module_contract(tmp_p
 
     with pytest.raises(ValueError, match="unsupported parameters: leftItems"):
         visual_production.save_visual_plan(plan_path, plan)
+
+
+def test_claim_empty_workspace_diverts_when_clear_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live hyperframes-player locks must not block the next composition build."""
+    locked = tmp_path / "92ed1206705c5082e32f"
+    (locked / "public").mkdir(parents=True)
+    (locked / "public" / "source.mp4").write_bytes(b"locked")
+    monkeypatch.setattr(visual_production, "_replace_directory_tree", lambda _path: False)
+
+    claimed = visual_production._claim_empty_workspace(locked)
+
+    assert claimed != locked
+    assert claimed.name.startswith(f"{locked.name}-w")
+    assert not claimed.exists()
+
+
+def test_replace_directory_tree_clears_unlocked_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "hyperframes"
+    (workspace / "public").mkdir(parents=True)
+    (workspace / "public" / "source.mp4").write_bytes(b"video")
+
+    assert visual_production._replace_directory_tree(workspace) is True
+    assert not workspace.exists()
