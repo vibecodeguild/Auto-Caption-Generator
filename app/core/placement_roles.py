@@ -1,18 +1,30 @@
-"""Placement content roles — all production engines, no kickers.
+"""Placement content roles — thin adapter over the engine registry. No kickers.
 
-Authority: docs/vcg-graphics-process/placement.md
+Authority: docs/vcg-graphics-process/placement.md (placement policy) and
+docs/vcg-graphics-process/architecture.md §3 (engine interface ownership).
 
-Placement UI edits **lines** (text + revealFrame + slot) plus small meta/assets/motion
-bags. Adapters map slots → engine ``parameters.*`` at draft/draw time.
+Every engine fact (slots, list bounds, meta/assets/motion knobs) is declared
+ONCE in ``ENGINE_REGISTRY`` (app/core/visual_production.py), next to the draw
+code. This module owns only placement-layer POLICY:
 
-Kicker / eyebrow is retired from the product content model.
+- the line unit shape (text + revealFrame + slot);
+- adapters that map slots → engine ``parameters.*`` at draft/draw time;
+- the kicker ban (D5): kicker is retired from the product content model and is
+  filtered here even though legacy engine CSS still accepts it.
+
+Do not declare engine interface data in this module — grow the engine's
+registry entry instead and placement inherits it.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.core.visual_production import MODULE_IDS, MODULE_PARAMETER_KEYS
+from app.core.visual_production import (
+    ENGINE_REGISTRY,
+    MODULE_IDS,
+    MODULE_PARAMETER_KEYS,
+)
 
 # --- Line unit ----------------------------------------------------------------
 
@@ -28,211 +40,72 @@ def empty_line(slot: str, *, text: str = "", reveal_frame: int = 0) -> dict[str,
     }
 
 
-# --- Engine specs -------------------------------------------------------------
+# --- Engine specs (derived) ---------------------------------------------------
 
 # fixed_line_slots: ordered slots always present (may be empty text).
 # list_slot: optional repeating slot prefix; UI allows add/remove (items.0, items.1, …).
 # list_min / list_max: bounds for list_slot (None = no list).
 # meta_keys / asset_keys / motion_keys: non-line bags (engine param names).
 
+
+def _derived_spec(engine_id: str) -> dict[str, Any]:
+    placement = ENGINE_REGISTRY[engine_id]["placement"]
+    return {
+        "fixed_line_slots": list(placement["fixed_line_slots"]),
+        "list_slot": placement["list_slot"],
+        "list_min": int(placement["list_min"]),
+        "list_max": int(placement["list_max"]),
+        "meta_keys": list(placement["meta_keys"]),
+        "asset_keys": list(placement["asset_keys"]),
+        "motion_keys": list(placement["motion_keys"]),
+        "notes": str(placement.get("notes") or ""),
+    }
+
+
+# Derived view over ENGINE_REGISTRY — kept for existing importers. Never edit
+# this mapping; grow the engine's registry entry instead.
 ENGINE_PLACEMENT_SPECS: dict[str, dict[str, Any]] = {
-    "punchline-reveal": {
-        "fixed_line_slots": ["text"],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": [],
-        "asset_keys": ["imageAssetId"],  # required — joke card is the only mode
-        "motion_keys": ["accentColor"],
-        "notes": "Joke card only (image + caption, head docks left). Not a text-only kinetic.",
-    },
-    "kinetic-word-punctuation": {
-        "fixed_line_slots": ["phrase"],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": [],
-        "asset_keys": [],
-        "motion_keys": ["side", "anchor", "accentColor"],
-        "notes": "Single kinetic phrase.",
-    },
-    "robot-cheer": {
-        "fixed_line_slots": ["text", "tagline"],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": [],
-        "asset_keys": [],
-        "motion_keys": [],
-        "notes": "Bubble + optional energy tagline (not a kicker eyebrow).",
-    },
-    "robot-defiant": {
-        "fixed_line_slots": ["text"],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": [],
-        "asset_keys": [],
-        "motion_keys": [],
-        "notes": "",
-    },
-    "robot-roast": {
-        "fixed_line_slots": ["text"],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": [],
-        "asset_keys": [],
-        "motion_keys": [],
-        "notes": "",
-    },
-    "robot-rocket-sign": {
-        "fixed_line_slots": ["text"],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": [],
-        "asset_keys": [],
-        "motion_keys": [],
-        "notes": "Placard line on rocket CTA.",
-    },
-    "speaker-side-panel": {
-        "fixed_line_slots": ["text"],
-        "list_slot": "items",
-        "list_min": 0,
-        "list_max": 12,
-        "meta_keys": [],
-        "asset_keys": [],
-        "motion_keys": ["side", "frameStyle", "panelWidth", "accentColor", "videoBounds"],
-        "notes": "Title + bullet items; each item is lines slot items.i.",
-    },
-    "dependency-stack": {
-        "fixed_line_slots": ["text"],
-        "list_slot": "nodes",
-        "list_min": 0,
-        "list_max": 6,
-        "meta_keys": [],
-        "asset_keys": [],
-        "motion_keys": [],
-        "notes": "Title + stack nodes.",
-    },
-    "numbered-example-card": {
-        "fixed_line_slots": [],
-        "list_slot": "titleLines",
-        "list_min": 1,
-        "list_max": 8,
-        "meta_keys": ["exampleNumber", "totalExamples", "accentLineIndex"],
-        "asset_keys": [],
-        "motion_keys": ["accentColor", "tags"],
-        "notes": "No kicker. Body is title lines only.",
-    },
-    "speaker-rise-callouts": {
-        "fixed_line_slots": ["thesis"],
-        "list_slot": "callouts",
-        "list_min": 0,
-        "list_max": 8,
-        "meta_keys": ["accentCalloutIndex"],
-        "asset_keys": [],
-        "motion_keys": [],
-        "notes": "Thesis + rising callout lines.",
-    },
-    "problem-card-triptych": {
-        "fixed_line_slots": ["cards.0", "cards.1", "cards.2"],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": [],
-        "asset_keys": [],
-        "motion_keys": [],
-        "notes": "Exactly three card strings (v1).",
-    },
-    "progress-scale": {
-        "fixed_line_slots": ["text", "startLabel", "targetLabel"],
-        "list_slot": "milestones",
-        "list_min": 0,
-        "list_max": 8,
-        "meta_keys": [],
-        "asset_keys": [],
-        "motion_keys": ["accentColor"],
-        "notes": "No kicker. Title + end labels + milestone lines.",
-    },
-    "numbered-step-intro": {
-        "fixed_line_slots": ["title", "action"],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": ["stepNumber", "showNumber"],
-        "asset_keys": [],
-        "motion_keys": ["side"],
-        "notes": "",
-    },
-    "ui-callout": {
-        "fixed_line_slots": ["label", "detail"],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": [],
-        "asset_keys": [],
-        "motion_keys": ["targetBounds", "pointer", "accentColor"],
-        "notes": "",
-    },
-    "windows-prompt-typing": {
-        "fixed_line_slots": ["prompt"],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": ["appName"],
-        "asset_keys": [],
-        "motion_keys": ["side"],
-        "notes": "Prompt is one timed line (typing channel).",
-    },
-    "brand-cta-lockup": {
-        "fixed_line_slots": ["logoText", "action", "destination"],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": [],
-        "asset_keys": ["logoAssetId"],
-        "motion_keys": [],
-        "notes": "",
-    },
-    "tradeoff-meter": {
-        "fixed_line_slots": ["leftLabel", "rightLabel", "verdict"],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": ["value"],
-        "asset_keys": [],
-        "motion_keys": ["side"],
-        "notes": "No kicker. Meter value is meta 0–1.",
-    },
-    "source-punch-zoom": {
-        "fixed_line_slots": [],
-        "list_slot": None,
-        "list_min": 0,
-        "list_max": 0,
-        "meta_keys": [],
-        "asset_keys": [],
-        "motion_keys": ["focusX", "focusY", "zoom", "settleSec", "motion"],
-        "notes": "Motion-only engine; no copy lines.",
-    },
+    engine_id: _derived_spec(engine_id) for engine_id in sorted(ENGINE_REGISTRY)
 }
 
 
 def assert_specs_cover_all_engines() -> None:
-    missing = sorted(MODULE_IDS - set(ENGINE_PLACEMENT_SPECS))
-    extra = sorted(set(ENGINE_PLACEMENT_SPECS) - MODULE_IDS)
-    if missing or extra:
-        raise RuntimeError(
-            f"placement specs out of sync with MODULE_IDS. missing={missing} extra={extra}"
+    """Validate registry well-formedness for placement.
+
+    Coverage is structural now (specs derive from the registry), so this guards
+    the declarations themselves: sane list bounds, and the D5 kicker ban at the
+    declaration level — kicker may exist only in legacy_parameter_keys, never
+    in any placement-facing bucket.
+    """
+
+    problems: list[str] = []
+    for engine_id, spec in ENGINE_PLACEMENT_SPECS.items():
+        placement_keys = (
+            [str(slot).split(".", 1)[0] for slot in spec["fixed_line_slots"]]
+            + ([spec["list_slot"]] if spec["list_slot"] else [])
+            + list(spec["meta_keys"])
+            + list(spec["asset_keys"])
+            + list(spec["motion_keys"])
         )
+        if "kicker" in placement_keys:
+            problems.append(f"{engine_id}: kicker in placement interface (D5)")
+        if spec["list_slot"] is None and spec["list_max"] != 0:
+            problems.append(f"{engine_id}: list bounds without a list_slot")
+        if spec["list_slot"] is not None and spec["list_max"] < max(1, spec["list_min"]):
+            problems.append(f"{engine_id}: list_max below list_min")
+        allowed = MODULE_PARAMETER_KEYS.get(engine_id) or set()
+        unknown = sorted(set(placement_keys) - allowed)
+        if unknown:
+            problems.append(f"{engine_id}: placement keys not in engine parameters: {unknown}")
+    if problems:
+        raise RuntimeError("engine registry placement interfaces invalid: " + "; ".join(problems))
 
 
 def get_engine_placement_spec(engine_id: str) -> dict[str, Any]:
     eid = str(engine_id or "").strip()
-    if eid not in ENGINE_PLACEMENT_SPECS:
+    if eid not in ENGINE_REGISTRY:
         raise KeyError(f"No placement spec for engine {eid!r}")
-    return dict(ENGINE_PLACEMENT_SPECS[eid])
+    return _derived_spec(eid)
 
 
 def list_fixed_and_list_slots(engine_id: str) -> tuple[list[str], str | None, int, int]:

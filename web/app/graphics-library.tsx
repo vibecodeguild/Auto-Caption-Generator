@@ -122,6 +122,74 @@ function MetricsBarChart({
   );
 }
 
+/**
+ * Beat type × layout heat map. Each cell counts usages tagged with BOTH ids —
+ * the exact eligibility surface Assignment deals from, so a dashed (zero) cell
+ * is a real coverage gap for any episode that hits that combination.
+ */
+function MetricsHeatMap({
+  matrix,
+}: {
+  matrix: NonNullable<GraphicsLibraryMetrics["matrix"]>;
+}) {
+  const maxTotal = Math.max(
+    1,
+    ...matrix.rows.flatMap((row) => row.cells.map((cell) => cell.total)),
+  );
+  const gapCount = matrix.rows.reduce(
+    (sum, row) => sum + row.cells.filter((cell) => cell.total === 0).length,
+    0,
+  );
+  return (
+    <section className="graphics-library-metrics-chart graphics-library-metrics-heatmap">
+      <header className="graphics-library-metrics-chart-head">
+        <h3>Coverage · beat type × layout</h3>
+        <span>cell = usages tagged with both · {gapCount} gaps</span>
+      </header>
+      <div className="graphics-library-heatmap-scroll">
+        <table className="graphics-library-heatmap">
+          <thead>
+            <tr>
+              <th aria-hidden="true" />
+              {matrix.layouts.map((layout) => (
+                <th key={layout} scope="col" title={layout}>
+                  {layout.replace(/-/g, " ")}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.rows.map((row) => (
+              <tr key={row.beatType}>
+                <th scope="row">{row.beatType}</th>
+                {row.cells.map((cell) => {
+                  const ratio = cell.total / maxTotal;
+                  const background =
+                    cell.total === 0
+                      ? undefined
+                      : cell.golden > 0
+                        ? `rgba(60, 207, 207, ${0.14 + 0.62 * ratio})`
+                        : `rgba(255, 0, 206, ${0.1 + 0.4 * ratio})`;
+                  return (
+                    <td
+                      key={cell.layoutId}
+                      className={cell.total === 0 ? "is-gap" : undefined}
+                      style={background ? { background } : undefined}
+                      title={`${row.beatType} × ${cell.layoutId} — ${cell.total} total · ${cell.golden} golden · ${cell.candidate} candidate`}
+                    >
+                      {cell.total > 0 ? cell.total : ""}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 type GraphicsLibraryWorkspaceProps = {
   /** Incremented when app Settings changes the private graphics library folder. */
   refreshSignal?: number;
@@ -194,6 +262,12 @@ export default function GraphicsLibraryWorkspace({ refreshSignal = 0 }: Graphics
     lastRefreshSignal.current = refreshSignal;
     void refresh();
   }, [refreshSignal, refresh]);
+
+  // Opening the Metrics tab always shows current counts, whatever changed since.
+  useEffect(() => {
+    if (view === "metrics" && summary?.exists) void refreshMetrics();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
 
   const selected = useMemo(
     () => summary?.entries.find((entry) => entry.id === selectedId) ?? null,
@@ -344,6 +418,16 @@ export default function GraphicsLibraryWorkspace({ refreshSignal = 0 }: Graphics
     setSelectedId(entry.id);
   }, []);
 
+  /** Metrics count status/beatTypes/layouts — refetch after every mutation so the
+   *  Metrics tab is always live. Keeps last-known metrics on transient failure. */
+  const refreshMetrics = useCallback(async () => {
+    try {
+      setMetrics(await getGraphicsLibraryMetrics());
+    } catch {
+      /* keep previous metrics — full refresh() handles hard failures */
+    }
+  }, []);
+
   const run = async (action: () => Promise<GraphicsLibrarySummary | GraphicsLibraryUsage>, success?: string) => {
     setBusy(true);
     try {
@@ -355,6 +439,7 @@ export default function GraphicsLibraryWorkspace({ refreshSignal = 0 }: Graphics
         applyUsageToSummary(result);
         setMessage(success || `Updated ${result.displayName}.`);
       }
+      void refreshMetrics();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -372,6 +457,7 @@ export default function GraphicsLibraryWorkspace({ refreshSignal = 0 }: Graphics
     try {
       const entry = await updateGraphicsLibraryUsage(selected.id, fields);
       applyUsageToSummary(entry);
+      void refreshMetrics();
       if (fields.displayName != null) setNameDraft(entry.displayName || "");
       if (fields.status != null) setStatusDraft(entry.status);
       if (fields.engineId != null) setEngineDraft(entry.engineId || "");
@@ -549,6 +635,7 @@ export default function GraphicsLibraryWorkspace({ refreshSignal = 0 }: Graphics
                     untagged={metrics.untaggedLayouts}
                     emptyLabel="(no layouts set)"
                   />
+                  {metrics.matrix ? <MetricsHeatMap matrix={metrics.matrix} /> : null}
                 </div>
               ) : (
                 <p className="graphics-library-metrics-empty">Metrics could not be loaded. Try refresh.</p>

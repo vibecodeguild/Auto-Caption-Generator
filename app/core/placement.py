@@ -65,6 +65,31 @@ def _working_masterbeater_beats(project_root: Path) -> list[dict[str, Any]]:
     return [b for b in (working.get("beats") or []) if isinstance(b, dict) and b.get("id")]
 
 
+def _masterbeater_beat_by_id(project_root: Path, beat_id: str) -> dict[str, Any] | None:
+    want = str(beat_id or "").strip()
+    if not want:
+        return None
+    for beat in _working_masterbeater_beats(project_root):
+        if str(beat.get("id") or "") == want:
+            return beat
+    return None
+
+
+def _beat_end_frame_exclusive(beat: dict[str, Any] | None, *, fallback: int) -> int:
+    """Natural speech-beat end (not the trimmed graphic undock frame)."""
+
+    if not isinstance(beat, dict):
+        return max(1, int(fallback))
+    end = beat.get("endFrameExclusive")
+    if end is None and beat.get("endFrame") is not None:
+        end = int(beat["endFrame"]) + 1
+    try:
+        end_i = int(end if end is not None else fallback)
+    except (TypeError, ValueError):
+        end_i = int(fallback)
+    return max(1, end_i)
+
+
 def _working_assignment_rows(project_root: Path) -> list[dict[str, Any]]:
     reviewed = load_assignment_reviewed(project_root)
     original = load_assignment_original(project_root)
@@ -198,6 +223,58 @@ def _default_meta(engine_id: str, *, index_among_type: int) -> dict[str, Any]:
 
 # Library sample / live-preview stand-in for the 7-22 joke image card path.
 DEMO_JOKE_IMAGE_ASSET_ID = "demo-joke-image"
+# Per-project store for placement instance images (joke art, logos, …).
+PLACEMENT_IMAGE_DIRNAME = "assets/placement"
+PLACEMENT_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+def _placement_image_dir(project_root: Path) -> Path:
+    return Path(project_root) / PLACEMENT_IMAGE_DIRNAME
+
+
+def _find_placement_image(project_root: Path, asset_id: str) -> Path | None:
+    """Resolve an imported placement image by asset id (file stem)."""
+
+    stem = str(asset_id or "").strip()
+    if not stem:
+        return None
+    image_dir = _placement_image_dir(project_root)
+    for ext in PLACEMENT_IMAGE_EXTENSIONS:
+        candidate = image_dir / f"{stem}{ext}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def import_placement_image(manifest_path: Path, source: Path) -> dict[str, Any]:
+    """Copy an image into the project's placement store; returns its asset id.
+
+    Asset id = sanitized file stem. Placements reference the id in their assets
+    bag (e.g. imageAssetId); previews and renders resolve it from the store.
+    """
+
+    root = video_project_root(manifest_path)
+    source = Path(source).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"Image not found: {source}")
+    ext = source.suffix.lower()
+    if ext not in PLACEMENT_IMAGE_EXTENSIONS:
+        raise ValueError(f"Unsupported image type {ext!r}. Use png/jpg/jpeg/gif/webp.")
+    stem = re.sub(r"[^a-z0-9-]+", "-", source.stem.lower()).strip("-") or "image"
+    if stem == DEMO_JOKE_IMAGE_ASSET_ID:
+        stem = f"{stem}-custom"
+    image_dir = _placement_image_dir(root)
+    image_dir.mkdir(parents=True, exist_ok=True)
+    asset_id = stem
+    dest = image_dir / f"{asset_id}{ext}"
+    counter = 2
+    # Same-name imports overwrite only when the bytes match; otherwise suffix.
+    while dest.is_file() and dest.stat().st_size != source.stat().st_size:
+        asset_id = f"{stem}-{counter}"
+        dest = image_dir / f"{asset_id}{ext}"
+        counter += 1
+    shutil.copy2(source, dest)
+    return {"assetId": asset_id, "fileName": dest.name, "sourceName": source.name}
 
 
 def _default_assets(engine_id: str) -> dict[str, Any]:
@@ -234,22 +311,28 @@ def _stage_plan_assets_for_preview(
     plan_assets: list[dict[str, Any]] = []
     image_id = str(params.get("imageAssetId") or "").strip()
     if engine_id == "punchline-reveal" and image_id:
-        demo_src = brand_joke_demo_image_path()
-        if not demo_src.is_file():
-            raise RuntimeError(
-                f"punchline-reveal needs the joke-card image, but {demo_src} is missing."
-            )
+        # Imported project image first; the brand demo art is the fallback so a
+        # missing/renamed image degrades to a visible placeholder, never a break.
+        source = _find_placement_image(project_root, image_id)
+        display_name = f"Joke image · {image_id}"
+        if source is None:
+            source = brand_joke_demo_image_path()
+            display_name = "Punchline joke image (demo)"
+            if not source.is_file():
+                raise RuntimeError(
+                    f"punchline-reveal needs the joke-card image, but {source} is missing."
+                )
         asset_dir = Path(project_root) / PREVIEW_DIRNAME / "assets"
         asset_dir.mkdir(parents=True, exist_ok=True)
-        dest_name = f"{image_id}{demo_src.suffix.lower() or '.png'}"
+        dest_name = f"{image_id}{source.suffix.lower() or '.png'}"
         dest = asset_dir / dest_name
-        if not dest.is_file() or dest.stat().st_size != demo_src.stat().st_size:
-            shutil.copy2(demo_src, dest)
+        if not dest.is_file() or dest.stat().st_size != source.stat().st_size:
+            shutil.copy2(source, dest)
         rel = f"{PREVIEW_DIRNAME}/assets/{dest_name}".replace("\\", "/")
         plan_assets.append(
             {
                 "id": image_id,
-                "name": "Punchline joke image",
+                "name": display_name,
                 "path": rel,
                 "mediaType": "image",
                 "durationSec": None,
@@ -866,7 +949,7 @@ def _prune_stale_placement_preview_workspaces(
     base = Path(preview_root) / "hyperframes"
     if not base.is_dir():
         return
-    keep = {str(keep_fingerprint or "").strip()}
+    keep_fp = str(keep_fingerprint or "").strip()
     try:
         entries = [p for p in base.iterdir() if p.is_dir() and not p.name.startswith(".")]
     except OSError:
@@ -879,7 +962,9 @@ def _prune_stale_placement_preview_workspaces(
     )
     retained = 0
     for path in ranked:
-        if path.name in keep:
+        # Keep the canonical fingerprint folder and any Windows divert siblings
+        # (``{fingerprint}-w{suffix}``) from the same build family.
+        if keep_fp and (path.name == keep_fp or path.name.startswith(f"{keep_fp}-w")):
             continue
         if retained < keep_recent:
             retained += 1
@@ -900,12 +985,24 @@ def _prune_stale_placement_preview_workspaces(
         pass
 
 
-def _placement_preview_fingerprint(placement: dict[str, Any], *, source_rel: str, fps: float) -> str:
+def _placement_preview_fingerprint(
+    placement: dict[str, Any],
+    *,
+    source_rel: str,
+    fps: float,
+    beat_end_frame_exclusive: int | None = None,
+) -> str:
     payload = {
         "beatId": placement.get("beatId"),
         "engineId": placement.get("engineId"),
         "startFrame": int(placement.get("startFrame") or 0),
+        # Graphic undock (placement Ends). Separate from preview window end.
         "endFrameExclusive": int(placement.get("endFrameExclusive") or 0),
+        "beatEndFrameExclusive": int(
+            beat_end_frame_exclusive
+            if beat_end_frame_exclusive is not None
+            else (placement.get("endFrameExclusive") or 0)
+        ),
         "lines": placement.get("lines") or [],
         "meta": placement.get("meta") or {},
         "assets": placement.get("assets") or {},
@@ -913,7 +1010,14 @@ def _placement_preview_fingerprint(placement: dict[str, Any], *, source_rel: str
         "source": source_rel,
         "fps": round(float(fps), 3),
         # Bump when default asset/layout recipe for an engine changes (invalidates cache).
-        "previewRecipe": 2,
+        # 3: no #main-audio in preview compositions (monotonic transport clock; the
+        #    studio plays speech via an app-owned audio element instead).
+        # 4: punchline-reveal redesign — kicker removed; end via endFrameExclusive; custom
+        #    placement images stage from assets/placement/.
+        # 5: stage/dock at beat start; Title reveal = image + caption only (not whole card).
+        # 6: same contract; force rebuild of Claude-era caches that delayed the whole stage.
+        # 7: preview range = full beat; placement endFrameExclusive only ends the graphic cue.
+        "previewRecipe": 7,
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
@@ -1176,20 +1280,38 @@ def build_placement_live_preview(
         raise RuntimeError("Could not probe stage source duration.")
 
     start_f = int(placement.get("startFrame") or 0)
-    end_f = int(placement.get("endFrameExclusive") or start_f + 1)
-    if end_f <= start_f:
-        end_f = start_f + 1
+    # Graphic undock frame (placement Ends). Cue ends here; talking-head continues.
+    graphic_end_f = int(placement.get("endFrameExclusive") or start_f + 1)
+    if graphic_end_f <= start_f:
+        graphic_end_f = start_f + 1
+    # Preview composition always covers the full speech beat so trimming Ends only
+    # ends the graphic — the player keeps rolling on full-frame talking-head.
+    mb_beat = _masterbeater_beat_by_id(root, beat_id)
+    beat_end_f = _beat_end_frame_exclusive(mb_beat, fallback=graphic_end_f)
+    if beat_end_f < graphic_end_f:
+        beat_end_f = graphic_end_f
+    if beat_end_f <= start_f:
+        beat_end_f = start_f + 1
+
     start_sec = max(0.0, start_f / fps)
-    end_sec = min(full_duration, end_f / fps)
-    if end_sec <= start_sec:
-        end_sec = min(full_duration, start_sec + max(1.0 / fps, 0.5))
+    graphic_end_sec = min(full_duration, graphic_end_f / fps)
+    beat_end_sec = min(full_duration, beat_end_f / fps)
+    if graphic_end_sec <= start_sec:
+        graphic_end_sec = min(full_duration, start_sec + max(1.0 / fps, 0.5))
+    if beat_end_sec <= start_sec:
+        beat_end_sec = min(full_duration, start_sec + max(1.0 / fps, 0.5))
     # Tiny pad so enter/exit motion is not clipped at the edges.
     range_start = max(0.0, start_sec - 0.05)
-    range_end = min(full_duration, end_sec + 0.08)
+    range_end = min(full_duration, beat_end_sec + 0.08)
     if range_end <= range_start:
         range_end = min(full_duration, range_start + 0.5)
 
-    fingerprint = _placement_preview_fingerprint(placement, source_rel=source_rel, fps=fps)
+    fingerprint = _placement_preview_fingerprint(
+        placement,
+        source_rel=source_rel,
+        fps=fps,
+        beat_end_frame_exclusive=beat_end_f,
+    )
     preview_root = preview_workspace_for_project(root)
     # Per-fingerprint workspace so switching beats / edits never rmtree a source.mp4
     # still held open by the browser hyperframes-player (Windows WinError 32).
@@ -1222,10 +1344,15 @@ def build_placement_live_preview(
                     "engineId": engine_id,
                     "cacheKey": fingerprint,
                     "durationSec": float(receipt.get("durationSec") or (range_end - range_start)),
+                    # Preview window = full beat; graphic may undock earlier.
                     "startFrame": start_f,
-                    "endFrameExclusive": end_f,
+                    "endFrameExclusive": int(receipt.get("endFrameExclusive") or beat_end_f),
+                    "graphicEndFrameExclusive": int(
+                        receipt.get("graphicEndFrameExclusive") or graphic_end_f
+                    ),
                     "startSec": start_sec,
-                    "endSec": end_sec,
+                    "endSec": beat_end_sec,
+                    "graphicEndSec": graphic_end_sec,
                     "rangeStartSec": float(receipt.get("rangeStartSec") or range_start),
                     "rangeEndSec": float(receipt.get("rangeEndSec") or range_end),
                     "fps": fps,
@@ -1237,10 +1364,15 @@ def build_placement_live_preview(
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             pass
 
-    cue_payload = build_cue_preview_payload(placement, fps=fps)
+    # Cue ends at graphic Ends (undock). Composition range continues to beat end.
+    cue_placement = dict(placement)
+    cue_placement["endFrameExclusive"] = graphic_end_f
+    cue_payload = build_cue_preview_payload(cue_placement, fps=fps)
     # Clamp cue to full source duration for plan validation.
     cue_start = max(0.0, min(full_duration - 0.05, float(cue_payload["startSec"])))
     cue_end = max(cue_start + 0.05, min(full_duration, float(cue_payload["endSec"])))
+    # Never let the cue outlast the preview window.
+    cue_end = min(cue_end, beat_end_sec)
     cue_params = dict(cue_payload.get("parameters") or {})
     cue = {
         "id": cue_payload["id"],
@@ -1310,9 +1442,18 @@ def build_placement_live_preview(
         start_sec=range_start,
         end_sec=range_end,
         workspace_override=workspace,
+        # No in-composition audio: the HyperFrames transport clock pins (freezes) on
+        # audio-derived time sources. The studio supplies speech audio itself.
+        include_source_audio=False,
     )
     if not (runtime_root / "index.html").is_file():
         raise RuntimeError("HyperFrames placement preview composition was not written.")
+
+    # build_hyperframes_composition may divert to a sibling folder when the preferred
+    # fingerprint path is locked by the live player (Windows WinError 32). Receipt
+    # and returned workspace always follow the path that was actually written.
+    actual_workspace = runtime_root.parent
+    receipt_path = actual_workspace / PREVIEW_RECEIPT
 
     receipt = {
         "fingerprint": fingerprint,
@@ -1322,7 +1463,8 @@ def build_placement_live_preview(
         "rangeStartSec": range_start,
         "rangeEndSec": range_end,
         "startFrame": start_f,
-        "endFrameExclusive": end_f,
+        "endFrameExclusive": beat_end_f,
+        "graphicEndFrameExclusive": graphic_end_f,
         "builtAt": now,
     }
     receipt_path.write_text(json.dumps(receipt, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -1337,9 +1479,11 @@ def build_placement_live_preview(
         "cacheKey": fingerprint,
         "durationSec": float(render_duration),
         "startFrame": start_f,
-        "endFrameExclusive": end_f,
+        "endFrameExclusive": beat_end_f,
+        "graphicEndFrameExclusive": graphic_end_f,
         "startSec": start_sec,
-        "endSec": end_sec,
+        "endSec": beat_end_sec,
+        "graphicEndSec": graphic_end_sec,
         "rangeStartSec": range_start,
         "rangeEndSec": range_end,
         "fps": fps,

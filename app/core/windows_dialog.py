@@ -140,6 +140,28 @@ try {
     )
 
 
+def choose_image_file() -> Path | None:
+    """Image-only picker (placement graphic images, e.g. the joke card art)."""
+
+    return _run_dialog(
+        _DIALOG_SETUP
+        + """
+try {
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = 'Choose graphic image'
+    $dialog.Filter = 'Images|*.png;*.jpg;*.jpeg;*.gif;*.webp|All files|*.*'
+    $dialog.RestoreDirectory = $true
+    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+        [Console]::Out.Write($dialog.FileName)
+    }
+} finally {
+    $owner.Close()
+    $owner.Dispose()
+}
+"""
+    )
+
+
 def choose_visual_asset_file() -> Path | None:
     return _run_dialog(
         _DIALOG_SETUP

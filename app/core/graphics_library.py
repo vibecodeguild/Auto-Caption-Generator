@@ -31,6 +31,7 @@ from app.core.visual_production import (
     MODULE_IDS,
     MODULE_PARAMETER_KEYS,
     build_hyperframes_composition,
+    probe_has_audio_stream,
     probe_visual_source,
     remux_locked_audio,
     validate_visual_plan,
@@ -1224,6 +1225,13 @@ def library_metrics(root: Path | None = None) -> dict[str, Any]:
         else:
             bucket["candidate"] += 1
 
+    # Beat type × layout cross-tab: cell = usages tagged with BOTH ids. This is
+    # the eligibility surface Assignment deals from (type match AND layout match),
+    # so a zero cell is a real coverage gap for episodes hitting that combo.
+    matrix_beats = list(beat_order)
+    matrix_layouts = list(layout_order)
+    matrix_counts: dict[tuple[str, str], dict[str, int]] = {}
+
     for entry in entries:
         status = str(entry.get("status") or "candidate")
         if status not in STATUSES:
@@ -1252,6 +1260,16 @@ def library_metrics(root: Path | None = None) -> dict[str, Any]:
                 if layout not in by_layout:
                     by_layout[layout] = {"total": 0, "golden": 0, "candidate": 0}
                 _bump(by_layout[layout], status)
+        for beat in beats:
+            if beat not in matrix_beats:
+                matrix_beats.append(beat)
+            for layout in layouts:
+                if layout not in matrix_layouts:
+                    matrix_layouts.append(layout)
+                cell = matrix_counts.setdefault(
+                    (beat, layout), {"total": 0, "golden": 0, "candidate": 0}
+                )
+                _bump(cell, status)
 
     def _rows(mapping: dict[str, dict[str, int]], order: list[str]) -> list[dict[str, Any]]:
         keys = list(order) + [key for key in mapping if key not in order]
@@ -1263,6 +1281,23 @@ def library_metrics(root: Path | None = None) -> dict[str, Any]:
         rows.sort(key=lambda row: (-int(row["total"]), str(row["id"])))
         return rows
 
+    matrix_rows = [
+        {
+            "beatType": beat,
+            "cells": [
+                {
+                    "layoutId": layout,
+                    **(
+                        matrix_counts.get((beat, layout))
+                        or {"total": 0, "golden": 0, "candidate": 0}
+                    ),
+                }
+                for layout in matrix_layouts
+            ],
+        }
+        for beat in matrix_beats
+    ]
+
     return {
         "root": str(root),
         "exists": exists,
@@ -1271,6 +1306,7 @@ def library_metrics(root: Path | None = None) -> dict[str, Any]:
         "byLayout": _rows(by_layout, layout_order),
         "untaggedBeatTypes": untagged_beats,
         "untaggedLayouts": untagged_layouts,
+        "matrix": {"layouts": matrix_layouts, "rows": matrix_rows},
     }
 
 
@@ -1401,6 +1437,34 @@ def _extract_poster(video_path: Path, poster_path: Path, *, at_sec: float = 3.0)
     )
     if result.returncode != 0 or not poster_path.is_file():
         raise RuntimeError(f"Could not extract poster. {(result.stderr or result.stdout)[-800:]}")
+
+
+def _package_video_only_sample(video_path: Path, sample_path: Path, *, duration_sec: float) -> None:
+    """Deliver a rendered sample without audio (silent layout clip): copy the video stream, trim, faststart."""
+    command = [
+        str(find_ffmpeg()),
+        "-y",
+        "-i",
+        str(video_path),
+        "-map",
+        "0:v:0",
+        "-c:v",
+        "copy",
+        "-t",
+        f"{duration_sec:.4f}",
+        "-movflags",
+        "+faststart",
+        str(sample_path),
+    ]
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+        creationflags=hidden_subprocess_flags(),
+    )
+    if result.returncode != 0 or not sample_path.is_file() or sample_path.stat().st_size == 0:
+        raise RuntimeError(f"Could not package the video-only sample. {(result.stderr or result.stdout)[-800:]}")
 
 
 def render_entry_sample(
@@ -1686,7 +1750,6 @@ def render_entry_sample(
             + ((rendered.stderr or rendered.stdout or "")[-1800:])
         )
 
-    progress(85, "Muxing layout clip audio...")
     example_dir.mkdir(parents=True, exist_ok=True)
     # Always rewrite outputs when forcing so poster/sample cannot stay stale.
     if force:
@@ -1696,13 +1759,21 @@ def render_entry_sample(
                     path.unlink()
                 except OSError:
                     pass
-    remux_locked_audio(
-        video_only,
-        work / source_rel,
-        sample_out,
-        start_sec=0.0,
-        duration_sec=duration,
-    )
+    # Layout clips are shelf proofs, not deliveries: audio is optional. A silent
+    # clip ships as a video-only sample instead of failing the -map 1:a:0 mux.
+    source_has_audio = probe_has_audio_stream(work / source_rel)
+    if source_has_audio:
+        progress(85, "Muxing layout clip audio...")
+        remux_locked_audio(
+            video_only,
+            work / source_rel,
+            sample_out,
+            start_sec=0.0,
+            duration_sec=duration,
+        )
+    else:
+        progress(85, "Layout clip is silent; packaging video-only sample...")
+        _package_video_only_sample(video_only, sample_out, duration_sec=duration)
     progress(92, "Extracting poster frame...")
     # Camera moves: grab a frame after the pull-out so the thumb is not stuck mid-zoom.
     if module_id == "source-punch-zoom":
@@ -1730,7 +1801,7 @@ def render_entry_sample(
         "relativePath": f"examples/{entry_id}/sample.mp4",
         "posterRelativePath": f"examples/{entry_id}/poster.png",
         "durationSec": float(probe_visual_source(sample_out)["durationSec"]),
-        "hasAudio": True,
+        "hasAudio": source_has_audio,
         "source": "rendered",
         "layoutId": sample_layout,
         "renderedAt": rendered_at,

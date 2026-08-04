@@ -107,12 +107,12 @@ Bullets / stack / callouts → N lines, each with its own `revealFrame`.
 
 ## 5. All 18 engines → slots
 
-**Code authority:** `app/core/placement_roles.py` (`ENGINE_PLACEMENT_SPECS`).  
+**Code authority:** `ENGINE_REGISTRY` in `app/core/visual_production.py` — each engine declares its placement interface (slots, list bounds, meta/assets/motion) next to its draw code. `app/core/placement_roles.py` is a thin adapter; its `ENGINE_PLACEMENT_SPECS` is a **derived view** (never hand-edit). To add or change a parameter: grow the engine's registry entry — placement inherits it. See [architecture.md §3](./architecture.md).  
 Adapters map slots → existing `parameters.*` (engines keep draw names until cleaned).
 
 | Engine | `lines` slots | List (add/remove) | `meta` | `assets` | `motion` |
 | --- | --- | --- | --- | --- | --- |
-| punchline-reveal | `text` | — | — | `imageAssetId` **required** (joke card only; demo image default for draft) | `accentColor?` |
+| punchline-reveal | `text` (reveal = whole right card: borders + image + caption) | — | — (graphic end = placement `endFrameExclusive`, default beat end; trim earlier to undock before beat ends) | `imageAssetId` **required** (joke card only; demo default; custom via studio image picker → `assets/placement/`) | `accentColor?` |
 | kinetic-word-punctuation | `phrase` | — | — | — | `side`, `anchor`, `accentColor?` |
 | robot-cheer | `text`, `tagline?` | — | — | — | — |
 | robot-defiant | `text` | — | — | — | — |
@@ -244,7 +244,7 @@ For each assigned unlocked beat:
 
 | Piece | Location | Status |
 | --- | --- | --- |
-| 18-engine slot specs | `app/core/placement_roles.py` | **BUILT** |
+| 18-engine slot specs | `ENGINE_REGISTRY` (`app/core/visual_production.py`); `placement_roles.py` derives | **BUILT** |
 | Draft / save / lock / artifacts | `app/core/placement.py` | **BUILT** (v1) |
 | HTTP | `POST …/placement/run`, `PUT …/placement/beat`, `POST …/placement/preview` | **BUILT** |
 | Stage 3 UI studio | `web/app/visual-package.tsx` | **BUILT** — images/6 layout: craft left (primary), live preview right; word chips + ±1/5/10; no transcript wall |

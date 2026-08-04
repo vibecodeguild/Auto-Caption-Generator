@@ -225,6 +225,7 @@ Never “fix” original by pasting human edits into `masterbeater-beats.json`.
 | Allowed plan shape + beat types | `visual-production/schemas/editorial-beats.v1.schema.json` (`schemaVersion: 2`) |
 | Validate a plan | `app/core/editorial_beats.py` · `python scripts/editorial_beats.py validate --plan …` |
 | Production graphics set | Graphics Library golden usages (`app/core/graphics_library.py` + UI) |
+| Engine interface declarations (single source) | `ENGINE_REGISTRY` in `app/core/visual_production.py` — placement/library views derive from it |
 
 Do not add process docs that only restate those paths.
 

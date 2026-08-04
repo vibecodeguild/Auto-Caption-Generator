@@ -476,13 +476,26 @@ inside a new Creator Production project.
 
 ## API Inventory
 
-Generated from `app/web_api.py` by `scripts/generate_api_inventory.py`. 119 routes.
+Generated from `app/web_api.py` by `scripts/generate_api_inventory.py`. 146 routes.
 Edit the route or its docstring, then regenerate; do not edit this section by hand.
 
 ### Visual Production
 
 | Method | Route | Purpose |
 | --- | --- | --- |
+| PUT | `/api/visual-package/assignment/override` | Human swap of usage on one beat → assignment-reviewed.json + ledger |
+| POST | `/api/visual-package/assignment/run` | Stage 2: deal golden usages onto working Masterbeater beats |
+| PUT | `/api/visual-package/masterbeater/beats` | Auto-save Stage 1 word edits to masterbeater-beats-reviewed.json + ledger |
+| POST | `/api/visual-package/masterbeater/run` | Run Masterbeater skill against the locked final transcript |
+| PUT | `/api/visual-package/placement/beat` | Save lines/timing/lock for one placement beat. Original file untouched |
+| POST | `/api/visual-package/placement/import-image-dialog` | Pick an image file and copy it into the project's placement image store |
+| POST | `/api/visual-package/placement/preview` | Build live Tier B HyperFrames composition for one placement beat (no encode) |
+| GET | `/api/visual-package/placement/preview/composition/{relative_path:path}` | Serve the active single-beat HyperFrames composition for placement live preview |
+| POST | `/api/visual-package/placement/run` | Stage 3: draft placements for assigned beats (skips locked on re-run) |
+| PUT | `/api/visual-package/scenelayer/override` | Human layout dropdown → scenelayer-reviewed.json + ledger |
+| POST | `/api/visual-package/scenelayer/run` | Stage 2: label each beat with an OBS layout from its first frame |
+| GET | `/api/visual-package/source-video` | Locked cut (preferred) or working source for Visual Package review |
+| GET | `/api/visual-package/status` | Status + Masterbeater + Assignment for the open private video project |
 | POST | `/api/visual/assets/import-dialog` | Import visual asset dialog |
 | GET | `/api/visual/assets/{asset_id}` | Visual asset |
 | GET | `/api/visual/catalog` | Visual catalog |
@@ -521,6 +534,24 @@ Edit the route or its docstring, then regenerate; do not edit this section by ha
 | POST | `/api/visual/suggestions/{suggestion_id}/decision` | Decide visual suggestion |
 | POST | `/api/visual/suggestions/{suggestion_id}/pexels/search` | Search suggestion stock |
 | POST | `/api/visual/suggestions/{suggestion_id}/pexels/select` | Select suggestion stock |
+
+### Graphics Library
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| GET | `/api/graphics-library` | Private Graphics Library summary and usage list |
+| POST | `/api/graphics-library/create` | Create the default private Graphics Library folder and empty index |
+| POST | `/api/graphics-library/ensure-engine-usages` | Ensure candidate usage rows exist for each known engine (never auto-golden) |
+| POST | `/api/graphics-library/import-harvest` | Import ratings/notes from Creator Library harvest into candidates |
+| GET | `/api/graphics-library/layout-clips` | List recorded full-frame OBS layout clips available for sample renders |
+| POST | `/api/graphics-library/layout-clips/{layout_id}/import` | Import a recorded full-frame OBS layout clip into the private library |
+| GET | `/api/graphics-library/metrics` | Usage counts by beat type and allowed layout for Graphics Library charts |
+| POST | `/api/graphics-library/open-dialog` | Choose an existing private Graphics Library folder (Windows folder picker) |
+| GET | `/api/graphics-library/production-set` | Golden usages from the Graphics Library (production selectable set) |
+| GET | `/api/graphics-library/usages/{entry_id}` | Full usage with media availability and engine interface passthrough |
+| PATCH | `/api/graphics-library/usages/{entry_id}` | Update status, notes, rating, engineId, beat types, layouts |
+| GET | `/api/graphics-library/usages/{entry_id}/media/{kind}` | Stream a private sample or poster from the Graphics Library root |
+| POST | `/api/graphics-library/usages/{entry_id}/render-sample` | Render a short sample; stream NDJSON progress events, then a final entry payload |
 
 ### Creator Library
 
@@ -626,6 +657,7 @@ Edit the route or its docstring, then regenerate; do not edit this section by ha
 | POST | `/api/creator-production/source-evidence` | Update creator source evidence |
 | POST | `/api/creator-production/studio/edits` | Apply creator studio edits |
 | POST | `/api/creator-production/studio/handoff` | Create creator studio handoff |
+| POST | `/api/creator-production/workflow-upgrade` | Upgrade creator production workflow |
 | GET | `/api/health` | Health |
 
 ## Storage and State

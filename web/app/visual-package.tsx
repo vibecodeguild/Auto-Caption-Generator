@@ -14,12 +14,14 @@ import {
   type SetStateAction,
 } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ChevronUp, Loader2, Pause, Play, RefreshCw, SkipBack } from "lucide-react";
+import { ChevronDown, ChevronUp, Loader2, Lock, LockOpen, Pause, Play, RefreshCw, SkipBack } from "lucide-react";
 import {
   assignmentPosterUrl,
   buildPlacementPreview,
   getVisualPackageStatus,
+  importPlacementImageDialog,
   placementPreviewCompositionUrl,
+  placementPreviewSourceUrl,
   runAssignment,
   runMasterbeater,
   runPlacement,
@@ -55,6 +57,10 @@ type HyperFramesPlayerElement = HTMLElement & {
   play: () => void;
   pause: () => void;
   seek: (time: number) => void;
+  /** hyperframes internal control bridge — wrapped at mount to pin the WebAudio-clock disable. */
+  _sendControl?: (action: string, payload?: Record<string, unknown>) => void;
+  /** Set once our _sendControl wrapper is installed (see the player ref callback). */
+  __vcgAudioClockPinned?: boolean;
 };
 
 const OBS_LAYOUT_IDS = [
@@ -908,6 +914,20 @@ export default function VisualPackageWorkspace({
   const [runtimeReady, setRuntimeReady] = useState(false);
   /** Absolute locked-cut frame of the active Stage 3 playhead (source or live composition). */
   const [playheadFrame, setPlayheadFrame] = useState(0);
+  /** Display-only mirror of the craft panel's draft lines so reveal ticks track live edits. */
+  const [draftPlacementLines, setDraftPlacementLines] = useState<PlacementLine[] | null>(null);
+  /** Live Ends draft so the progress rail can mark graphic undock without waiting for autosave. */
+  const [draftPlacementEndFrame, setDraftPlacementEndFrame] = useState<number | null>(null);
+
+  // Drop live draft mirrors when leaving a beat so the rail never ticks with stale Ends.
+  useEffect(() => {
+    setDraftPlacementLines(null);
+    setDraftPlacementEndFrame(null);
+  }, [selectedId]);
+  /** App audio is buffered enough to play the whole beat without hitting the cliff. */
+  const [previewAudioReady, setPreviewAudioReady] = useState(false);
+  /** Stall watchdog bookkeeping — last observed frame and when it last changed. */
+  const stallRef = useRef({ frame: -1, changedAt: 0 });
   /** Drag-select anchor only — does not commit selection until the pointer moves or click. */
   const dragAnchorRef = useRef<{
     zone: "gap" | "beat";
@@ -1504,9 +1524,97 @@ export default function VisualPackageWorkspace({
   );
 
   /**
+   * Stage 3 progress rail: end caps are always the *beat* span.
+   * Yellow ticks = line reveal frames + graphic Ends (when trimmed before beat end).
+   */
+  const beatProgress = useMemo(() => {
+    if (!stage3 || !selected) return null;
+    const pb = placementByBeat[selected.id];
+    const startFrame =
+      pb?.startFrame ?? placementPreview?.startFrame ?? selected.startFrame;
+    // Right end cap = natural beat end (not the trimmed graphic end).
+    const beatEndFrameExclusive =
+      selected.endFrameExclusive ??
+      (selected.endFrame != null ? selected.endFrame + 1 : undefined) ??
+      pb?.endFrameExclusive ??
+      placementPreview?.endFrameExclusive;
+    if (
+      startFrame == null ||
+      beatEndFrameExclusive == null ||
+      beatEndFrameExclusive <= startFrame
+    ) {
+      return null;
+    }
+    const lines = draftPlacementLines ?? pb?.lines ?? [];
+    const graphicEnd =
+      draftPlacementEndFrame ??
+      pb?.endFrameExclusive ??
+      placementPreview?.endFrameExclusive ??
+      null;
+    return {
+      startFrame,
+      endFrameExclusive: beatEndFrameExclusive,
+      revealFrames: lines
+        .map((line) => line.revealFrame)
+        .filter((frame): frame is number => Number.isFinite(frame)),
+      graphicEndFrame:
+        graphicEnd != null &&
+        Number.isFinite(graphicEnd) &&
+        graphicEnd > startFrame &&
+        graphicEnd < beatEndFrameExclusive
+          ? graphicEnd
+          : null,
+    };
+  }, [
+    stage3,
+    selected,
+    placementByBeat,
+    placementPreview,
+    draftPlacementLines,
+    draftPlacementEndFrame,
+  ]);
+
+  /**
    * Simple Stage 3 transport — same pattern as visual-production:
    * mount player once per composition, play/pause/seek only. No remount thrash.
    */
+  /**
+   * Stage 3 speech audio is an app-owned <audio> element, NOT part of the composition.
+   * The HyperFrames transport derives its master clock from in-composition audio and
+   * can pin (freeze) on it mid-play; preview compositions are built without #main-audio
+   * so the runtime clock is pure monotonic time. This element mirrors the player:
+   * drift-corrected on timeupdate, played/paused/seeked alongside the transport.
+   */
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const syncPreviewAudio = useCallback(
+    (localSec: number, action?: "play" | "pause") => {
+      const audio = previewAudioRef.current;
+      if (!audio) return;
+      try {
+        // Never seek a still-buffering element (readyState < HAVE_FUTURE_DATA):
+        // each seek restarts its fetch, which starves it into a permanent stall.
+        if (
+          Number.isFinite(localSec) &&
+          audio.readyState >= 3 &&
+          Math.abs(audio.currentTime - localSec) > 0.12
+        ) {
+          audio.currentTime = Math.max(0, localSec);
+        }
+        if (action === "play" && audio.paused) {
+          void audio.play().catch((error: unknown) => {
+            // Surface the reason (autoplay policy, decode, fetch) instead of silent mute.
+            console.warn("[visual-package] preview audio failed to start:", error);
+          });
+        } else if (action === "pause" && !audio.paused) {
+          audio.pause();
+        }
+      } catch {
+        /* audio is best-effort — never block the visual transport */
+      }
+    },
+    [],
+  );
+
   const stopStage3Preview = useCallback(() => {
     const player = runtimePlayerRef.current;
     try {
@@ -1514,8 +1622,9 @@ export default function VisualPackageWorkspace({
     } catch {
       /* ignore */
     }
+    syncPreviewAudio(Number.NaN, "pause");
     setPlaying(false);
-  }, []);
+  }, [syncPreviewAudio]);
 
   const playStage3Preview = useCallback(() => {
     const player = runtimePlayerRef.current;
@@ -1526,16 +1635,18 @@ export default function VisualPackageWorkspace({
         0.05,
         Number(player.duration) || Number(placementPreview?.durationSec) || 0.05,
       );
-      const t = Number(player.currentTime) || 0;
+      let t = Number(player.currentTime) || 0;
       if (t >= duration - 0.12 || t < 0) {
         player.seek(0);
+        t = 0;
       }
       player.play();
+      syncPreviewAudio(t, "play");
       setPlaying(true);
     } catch {
       setPlaying(false);
     }
-  }, [placementPreview?.durationSec]);
+  }, [placementPreview?.durationSec, syncPreviewAudio]);
 
   const seekToBeat = useCallback(
     (beat: MasterbeaterBeat, autoplay: boolean) => {
@@ -1549,9 +1660,11 @@ export default function VisualPackageWorkspace({
           player.seek(0);
           if (autoplay) {
             player.play();
+            syncPreviewAudio(0, "play");
             setPlaying(true);
           } else {
             player.pause();
+            syncPreviewAudio(0, "pause");
             setPlaying(false);
           }
         } catch {
@@ -1575,7 +1688,7 @@ export default function VisualPackageWorkspace({
       if (video.readyState >= 1) apply();
       else video.addEventListener("loadedmetadata", apply, { once: true });
     },
-    [fps, placementPreview, stage3],
+    [fps, placementPreview, stage3, syncPreviewAudio],
   );
 
   const selectBeat = useCallback(
@@ -1643,9 +1756,11 @@ export default function VisualPackageWorkspace({
           player.seek(local);
           if (autoplay) {
             player.play();
+            syncPreviewAudio(local, "play");
             setPlaying(true);
           } else {
             player.pause();
+            syncPreviewAudio(local, "pause");
             setPlaying(false);
           }
         } catch {
@@ -1660,7 +1775,7 @@ export default function VisualPackageWorkspace({
       setPlaying(false);
       video.currentTime = Math.max(0, absSec);
     },
-    [fps, placementPreview, stage3LivePreview],
+    [fps, placementPreview, stage3LivePreview, syncPreviewAudio],
   );
 
   const refreshPlacementPreview = useCallback(
@@ -1668,6 +1783,9 @@ export default function VisualPackageWorkspace({
       beatId: string,
       draft?: {
         lines?: PlacementLine[];
+        meta?: Record<string, unknown>;
+        assets?: Record<string, unknown>;
+        endFrameExclusive?: number;
         force?: boolean;
       },
     ) => {
@@ -1675,10 +1793,19 @@ export default function VisualPackageWorkspace({
       const gen = ++placementPreviewGen.current;
       setPlacementPreviewBusy(true);
       setPlacementPreviewError(null);
+      // Unmount the live player + app audio before the server rewrites the
+      // HyperFrames workspace. Leaving source.mp4 open on Windows causes
+      // WinError 32 when the next build tries to clear the same fingerprint dir.
+      setPlacementPreview(null);
+      setRuntimeReady(false);
+      setPlaying(false);
       try {
         const data = await buildPlacementPreview({
           beatId,
           lines: draft?.lines,
+          meta: draft?.meta,
+          assets: draft?.assets,
+          endFrameExclusive: draft?.endFrameExclusive,
           force: draft?.force,
         });
         if (gen !== placementPreviewGen.current) return;
@@ -1761,6 +1888,8 @@ export default function VisualPackageWorkspace({
   }, []);
 
   const selectedPlacement = selectedId ? placementByBeat[selectedId] : undefined;
+  // Include assets/meta/motion — image + span end changes must rebuild preview, not
+  // only line/frame edits (those alone left a stale HyperFrames cache on screen).
   const selectedPlacementKey = selectedPlacement
     ? [
         selectedPlacement.beatId,
@@ -1769,10 +1898,13 @@ export default function VisualPackageWorkspace({
         selectedPlacement.startFrame ?? "",
         selectedPlacement.endFrameExclusive ?? "",
         JSON.stringify(selectedPlacement.lines || []),
+        JSON.stringify(selectedPlacement.meta || {}),
+        JSON.stringify(selectedPlacement.assets || {}),
+        JSON.stringify(selectedPlacement.motion || {}),
       ].join("|")
     : "";
 
-  // Build live Tier B when Stage 3 selects a placed beat (or its saved lines change).
+  // Build live Tier B when Stage 3 selects a placed beat (or its saved craft changes).
   useEffect(() => {
     if (!stage3) {
       setPlacementPreview(null);
@@ -1797,19 +1929,28 @@ export default function VisualPackageWorkspace({
       return;
     }
     setPlaying(false);
-    void refreshPlacementPreview(selectedId);
-    // selectedPlacementKey captures line/lock changes without object identity thrash.
+    // Always send the full craft bag + force so engine-code fixes (previewRecipe)
+    // and image / end-frame edits cannot leave an old GSAP timeline on screen.
+    void refreshPlacementPreview(selectedId, {
+      lines: selectedPlacement.lines,
+      meta: (selectedPlacement.meta || {}) as Record<string, unknown>,
+      assets: (selectedPlacement.assets || {}) as Record<string, unknown>,
+      force: true,
+    });
+    // selectedPlacementKey captures craft changes without object identity thrash.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage3, selectedId, selectedPlacementKey, refreshPlacementPreview]);
 
-  // Simple HF player wiring — mount once per cacheKey, native loop, no remount thrash.
+  // Simple HF player wiring — mount once per cacheKey. No native loop: the live
+  // preview plays a beat ONCE per click (loop wraps re-seek media mid-flight and
+  // were implicated in transport stalls; one-shot keeps the pipeline simple).
   useEffect(() => {
     if (!stage3LivePreview) return;
     const player = runtimePlayerRef.current;
     if (!player || !runtimeScriptReady) return;
 
     try {
-      player.loop = loopBeat;
+      player.loop = false;
     } catch {
       /* ignore */
     }
@@ -1817,33 +1958,70 @@ export default function VisualPackageWorkspace({
     const onReady = () => {
       setRuntimeReady(true);
       try {
-        player.loop = loopBeat;
+        player.loop = false;
         player.seek(0);
       } catch {
         /* ignore */
       }
+      // The runtime's WebAudio transport can pin the master clock to a suspended
+      // AudioContext ~0.6s after play (composition iframe is cross-origin, so it
+      // may never get user activation) — playback then freezes mid-beat while
+      // still reporting "playing". Force the native audio-element clock instead,
+      // same configuration the slideshow player ships with. Must be sent after
+      // ready: the player's own _replayBridgeState resets this flag on ready.
+      try {
+        player._sendControl?.("set-web-audio-media-disabled", { disabled: true });
+      } catch {
+        /* ignore */
+      }
       setPlayheadFrame(Math.round(compositionRangeStartSec * fps));
-      setPlaying(false);
+      // "ready" can late-fire after the user already hit Play (Play arms on audio
+      // buffering, not player readiness) — never kill a run that's in flight.
+      if (player.paused) {
+        syncPreviewAudio(0, "pause");
+        setPlaying(false);
+      }
     };
     const onTimeUpdate = (event: Event) => {
       const detail = (event as CustomEvent<{ currentTime?: number }>).detail;
       const local = Number.isFinite(detail?.currentTime)
         ? Number(detail?.currentTime)
         : Number(player.currentTime) || 0;
-      setPlayheadFrame(Math.round((local + compositionRangeStartSec) * fps));
-    };
-    const onPlay = () => setPlaying(true);
-    const onPause = () => setPlaying(false);
-    const onEnded = () => {
-      // Native loop restarts via player.loop; we only clear UI when loop is off.
-      if (!loopBeat) {
-        setPlaying(false);
-        try {
-          player.seek(0);
-        } catch {
-          /* ignore */
-        }
+      const frame = Math.round((local + compositionRangeStartSec) * fps);
+      if (frame !== stallRef.current.frame) {
+        stallRef.current.frame = frame;
+        stallRef.current.changedAt = performance.now();
       }
+      // Keep the app-owned speech audio glued to the transport (loop wraps included).
+      syncPreviewAudio(local);
+      setPlayheadFrame(frame);
+    };
+    const onPlay = () => {
+      // Re-assert on every play: transport restarts must keep the fragile
+      // WebAudio clock off for the whole session (see onReady).
+      try {
+        player._sendControl?.("set-web-audio-media-disabled", { disabled: true });
+      } catch {
+        /* ignore */
+      }
+      stallRef.current.changedAt = performance.now();
+      syncPreviewAudio(Number(player.currentTime) || 0, "play");
+      setPlaying(true);
+    };
+    const onPause = () => {
+      syncPreviewAudio(Number.NaN, "pause");
+      setPlaying(false);
+    };
+    const onEnded = () => {
+      // One-shot playback: stop at the end, rewind, wait for the next click.
+      syncPreviewAudio(Number.NaN, "pause");
+      setPlaying(false);
+      try {
+        player.seek(0);
+      } catch {
+        /* ignore */
+      }
+      syncPreviewAudio(0);
     };
 
     player.addEventListener("ready", onReady);
@@ -1865,8 +2043,39 @@ export default function VisualPackageWorkspace({
     placementPreview?.cacheKey,
     fps,
     compositionRangeStartSec,
-    loopBeat,
+    syncPreviewAudio,
   ]);
+
+  /**
+   * Stall watchdog — detection only, no auto-recovery. If the playhead stops
+   * advancing for ~1.5s while "playing", stop cleanly and log. Automatic
+   * pause/seek/play + remount cycles fought the stall and made the window jank
+   * worse; a clean stop leaves the user one click from trying again.
+   */
+  useEffect(() => {
+    if (!playing || !stage3LivePreview) return;
+    stallRef.current.changedAt = performance.now();
+    const timer = window.setInterval(() => {
+      const state = stallRef.current;
+      const now = performance.now();
+      // Hidden tab: rAF (and therefore the transport clock) is legitimately parked.
+      if (document.hidden) {
+        state.changedAt = now;
+        return;
+      }
+      if (now - state.changedAt < 1500) return;
+      console.warn("[visual-package] live preview stalled — stopping (no auto-recovery)");
+      const player = runtimePlayerRef.current;
+      try {
+        player?.pause();
+      } catch {
+        /* ignore */
+      }
+      syncPreviewAudio(Number.NaN, "pause");
+      setPlaying(false);
+    }, 400);
+    return () => window.clearInterval(timer);
+  }, [playing, stage3LivePreview, syncPreviewAudio]);
 
   /**
    * Beats to step through in Stage 2/3 transport.
@@ -1891,10 +2100,10 @@ export default function VisualPackageWorkspace({
       const nextIndex = Math.min(reviewBeats.length - 1, Math.max(0, index + delta));
       const next = reviewBeats[nextIndex];
       if (!next) return;
-      // Seek (and play only if Autoplay on select is on).
-      selectBeat(next, autoplayOnSelect);
+      // Stage 3 has no Autoplay pill: stepping just navigates; Play is explicit.
+      selectBeat(next, stage3 ? false : autoplayOnSelect);
     },
-    [reviewBeats, selectedId, autoplayOnSelect, selectBeat],
+    [reviewBeats, selectedId, autoplayOnSelect, selectBeat, stage3],
   );
 
   // Keyboard: ← / → (and j / k) step beats during Stage 2 layout review.
@@ -2072,36 +2281,55 @@ export default function VisualPackageWorkspace({
     }
   };
 
+  /** Saves run through a queue (never dropped) so rapid autosaves serialize safely. */
+  const placementSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const onSavePlacement = useCallback(
-    async (beatId: string, patch: {
+    (beatId: string, patch: {
       lines?: PlacementLine[];
+      meta?: Record<string, unknown>;
+      assets?: Record<string, unknown>;
+      endFrameExclusive?: number;
       locked?: boolean;
       detail?: string;
     }) => {
-      if (busy) return;
-      setBusy(true);
-      try {
-        const data = await savePlacementBeat({ beatId, ...patch });
-        await refresh();
-        if (patch.locked === true) {
-          setMessage(`Locked ${beatId}.`);
-        } else if (patch.locked === false) {
-          setMessage(`Unlocked ${beatId}.`);
-        } else {
-          setMessage(`Saved placement on ${beatId}.`);
+      const quiet = Boolean(patch.detail?.endsWith("(auto)"));
+      const run = async () => {
+        setBusy(true);
+        try {
+          const data = await savePlacementBeat({ beatId, ...patch });
+          await refresh();
+          if (!quiet) {
+            if (patch.locked === true) {
+              setMessage(`Locked ${beatId}.`);
+            } else if (patch.locked === false) {
+              setMessage(`Unlocked ${beatId}.`);
+            } else {
+              setMessage(`Saved placement on ${beatId}.`);
+            }
+            if (data.finalRenderReady) {
+              setMessage((m) => `${m} All beats locked — Final is ready.`);
+            }
+          }
+          // Refresh live Tier B from saved rows. Autosaves reuse the fingerprint
+          // cache (no force) — only lock/unlock forces a rebuild.
+          void refreshPlacementPreview(beatId, {
+            lines: patch.lines,
+            meta: patch.meta,
+            assets: patch.assets,
+            endFrameExclusive: patch.endFrameExclusive,
+            force: patch.locked !== undefined,
+          });
+        } catch (error) {
+          setMessage(error instanceof Error ? error.message : "Could not save placement.");
+        } finally {
+          setBusy(false);
         }
-        if (data.finalRenderReady) {
-          setMessage((m) => `${m} All beats locked — Final is ready.`);
-        }
-        // Refresh live Tier B from saved rows (useEffect also fires on key change).
-        void refreshPlacementPreview(beatId, { lines: patch.lines, force: true });
-      } catch (error) {
-        setMessage(error instanceof Error ? error.message : "Could not save placement.");
-      } finally {
-        setBusy(false);
-      }
+      };
+      const next = placementSaveQueue.current.then(run, run);
+      placementSaveQueue.current = next;
+      return next;
     },
-    [busy, refresh, refreshPlacementPreview],
+    [refresh, refreshPlacementPreview],
   );
 
   const rail = (
@@ -2258,12 +2486,182 @@ export default function VisualPackageWorkspace({
   const hasBeats = Boolean(result && (result.beatCount || beats.length));
   const hasTranscript = transcriptWords.length > 0;
 
+  /** Shared transport buttons — right panel in Stage 1/2, craft panel in Stage 3. */
+  const playerTransportControls = (
+    <div className="visual-package-player-controls">
+      <button
+        type="button"
+        className="workflow-action"
+        onClick={() => stepBeat(-1)}
+        disabled={!reviewBeats.length || reviewIndex <= 0}
+      >
+        ← Prev
+      </button>
+      <button
+        type="button"
+        className="workflow-action emphasized"
+        onClick={togglePlay}
+        disabled={
+          !selected ||
+          !(status?.reviewVideoExists || stage3LivePreview) ||
+          (stage3LivePreview && !previewAudioReady)
+        }
+        title={
+          stage3LivePreview && !previewAudioReady
+            ? "Buffering this beat's media — Play arms in a moment"
+            : undefined
+        }
+      >
+        {stage3LivePreview && !previewAudioReady ? (
+          <>
+            <Loader2 size={16} className="spin" /> Buffering…
+          </>
+        ) : (
+          <>
+            {playing ? <Pause size={16} /> : <Play size={16} />}
+            {playing ? "Pause" : "Play"}
+          </>
+        )}
+      </button>
+      {/* Stage 3 is one-shot (auto-rewinds at end; Play restarts) — Reset is Stage 1/2 only. */}
+      {stage3 ? null : (
+        <button
+          type="button"
+          className="workflow-action"
+          onClick={() => {
+            if (!selected) return;
+            seekToBeat(selected, false);
+          }}
+          disabled={!selected}
+          title="Reset to beat start"
+        >
+          <SkipBack size={16} /> Reset
+        </button>
+      )}
+      <button
+        type="button"
+        className="workflow-action"
+        onClick={() => stepBeat(1)}
+        disabled={
+          !reviewBeats.length ||
+          reviewIndex < 0 ||
+          reviewIndex >= reviewBeats.length - 1
+        }
+      >
+        Next →
+      </button>
+      {/* Stage 3: Lock rides the transport row, far right. */}
+      {stage3 && selected && placementByBeat[selected.id] ? (
+        placementByBeat[selected.id].locked ? (
+          <button
+            type="button"
+            className="workflow-action visual-package-transport-lock"
+            disabled={busy}
+            onClick={() => void onSavePlacement(selected.id, { locked: false, detail: "unlock" })}
+          >
+            Unlock
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="workflow-action visual-package-placement-lock visual-package-transport-lock"
+            disabled={busy}
+            onClick={() =>
+              void onSavePlacement(selected.id, {
+                lines: draftPlacementLines ?? placementByBeat[selected.id].lines ?? [],
+                locked: true,
+                detail: "lock",
+              })
+            }
+          >
+            Lock
+          </button>
+        )
+      ) : null}
+      {/* Stage 3 is one-shot playback — Loop/Autoplay pills are Stage 1/2 only. */}
+      {stage3 ? null : (
+        <>
+          <button
+            type="button"
+            className={["visual-package-toggle", loopBeat ? "is-on" : ""].join(" ")}
+            role="switch"
+            aria-checked={loopBeat}
+            onClick={() => setLoopBeat((value) => !value)}
+            title="Loop the selected beat"
+          >
+            <span className="visual-package-toggle-track" aria-hidden>
+              <span className="visual-package-toggle-thumb" />
+            </span>
+            Loop
+          </button>
+          <button
+            type="button"
+            className={["visual-package-toggle", autoplayOnSelect ? "is-on" : ""].join(" ")}
+            role="switch"
+            aria-checked={autoplayOnSelect}
+            title="Play the beat span when you click a card"
+            onClick={() => setAutoplayOnSelect((value) => !value)}
+          >
+            <span className="visual-package-toggle-track" aria-hidden>
+              <span className="visual-package-toggle-thumb" />
+            </span>
+            Autoplay
+          </button>
+        </>
+      )}
+    </div>
+  );
+
+  /** Stage 3: full transport cluster (progress rail + readout + buttons) rendered
+   *  inside the craft panel, directly under the reveal-timing nudges (mockup). */
+  const stage3TransportCluster =
+    stage3 && selected ? (
+      <div className="visual-package-placement-transport-cluster">
+        {beatProgress ? (
+          <PlacementBeatProgress
+            startFrame={beatProgress.startFrame}
+            endFrameExclusive={beatProgress.endFrameExclusive}
+            playheadFrame={playheadFrame}
+            revealFrames={beatProgress.revealFrames}
+            graphicEndFrame={beatProgress.graphicEndFrame}
+          />
+        ) : null}
+        <div className="visual-package-placement-transport-readout" aria-live="polite">
+          <span className="visual-package-placement-clock">
+            {formatClock(playheadFrame / Math.max(fps, 1))}
+          </span>
+          <span className="muted">f {playheadFrame}</span>
+          {stage3LivePreview && placementPreview ? (
+            <>
+              <span className="muted">·</span>
+              <span className="visual-package-placement-local-time">
+                {formatClock(
+                  Math.max(
+                    0,
+                    playheadFrame / Math.max(fps, 1) - compositionRangeStartSec,
+                  ),
+                )}
+                {" / "}
+                {formatClock(compositionDurationSec)}
+              </span>
+              <span className="muted">clip</span>
+            </>
+          ) : null}
+          {placementPreview?.startFrame != null &&
+          placementPreview?.endFrameExclusive != null ? (
+            <span className="muted">
+              · beat f {placementPreview.startFrame}–{placementPreview.endFrameExclusive}
+            </span>
+          ) : null}
+        </div>
+        {playerTransportControls}
+      </div>
+    ) : null;
+
   return (
     <div className="visual-package-workspace">
       {railHost ? createPortal(rail, railHost) : null}
       {!railHost ? <div className="visual-package-rail-fallback">{rail}</div> : null}
-
-      {message ? <p className="visual-package-message">{message}</p> : null}
 
       {activeStage > 3 ? (
         <section className="visual-package-stage-body">
@@ -2307,7 +2705,6 @@ export default function VisualPackageWorkspace({
                   : []
               }
               fps={fps}
-              playheadFrame={playheadFrame}
               busy={busy}
               previewBusy={placementPreviewBusy}
               hasPlacements={Boolean(placement?.originalExists)}
@@ -2320,11 +2717,18 @@ export default function VisualPackageWorkspace({
                 void onSavePlacement(selected.id, patch);
               }}
               onSeekReveal={(frame) => seekAbsoluteFrame(frame, false)}
-              onPinPlayhead={(frame) => seekAbsoluteFrame(frame, false)}
-              onDraftPreview={(lines) => {
+              onDraftPreview={(lines, extras) => {
                 if (!selected) return;
-                void refreshPlacementPreview(selected.id, { lines });
+                void refreshPlacementPreview(selected.id, {
+                  lines,
+                  meta: extras?.meta,
+                  assets: extras?.assets,
+                  endFrameExclusive: extras?.endFrameExclusive,
+                });
               }}
+              onLinesChange={setDraftPlacementLines}
+              onEndFrameChange={setDraftPlacementEndFrame}
+              transportSlot={stage3TransportCluster}
             />
           ) : null}
 
@@ -2342,7 +2746,25 @@ export default function VisualPackageWorkspace({
                     runtimePlayerRef.current = element;
                     if (element) {
                       try {
-                        element.loop = loopBeat;
+                        element.loop = false;
+                      } catch {
+                        /* ignore */
+                      }
+                      // Pin the WebAudio-clock disable at the message channel. The player's
+                      // own _replayBridgeState re-sends disabled:false AFTER dispatching
+                      // "ready" (and again on runtime-ready), clobbering any one-shot
+                      // disable we send from event handlers — that race was the freeze
+                      // flakiness. Wrapping _sendControl rewrites every replay in flight,
+                      // so the fragile AudioContext clock can never re-arm.
+                      try {
+                        if (element._sendControl && !element.__vcgAudioClockPinned) {
+                          const original = element._sendControl.bind(element);
+                          element._sendControl = (action, payload) =>
+                            action === "set-web-audio-media-disabled"
+                              ? original(action, { disabled: true })
+                              : original(action, payload);
+                          element.__vcgAudioClockPinned = true;
+                        }
                       } catch {
                         /* ignore */
                       }
@@ -2351,7 +2773,6 @@ export default function VisualPackageWorkspace({
                   className: "visual-package-video visual-package-hyperframes-player",
                   src: placementPreviewCompositionUrl(placementPreview.cacheKey),
                   controls: false,
-                  ...(loopBeat ? { loop: "" } : {}),
                   width: placementPreview.width || 1920,
                   height: placementPreview.height || 1080,
                 })
@@ -2375,6 +2796,21 @@ export default function VisualPackageWorkspace({
                   No review video (locked cut / source). Export a locked cut if needed.
                 </div>
               )}
+              {stage3 && placementPreview?.cacheKey ? (
+                // Speech audio for the live preview — the composition itself is
+                // audio-free so the HyperFrames clock can never pin on it.
+                <audio
+                  ref={previewAudioRef}
+                  key={`preview-audio:${placementPreview.cacheKey}`}
+                  src={placementPreviewSourceUrl(placementPreview.cacheKey)}
+                  preload="auto"
+                  style={{ display: "none" }}
+                  onLoadStart={() => setPreviewAudioReady(false)}
+                  onCanPlayThrough={() => setPreviewAudioReady(true)}
+                  // Broken audio must never block the visual preview — play silent.
+                  onError={() => setPreviewAudioReady(true)}
+                />
+              ) : null}
               {stage3 && placementPreviewBusy ? (
                 <div className="visual-package-preview-busy" aria-live="polite">
                   <Loader2 size={16} className="spin" /> Building live graphic…
@@ -2409,123 +2845,51 @@ export default function VisualPackageWorkspace({
               ) : null}
             </div>
 
-            {stage3 && selected ? (
-              <div className="visual-package-placement-transport-readout" aria-live="polite">
-                <span className="visual-package-placement-clock">
-                  {formatClock(playheadFrame / Math.max(fps, 1))}
-                </span>
-                <span className="muted">f {playheadFrame}</span>
-                {stage3LivePreview && placementPreview ? (
-                  <>
-                    <span className="muted">·</span>
-                    <span className="visual-package-placement-local-time">
-                      {formatClock(
-                        Math.max(
-                          0,
-                          playheadFrame / Math.max(fps, 1) - compositionRangeStartSec,
-                        ),
-                      )}
-                      {" / "}
-                      {formatClock(compositionDurationSec)}
-                    </span>
-                    <span className="muted">clip</span>
-                  </>
-                ) : null}
-                {placementPreview?.startFrame != null &&
-                placementPreview?.endFrameExclusive != null ? (
-                  <span className="muted">
-                    · beat f {placementPreview.startFrame}–{placementPreview.endFrameExclusive}
-                  </span>
-                ) : null}
-              </div>
-            ) : null}
+            {/* Stage 3: graphic identity (poster + name + layout/status) under the player. */}
+            {stage3 && selected ? (() => {
+              const pb = placementByBeat[selected.id];
+              const ap = assignmentByBeat[selected.id];
+              const graphicPoster = assignmentPosterUrl(ap?.posterUrl || null);
+              const graphicName =
+                pb?.displayName || pb?.engineId || ap?.displayName || ap?.engineId || "—";
+              const graphicLayout = ap?.layoutId || null;
+              return (
+                <div className="visual-package-placement-graphic-card">
+                  <div className="visual-package-assignment-poster-wrap compact">
+                    {graphicPoster ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        className="visual-package-assignment-poster"
+                        src={graphicPoster}
+                        alt={graphicName}
+                      />
+                    ) : (
+                      <div className="visual-package-assignment-poster-empty" aria-hidden>
+                        —
+                      </div>
+                    )}
+                  </div>
+                  <div className="visual-package-placement-graphic-meta">
+                    <span className="visual-package-assignment-name">{graphicName}</span>
+                    {graphicLayout ? (
+                      <span className="visual-package-placement-layout-pill">
+                        {graphicLayout.replace(/-/g, " ")}
+                      </span>
+                    ) : null}
+                    {pb?.locked ? (
+                      <span className="visual-package-assignment-source">Locked</span>
+                    ) : pb ? (
+                      <span className="visual-package-assignment-source muted">
+                        {placementPreview?.available ? "Editing · live" : "Editing"}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })() : null}
 
-            <div className="visual-package-player-controls">
-              <button
-                type="button"
-                className="workflow-action"
-                onClick={() => stepBeat(-1)}
-                disabled={!reviewBeats.length || reviewIndex <= 0}
-              >
-                ← Prev
-              </button>
-              <button
-                type="button"
-                className="workflow-action emphasized"
-                onClick={togglePlay}
-                disabled={
-                  !selected ||
-                  !(status?.reviewVideoExists || stage3LivePreview)
-                }
-              >
-                {playing ? <Pause size={16} /> : <Play size={16} />}
-                {playing ? "Pause" : "Play"}
-              </button>
-              <button
-                type="button"
-                className="workflow-action"
-                onClick={() => {
-                  if (!selected) return;
-                  if (stage3LivePreview && runtimePlayerRef.current) {
-                    stopStage3Preview();
-                    try {
-                      runtimePlayerRef.current.seek(0);
-                    } catch {
-                      /* ignore */
-                    }
-                    setPlayheadFrame(Math.round(compositionRangeStartSec * fps));
-                    return;
-                  }
-                  seekToBeat(selected, false);
-                }}
-                disabled={!selected}
-                title={stage3 ? "Seek this beat preview to the start" : "Reset to beat start"}
-              >
-                <SkipBack size={16} /> Reset
-              </button>
-              <button
-                type="button"
-                className="workflow-action"
-                onClick={() => stepBeat(1)}
-                disabled={
-                  !reviewBeats.length ||
-                  reviewIndex < 0 ||
-                  reviewIndex >= reviewBeats.length - 1
-                }
-              >
-                Next →
-              </button>
-              <button
-                type="button"
-                className={["visual-package-toggle", loopBeat ? "is-on" : ""].join(" ")}
-                role="switch"
-                aria-checked={loopBeat}
-                onClick={() => setLoopBeat((value) => !value)}
-                title={stage3 ? "Loop this beat’s live preview clip" : "Loop the selected beat"}
-              >
-                <span className="visual-package-toggle-track" aria-hidden>
-                  <span className="visual-package-toggle-thumb" />
-                </span>
-                Loop
-              </button>
-              <button
-                type="button"
-                className={["visual-package-toggle", autoplayOnSelect ? "is-on" : ""].join(" ")}
-                role="switch"
-                aria-checked={autoplayOnSelect}
-                title={
-                  stage3
-                    ? "Auto-play when stepping to the next beat"
-                    : "Play the beat span when you click a card"
-                }
-                onClick={() => setAutoplayOnSelect((value) => !value)}
-              >
-                <span className="visual-package-toggle-track" aria-hidden>
-                  <span className="visual-package-toggle-thumb" />
-                </span>
-                Autoplay
-              </button>
-            </div>
+            {/* Stage 3 moves the whole transport cluster into the craft panel. */}
+            {stage3 ? null : playerTransportControls}
 
             {stage2 ? (
               <div className="visual-package-layout-review" aria-label="Layout review">
@@ -3197,8 +3561,103 @@ export default function VisualPackageWorkspace({
           ) : null}
         </section>
       )}
+
+      {/* Status/error footer: fixed slot at the very bottom so appearing and
+          disappearing messages never shift the controls above. */}
+      <div className="visual-package-message-footer" aria-live="polite">
+        {message ? <p className="visual-package-message">{message}</p> : null}
+      </div>
     </div>
   );
+}
+
+/**
+ * Stage 3 beat progress rail under the preview.
+ * End caps = full beat span. Yellow ticks = line revealFrames + graphic Ends
+ * (when Ends is trimmed earlier than the beat). Fill tracks playheadFrame.
+ */
+function PlacementBeatProgress({
+  startFrame,
+  endFrameExclusive,
+  playheadFrame,
+  revealFrames,
+  graphicEndFrame = null,
+}: {
+  startFrame: number;
+  endFrameExclusive: number;
+  playheadFrame: number;
+  revealFrames: number[];
+  /** Placement graphic undock frame when earlier than beat end. */
+  graphicEndFrame?: number | null;
+}) {
+  const span = endFrameExclusive - startFrame;
+  const fraction = Math.max(0, Math.min(1, (playheadFrame - startFrame) / span));
+  const ticks: { frame: number; kind: "reveal" | "end"; key: string }[] = [];
+  for (const [index, frame] of revealFrames.entries()) {
+    if (frame >= startFrame && frame < endFrameExclusive) {
+      ticks.push({ frame, kind: "reveal", key: `reveal-${frame}-${index}` });
+    }
+  }
+  if (
+    graphicEndFrame != null &&
+    graphicEndFrame > startFrame &&
+    graphicEndFrame < endFrameExclusive
+  ) {
+    ticks.push({
+      frame: graphicEndFrame,
+      kind: "end",
+      key: `end-${graphicEndFrame}`,
+    });
+  }
+  return (
+    <div className="visual-package-beat-progress">
+      <span className="visual-package-beat-progress-endlabel">f {startFrame}</span>
+      <div className="visual-package-beat-progress-rail">
+        <div
+          className="visual-package-beat-progress-fill"
+          style={{ width: `${fraction * 100}%` }}
+        />
+        {ticks.map((tick) => (
+          <div
+            key={tick.key}
+            className={[
+              "visual-package-beat-progress-tick",
+              tick.kind === "end" ? "is-graphic-end" : "",
+            ].join(" ")}
+            style={{ left: `${((tick.frame - startFrame) / span) * 100}%` }}
+            title={
+              tick.kind === "end"
+                ? `graphic ends f ${tick.frame}`
+                : `reveal f ${tick.frame}`
+            }
+          />
+        ))}
+      </div>
+      <span className="visual-package-beat-progress-endlabel">f {endFrameExclusive}</span>
+    </div>
+  );
+}
+
+/** Meta knob drafts hold raw input strings; normalize (numbers, drop empties) at send time. */
+function normalizeKnobBag(bag: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(bag)) {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) continue;
+      out[key] = /^-?\d*\.?\d+$/.test(trimmed) ? Number(trimmed) : value;
+    } else if (value != null) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+/** Canonical content fingerprint for placement lines (field-order independent). */
+function linesFingerprint(lines: PlacementLine[]): string {
+  return lines
+    .map((line) => `${line.slot}\u0000${line.text}\u0000${line.revealFrame}`)
+    .join("\n");
 }
 
 /**
@@ -3212,7 +3671,6 @@ function PlacementEditorPanel({
   interfaceSpec,
   beatWords,
   fps,
-  playheadFrame,
   busy,
   previewBusy = false,
   hasPlacements,
@@ -3222,8 +3680,10 @@ function PlacementEditorPanel({
   livePreviewReady,
   onSave,
   onSeekReveal,
-  onPinPlayhead,
   onDraftPreview,
+  onLinesChange,
+  onEndFrameChange,
+  transportSlot,
 }: {
   selected: MasterbeaterBeat | null;
   placement?: PlacementBeat;
@@ -3232,10 +3692,12 @@ function PlacementEditorPanel({
     listSlot?: string | null;
     listMax?: number;
     notes?: string;
+    /** Engine-declared knobs (ENGINE_REGISTRY) — rendered generically, never hardcoded. */
+    metaKeys?: string[];
+    assetKeys?: string[];
   };
   beatWords: VisualPackageTranscriptWord[];
   fps: number;
-  playheadFrame: number;
   /** Place / Save / Lock in flight — may disable save actions. */
   busy: boolean;
   /** Live composition rebuild — must NOT block typing or frame nudges. */
@@ -3245,34 +3707,94 @@ function PlacementEditorPanel({
   beatIndex: number;
   beatTotal: number;
   livePreviewReady: boolean;
-  onSave: (patch: { lines?: PlacementLine[]; locked?: boolean; detail?: string }) => void;
+  onSave: (patch: {
+    lines?: PlacementLine[];
+    meta?: Record<string, unknown>;
+    assets?: Record<string, unknown>;
+    endFrameExclusive?: number;
+    locked?: boolean;
+    detail?: string;
+  }) => void;
   onSeekReveal: (frame: number) => void;
-  onPinPlayhead: (frame: number) => void;
-  onDraftPreview: (lines: PlacementLine[]) => void;
+  onDraftPreview: (
+    lines: PlacementLine[],
+    extras?: {
+      meta?: Record<string, unknown>;
+      assets?: Record<string, unknown>;
+      endFrameExclusive?: number;
+    },
+  ) => void;
+  /** Display-only mirror for the parent (progress rail ticks); not part of save/preview flow. */
+  onLinesChange?: (lines: PlacementLine[]) => void;
+  /** Live Ends draft for the progress rail graphic-end tick. */
+  onEndFrameChange?: (endFrameExclusive: number | null) => void;
+  /** Transport cluster (progress + readout + buttons) rendered under the nudges. */
+  transportSlot?: ReactNode;
 }) {
   const [draftLines, setDraftLines] = useState<PlacementLine[]>([]);
   const [armedIndex, setArmedIndex] = useState(0);
+  /** One armed target for the shared hero nudges: a line OR the graphic end frame. */
+  const [armedKind, setArmedKind] = useState<"line" | "end">("line");
+  /** Engine-declared knob drafts (meta/assets bags) — generic, driven by interfaceSpec. */
+  const [metaDraft, setMetaDraft] = useState<Record<string, unknown>>({});
+  const [assetsDraft, setAssetsDraft] = useState<Record<string, unknown>>({});
+  /** Graphic end frame (placement endFrameExclusive). Default = beat end. */
+  const [endFrameDraft, setEndFrameDraft] = useState<number | null>(null);
   const previewTimer = useRef<number | null>(null);
+  const autosaveTimer = useRef<number | null>(null);
+  /** Canonical fingerprint of the lines we last sent to the server (echo detection). */
+  const lastSentLines = useRef<string>("");
+  /** Last end frame we autosaved — skip clobber when server echoes our write. */
+  const lastSentEndFrame = useRef<number | null>(null);
+  /** Beat the draft currently mirrors — a change always forces a full re-sync. */
+  const prevBeatId = useRef<string | null>(null);
   const locked = Boolean(placement?.locked);
   /** Only re-sync draft from server when beat/lock/server lines actually change — not object identity. */
   const serverLinesKey = placement
-    ? `${placement.beatId}|${placement.locked ? "1" : "0"}|${JSON.stringify(placement.lines || [])}`
+    ? `${placement.beatId}|${placement.locked ? "1" : "0"}|${JSON.stringify(placement.lines || [])}|${placement.endFrameExclusive ?? ""}`
     : "";
 
   useEffect(() => {
     if (!placement) {
       setDraftLines([]);
       setArmedIndex(0);
+      setArmedKind("line");
+      setMetaDraft({});
+      setAssetsDraft({});
+      setEndFrameDraft(null);
+      lastSentLines.current = "";
+      lastSentEndFrame.current = null;
+      prevBeatId.current = null;
       return;
     }
-    setDraftLines(
-      (placement.lines || []).map((line) => ({
-        slot: line.slot,
-        text: line.text || "",
-        revealFrame: line.revealFrame ?? 0,
-      })),
-    );
-    setArmedIndex(0);
+    const beatChanged = placement.beatId !== prevBeatId.current;
+    prevBeatId.current = placement.beatId;
+    if (beatChanged) {
+      lastSentLines.current = "";
+      lastSentEndFrame.current = null;
+      setArmedKind("line");
+    }
+    const incoming = (placement.lines || []).map((line) => ({
+      slot: line.slot,
+      text: line.text || "",
+      revealFrame: line.revealFrame ?? 0,
+    }));
+    const serverEnd = Number(placement.endFrameExclusive ?? 0) || 0;
+    // Our own autosave echoing back must not clobber newer draft edits or
+    // reset the armed line — only real external changes (beat switch, re-Place,
+    // unlock reset) re-sync the draft.
+    const linesEcho = !beatChanged && linesFingerprint(incoming) === lastSentLines.current;
+    const endEcho = !beatChanged && lastSentEndFrame.current != null && serverEnd === lastSentEndFrame.current;
+    if (linesEcho && endEcho) return;
+    if (!linesEcho) {
+      setDraftLines(incoming);
+      if (beatChanged) setArmedIndex(0);
+    }
+    if (!endEcho || beatChanged) {
+      setEndFrameDraft(serverEnd > 0 ? serverEnd : null);
+    }
+    setMetaDraft({ ...(placement.meta || {}) });
+    setAssetsDraft({ ...(placement.assets || {}) });
     // serverLinesKey captures content; avoid placement.lines identity thrash mid-edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverLinesKey]);
@@ -3282,6 +3804,22 @@ function PlacementEditorPanel({
       if (previewTimer.current != null) window.clearTimeout(previewTimer.current);
     };
   }, []);
+
+  // Locking cancels any pending autosave — never write lines to a locked beat.
+  useEffect(() => {
+    if (locked && autosaveTimer.current != null) {
+      window.clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = null;
+    }
+  }, [locked]);
+
+  useEffect(() => {
+    onLinesChange?.(draftLines);
+  }, [draftLines, onLinesChange]);
+
+  useEffect(() => {
+    onEndFrameChange?.(endFrameDraft);
+  }, [endFrameDraft, onEndFrameChange]);
 
   // Prefer server interface; fall back to slot shape so list engines still edit if status lags.
   const listSlot =
@@ -3296,14 +3834,96 @@ function PlacementEditorPanel({
   const editDisabled = locked; // never block craft on preview rebuild
 
   const schedulePreview = useCallback(
-    (lines: PlacementLine[]) => {
+    (
+      lines: PlacementLine[],
+      knobs?: {
+        meta?: Record<string, unknown>;
+        assets?: Record<string, unknown>;
+        endFrameExclusive?: number;
+      },
+    ) => {
       if (locked) return;
+      const meta = normalizeKnobBag(knobs?.meta ?? metaDraft);
+      // Drop retired holdSec if it still sits in older placement meta bags.
+      delete meta.holdSec;
+      const assets = normalizeKnobBag(knobs?.assets ?? assetsDraft);
+      const endFrame =
+        knobs?.endFrameExclusive ??
+        endFrameDraft ??
+        placement?.endFrameExclusive ??
+        undefined;
       if (previewTimer.current != null) window.clearTimeout(previewTimer.current);
       previewTimer.current = window.setTimeout(() => {
-        onDraftPreview(lines);
+        onDraftPreview(lines, {
+          meta,
+          assets,
+          endFrameExclusive: endFrame,
+        });
       }, 450);
+      // Autosave the working copy shortly after the edit settles. The timeout
+      // closure captures this beat's onSave binding, so a save still in flight
+      // when the user steps to another beat lands on the right beat.
+      if (autosaveTimer.current != null) window.clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = window.setTimeout(() => {
+        lastSentLines.current = linesFingerprint(lines);
+        if (endFrame != null) lastSentEndFrame.current = endFrame;
+        onSave({
+          lines,
+          meta,
+          assets,
+          endFrameExclusive: endFrame,
+          detail: "edit lines (auto)",
+        });
+      }, 700);
     },
-    [locked, onDraftPreview],
+    [locked, onDraftPreview, onSave, metaDraft, assetsDraft, endFrameDraft, placement?.endFrameExclusive],
+  );
+
+  /** Knob edits (meta/assets) share the same debounce + autosave path as lines. */
+  const updateKnobs = useCallback(
+    (patch: { meta?: Record<string, unknown>; assets?: Record<string, unknown> }) => {
+      const nextMeta = patch.meta ?? metaDraft;
+      const nextAssets = patch.assets ?? assetsDraft;
+      if (patch.meta) setMetaDraft(patch.meta);
+      if (patch.assets) setAssetsDraft(patch.assets);
+      schedulePreview(draftLines, { meta: nextMeta, assets: nextAssets });
+    },
+    [metaDraft, assetsDraft, draftLines, schedulePreview],
+  );
+
+  /** Placement span end — when the graphic undocks back to full talking-head. */
+  const spanStartFrame = placement?.startFrame ?? selected?.startFrame ?? 0;
+  const beatEndFrame =
+    selected?.endFrameExclusive ??
+    (selected?.endFrame != null ? selected.endFrame + 1 : undefined) ??
+    placement?.endFrameExclusive ??
+    spanStartFrame + 1;
+  const minEndFrame = (() => {
+    const latestReveal = draftLines.reduce(
+      (max, line) => Math.max(max, Number(line.revealFrame) || 0),
+      spanStartFrame,
+    );
+    return Math.max(spanStartFrame + 1, latestReveal + 1);
+  })();
+
+  const setEndFrame = useCallback(
+    (raw: number) => {
+      if (locked) return;
+      const next = Math.max(minEndFrame, Math.min(beatEndFrame, Math.round(raw)));
+      setEndFrameDraft(next);
+      schedulePreview(draftLines, { endFrameExclusive: next });
+      // Seek to the last frame still inside the graphic (end is exclusive).
+      onSeekReveal(Math.max(spanStartFrame, next - 1));
+    },
+    [
+      locked,
+      minEndFrame,
+      beatEndFrame,
+      draftLines,
+      schedulePreview,
+      onSeekReveal,
+      spanStartFrame,
+    ],
   );
 
   const updateLine = (index: number, patch: Partial<PlacementLine>) => {
@@ -3314,32 +3934,77 @@ function PlacementEditorPanel({
     });
   };
 
+  const armLine = (index: number) => {
+    setArmedKind("line");
+    setArmedIndex(index);
+  };
+
+  const armEnd = () => {
+    setArmedKind("end");
+  };
+
+  /** Shared hero nudges — only the armed target moves (Title line OR Ends). */
   const nudgeArmed = (delta: number) => {
-    if (locked || !armed || armedIndex < 0) return;
-    const spanStart = placement?.startFrame ?? 0;
-    const spanEnd = (placement?.endFrameExclusive ?? spanStart + 1) - 1;
-    const nextFrame = Math.max(spanStart, Math.min(spanEnd, armed.revealFrame + delta));
+    if (locked) return;
+    if (armedKind === "end") {
+      if (endFrameDraft == null) return;
+      setEndFrame(endFrameDraft + delta);
+      return;
+    }
+    if (!armed || armedIndex < 0) return;
+    // Reveal must stay inside the graphic span (respect live Ends draft).
+    const spanEnd = (endFrameDraft ?? placement?.endFrameExclusive ?? spanStartFrame + 1) - 1;
+    const nextFrame = Math.max(spanStartFrame, Math.min(spanEnd, armed.revealFrame + delta));
     updateLine(armedIndex, { revealFrame: nextFrame });
     onSeekReveal(nextFrame);
   };
 
   const setArmedFrame = (frame: number) => {
-    if (locked || !armed || armedIndex < 0) return;
-    const spanStart = placement?.startFrame ?? 0;
-    const spanEnd = (placement?.endFrameExclusive ?? spanStart + 1) - 1;
-    const nextFrame = Math.max(spanStart, Math.min(spanEnd, Math.round(frame)));
+    if (locked) return;
+    if (armedKind === "end") {
+      setEndFrame(frame);
+      return;
+    }
+    if (!armed || armedIndex < 0) return;
+    const spanEnd = (endFrameDraft ?? placement?.endFrameExclusive ?? spanStartFrame + 1) - 1;
+    const nextFrame = Math.max(spanStartFrame, Math.min(spanEnd, Math.round(frame)));
     updateLine(armedIndex, { revealFrame: nextFrame });
     onSeekReveal(nextFrame);
   };
 
-  const pinArmedToPlayhead = () => {
-    if (locked || !armed) return;
-    setArmedFrame(playheadFrame);
-    onPinPlayhead(playheadFrame);
+  const heroFrameValue =
+    armedKind === "end" ? (endFrameDraft ?? "") : (armed?.revealFrame ?? "");
+  const heroCanNudge =
+    !editDisabled &&
+    (armedKind === "end" ? endFrameDraft != null : Boolean(armed));
+
+  const metaKeys = interfaceSpec?.metaKeys || [];
+  const assetKeys = interfaceSpec?.assetKeys || [];
+  /** "holdSec" → "Hold sec" — generic humanizer, no per-engine strings. */
+  const knobLabel = (key: string) =>
+    key
+      .replace(/([A-Z])/g, " $1")
+      .replace(/^./, (c) => c.toUpperCase())
+      .replace(/ Asset Id$/i, "");
+
+  const setMetaValue = (key: string, raw: string) => {
+    updateKnobs({ meta: { ...metaDraft, [key]: raw } });
+  };
+
+  const pickImageForKey = async (key: string) => {
+    try {
+      const result = await importPlacementImageDialog();
+      updateKnobs({ assets: { ...assetsDraft, [key]: result.assetId } });
+    } catch (error) {
+      // Cancelled dialog surfaces as a 400 — quiet; real failures still logged.
+      console.warn("[visual-package] image import:", error);
+    }
   };
 
   const setRevealFromWord = (word: VisualPackageTranscriptWord) => {
-    if (locked || !armed) return;
+    if (locked) return;
+    // Word chips always set the armed *line* reveal (not Ends).
+    if (armedKind !== "line" || !armed) return;
     const frame =
       word.startFrame != null && Number.isFinite(word.startFrame)
         ? Math.round(word.startFrame)
@@ -3387,14 +4052,6 @@ function PlacementEditorPanel({
     });
   };
 
-  const poster = assignmentPosterUrl(assignment?.posterUrl || null);
-  const engineLabel =
-    placement?.displayName ||
-    placement?.engineId ||
-    assignment?.displayName ||
-    assignment?.engineId ||
-    "—";
-  const layoutLabel = assignment?.layoutId || null;
   const positionLabel =
     beatTotal > 0 && beatIndex >= 0
       ? `${beatIndex + 1} of ${beatTotal}`
@@ -3417,49 +4074,42 @@ function PlacementEditorPanel({
     return slot || `Line ${index + 1}`;
   };
 
+  const heroTargetLabel =
+    armedKind === "end"
+      ? "Ends (undock)"
+      : armed
+        ? slotLabel(armed.slot, armedIndex)
+        : "arm a line or Ends";
+
   return (
+    <>
     <aside className="visual-package-placement-editor" aria-label="Placement craft panel">
       <header className="visual-package-placement-panel-head">
         <div className="visual-package-placement-panel-title-row">
           <h3 className="visual-package-placement-panel-title">
-            Placement
+            {selected?.beatType
+              ? selected.beatType.charAt(0).toUpperCase() + selected.beatType.slice(1)
+              : "Placement"}
             <span className="visual-package-placement-panel-beat">
               · beat {positionLabel}
             </span>
           </h3>
-          <div className="visual-package-assignment-poster-wrap compact">
-            {poster ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                className="visual-package-assignment-poster"
-                src={poster}
-                alt={engineLabel}
-              />
-            ) : (
-              <div className="visual-package-assignment-poster-empty" aria-hidden>
-                —
-              </div>
-            )}
-          </div>
+          {selected && placement ? (
+            <span
+              className="visual-package-placement-lock-indicator"
+              title={locked ? "Beat locked for the final render" : "Beat unlocked — editing"}
+              aria-label={locked ? "Locked" : "Unlocked"}
+            >
+              {locked ? <Lock size={20} /> : <LockOpen size={20} />}
+            </span>
+          ) : null}
         </div>
-        {selected && placement ? (
-          <div className="visual-package-placement-panel-meta">
-            {layoutLabel ? (
-              <span className="visual-package-placement-layout-pill">
-                {layoutLabel.replace(/-/g, " ")}
-              </span>
-            ) : null}
-            <span className="visual-package-assignment-name">{engineLabel}</span>
-            {locked ? (
-              <span className="visual-package-assignment-source">Locked</span>
-            ) : (
-              <span className="visual-package-assignment-source muted">
-                {livePreviewReady ? "Editing · live" : "Editing"}
-              </span>
-            )}
-          </div>
-        ) : null}
+        {/* Graphic poster + name moved below the video player (parent renders it). */}
       </header>
+
+      {/* Transport pinned directly under the header — fixed position across beats,
+          no matter how many line rows the engine below it has. */}
+      {transportSlot}
 
       {!hasPlacements ? (
         <p className="visual-package-layout-review-hint">
@@ -3479,7 +4129,7 @@ function PlacementEditorPanel({
             ) : (
               draftLines.map((line, index) => {
                 const isList = Boolean(listSlot && line.slot.startsWith(`${listSlot}.`));
-                const isArmed = index === armedIndex;
+                const isArmed = armedKind === "line" && index === armedIndex;
                 return (
                   <div
                     key={`${line.slot}-${index}`}
@@ -3488,7 +4138,7 @@ function PlacementEditorPanel({
                       "visual-package-placement-line-row",
                       isArmed ? "is-armed" : "",
                     ].join(" ")}
-                    onClick={() => setArmedIndex(index)}
+                    onClick={() => armLine(index)}
                   >
                     <span className="visual-package-placement-slot" title={line.slot}>
                       {slotLabel(line.slot, index)}
@@ -3498,7 +4148,7 @@ function PlacementEditorPanel({
                       type="text"
                       value={line.text}
                       disabled={editDisabled}
-                      onFocus={() => setArmedIndex(index)}
+                      onFocus={() => armLine(index)}
                       onChange={(e) => updateLine(index, { text: e.target.value })}
                       onClick={(e) => e.stopPropagation()}
                     />
@@ -3512,7 +4162,7 @@ function PlacementEditorPanel({
                       disabled={editDisabled}
                       onClick={(e) => {
                         e.stopPropagation();
-                        setArmedIndex(index);
+                        armLine(index);
                         onSeekReveal(line.revealFrame);
                       }}
                     >
@@ -3543,6 +4193,117 @@ function PlacementEditorPanel({
                 );
               })
             )}
+
+            {/* Ends is a peer of Title: click to arm, then use the shared hero nudges. */}
+            <div
+              role="listitem"
+              className={[
+                "visual-package-placement-line-row",
+                armedKind === "end" ? "is-armed" : "",
+              ].join(" ")}
+              onClick={() => {
+                armEnd();
+                if (endFrameDraft != null) {
+                  onSeekReveal(Math.max(spanStartFrame, endFrameDraft - 1));
+                }
+              }}
+            >
+              <span
+                className="visual-package-placement-slot"
+                title="Frame where the graphic undocks back to full talking-head"
+              >
+                Ends
+              </span>
+              <span className="visual-package-placement-end-hint">
+                {endFrameDraft != null && endFrameDraft < beatEndFrame
+                  ? `Undock before beat end (beat f ${beatEndFrame})`
+                  : "Undock at beat end (default)"}
+              </span>
+              <button
+                type="button"
+                className={[
+                  "visual-package-placement-line-frame",
+                  armedKind === "end" ? "is-armed" : "",
+                ].join(" ")}
+                title="Arm Ends and jump to undock"
+                disabled={editDisabled || endFrameDraft == null}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  armEnd();
+                  if (endFrameDraft != null) {
+                    onSeekReveal(Math.max(spanStartFrame, endFrameDraft - 1));
+                  }
+                }}
+              >
+                f {endFrameDraft ?? "—"}
+              </button>
+              {armedKind === "end" ? (
+                <span className="visual-package-placement-armed-check" aria-hidden>
+                  ✓
+                </span>
+              ) : (
+                <span className="visual-package-placement-armed-check muted" aria-hidden />
+              )}
+              {endFrameDraft != null && endFrameDraft < beatEndFrame ? (
+                <button
+                  type="button"
+                  className="visual-package-placement-reset-end-inline"
+                  disabled={editDisabled}
+                  title={`Reset to beat end f ${beatEndFrame}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    armEnd();
+                    setEndFrame(beatEndFrame);
+                  }}
+                >
+                  Reset
+                </button>
+              ) : null}
+            </div>
+
+            {/* Image / other knobs — not frame-armed; neutral chrome. */}
+            {assetKeys.length > 0 || metaKeys.filter((k) => k !== "holdSec").length > 0 ? (
+              <div
+                className="visual-package-placement-knobs"
+                role="group"
+                aria-label="Graphic knobs"
+              >
+                {assetKeys.map((key) => (
+                  <div className="visual-package-placement-knob" key={key}>
+                    <span className="visual-package-placement-knob-label">{knobLabel(key)}</span>
+                    <span
+                      className="visual-package-placement-knob-value"
+                      title={String(assetsDraft[key] ?? "")}
+                    >
+                      {String(assetsDraft[key] || "demo")}
+                    </span>
+                    <button
+                      type="button"
+                      className="visual-package-placement-knob-action"
+                      disabled={editDisabled}
+                      onClick={() => void pickImageForKey(key)}
+                    >
+                      Choose…
+                    </button>
+                  </div>
+                ))}
+                {metaKeys
+                  .filter((key) => key !== "holdSec")
+                  .map((key) => (
+                    <label className="visual-package-placement-knob" key={key}>
+                      <span className="visual-package-placement-knob-label">{knobLabel(key)}</span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={String(metaDraft[key] ?? "")}
+                        placeholder="default"
+                        disabled={editDisabled}
+                        onChange={(event) => setMetaValue(key, event.target.value)}
+                      />
+                    </label>
+                  ))}
+              </div>
+            ) : null}
           </div>
 
           {listSlot && !locked ? (
@@ -3556,16 +4317,16 @@ function PlacementEditorPanel({
             </button>
           ) : null}
 
-          {/* Hero frame control for the armed line (mockup center control) */}
-          <div className="visual-package-placement-frame-hero" aria-label="Reveal frame fine-tune">
+          {/* Shared hero frame control — drives only the armed target (line OR Ends). */}
+          <div className="visual-package-placement-frame-hero" aria-label="Frame fine-tune">
             <span className="visual-package-placement-speech-label" style={{ width: "100%", textAlign: "center" }}>
-              Reveal timing · {armed ? slotLabel(armed.slot, armedIndex) : "arm a line"}
+              {armedKind === "end" ? "Graphic end" : "Reveal timing"} · {heroTargetLabel}
               {previewBusy ? " · updating live preview…" : ""}
             </span>
             <button
               type="button"
               className="visual-package-placement-nudge"
-              disabled={editDisabled || !armed}
+              disabled={!heroCanNudge}
               onClick={() => nudgeArmed(-10)}
             >
               ←10
@@ -3573,7 +4334,7 @@ function PlacementEditorPanel({
             <button
               type="button"
               className="visual-package-placement-nudge"
-              disabled={editDisabled || !armed}
+              disabled={!heroCanNudge}
               onClick={() => nudgeArmed(-5)}
             >
               ←5
@@ -3581,7 +4342,7 @@ function PlacementEditorPanel({
             <button
               type="button"
               className="visual-package-placement-nudge"
-              disabled={editDisabled || !armed}
+              disabled={!heroCanNudge}
               onClick={() => nudgeArmed(-1)}
             >
               ←1
@@ -3590,16 +4351,20 @@ function PlacementEditorPanel({
               <span className="visual-package-placement-frame-prefix">f</span>
               <input
                 type="number"
-                value={armed?.revealFrame ?? ""}
-                disabled={editDisabled || !armed}
+                value={heroFrameValue}
+                disabled={!heroCanNudge}
                 onChange={(e) => setArmedFrame(Number(e.target.value) || 0)}
-                title="Reveal frame (absolute on locked cut) for the armed line"
+                title={
+                  armedKind === "end"
+                    ? "Graphic end frame (exclusive) — when the card undocks"
+                    : "Reveal frame (absolute on locked cut) for the armed line"
+                }
               />
             </label>
             <button
               type="button"
               className="visual-package-placement-nudge"
-              disabled={editDisabled || !armed}
+              disabled={!heroCanNudge}
               onClick={() => nudgeArmed(1)}
             >
               1→
@@ -3607,7 +4372,7 @@ function PlacementEditorPanel({
             <button
               type="button"
               className="visual-package-placement-nudge"
-              disabled={editDisabled || !armed}
+              disabled={!heroCanNudge}
               onClick={() => nudgeArmed(5)}
             >
               5→
@@ -3615,98 +4380,56 @@ function PlacementEditorPanel({
             <button
               type="button"
               className="visual-package-placement-nudge"
-              disabled={editDisabled || !armed}
+              disabled={!heroCanNudge}
               onClick={() => nudgeArmed(10)}
             >
               10→
             </button>
           </div>
 
-          <div className="visual-package-placement-actions">
-            <button
-              type="button"
-              className="workflow-action emphasized"
-              disabled={busy || locked}
-              onClick={() => onSave({ lines: draftLines, detail: "edit lines" })}
-            >
-              Save
-            </button>
-            {locked ? (
-              <button
-                type="button"
-                className="workflow-action"
-                disabled={busy}
-                onClick={() => onSave({ locked: false, detail: "unlock" })}
-              >
-                Unlock
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="workflow-action visual-package-placement-lock"
-                disabled={busy}
-                onClick={() =>
-                  onSave({ lines: draftLines, locked: true, detail: "lock" })
-                }
-              >
-                Lock
-              </button>
-            )}
-            <button
-              type="button"
-              className="workflow-action visual-package-placement-pin"
-              disabled={editDisabled || !armed}
-              title="Set armed line reveal to current playhead"
-              onClick={pinArmedToPlayhead}
-            >
-              ↗ Pin to playhead
-            </button>
-          </div>
-
-          <div className="visual-package-placement-speech" aria-label="Spoken words in this beat">
-            <span className="visual-package-placement-speech-label">
-              Spoken in this beat · click sets reveal on armed line
-            </span>
-            <div className="visual-package-placement-word-chips">
-              {beatWords.length === 0 ? (
-                <span className="muted" style={{ fontSize: 12 }}>
-                  No word timing for this beat.
-                </span>
-              ) : (
-                beatWords.map((word) => {
-                  const frame =
-                    word.startFrame != null && Number.isFinite(word.startFrame)
-                      ? Math.round(word.startFrame)
-                      : Math.round((word.startSec ?? 0) * fps);
-                  const isReveal =
-                    armed != null && Math.abs((armed.revealFrame || 0) - frame) <= 1;
-                  return (
-                    <button
-                      key={word.id}
-                      type="button"
-                      className={[
-                        "visual-package-placement-word-chip",
-                        isReveal ? "is-reveal" : "",
-                      ].join(" ")}
-                      disabled={editDisabled || !armed}
-                      title={`Set reveal · f ${frame} · ${frameToClock(frame, fps)}`}
-                      onClick={() => setRevealFromWord(word)}
-                    >
-                      {word.text}
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          </div>
-
-          <p className="visual-package-layout-review-hint">
-            {allLocked
-              ? "All assigned beats locked — Final is ready in the rail."
-              : "Click Title or a Bullet to arm it · type to edit · f #### shows its reveal · nudge ±1/5/10 or click a spoken word · Pin to playhead · Save."}
-          </p>
         </>
       )}
     </aside>
+      {selected && placement ? (
+        <section
+          className="visual-package-placement-speech-card"
+          aria-label="Spoken words in this beat"
+        >
+          <div className="visual-package-placement-word-chips">
+            {beatWords.length === 0 ? (
+              <span className="muted" style={{ fontSize: 12 }}>
+                No word timing for this beat.
+              </span>
+            ) : (
+              beatWords.map((word) => {
+                const frame =
+                  word.startFrame != null && Number.isFinite(word.startFrame)
+                    ? Math.round(word.startFrame)
+                    : Math.round((word.startSec ?? 0) * fps);
+                const isReveal =
+                  armedKind === "line" &&
+                  armed != null &&
+                  Math.abs((armed.revealFrame || 0) - frame) <= 1;
+                return (
+                  <button
+                    key={word.id}
+                    type="button"
+                    className={[
+                      "visual-package-placement-word-chip",
+                      isReveal ? "is-reveal" : "",
+                    ].join(" ")}
+                    disabled={editDisabled || armedKind !== "line" || !armed}
+                    title={`Set reveal · f ${frame} · ${frameToClock(frame, fps)}`}
+                    onClick={() => setRevealFromWord(word)}
+                  >
+                    {word.text}
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </section>
+      ) : null}
+    </>
   );
 }

@@ -40,7 +40,18 @@ def main() -> int:
     processes: list[ManagedProcess] = []
 
     if _url_responds(API_URL):
-        print(f"[api] already running at {API_URL}")
+        # Reuse does NOT reload Python modules. A prior uvicorn can keep serving
+        # yesterday's engine timelines while the repo on disk has fixes — that
+        # looks like "placement preview ignores my changes." Always warn hard.
+        print(f"[api] already running at {API_URL} — REUSING that process (no Python reload)")
+        print(
+            "[api] WARNING: code changes under app/ are NOT picked up until you "
+            "stop the process on port 8731 and start again."
+        )
+        print(
+            "[api] Tip: stop the old API (Task Manager / kill port 8731), then "
+            "re-run this script; or set VCG_API_RELOAD=1 when starting fresh."
+        )
         processes.append(ManagedProcess("api", None, reused=True))
     else:
         api_cmd = [
@@ -57,7 +68,10 @@ def main() -> int:
             api_cmd.append("--reload")
             print("[api] reload enabled (VCG_API_RELOAD=1) — server restarts on Python file changes")
         else:
-            print("[api] stable mode (no --reload) — restart npm run dev after Python API changes")
+            print(
+                "[api] stable mode (no --reload) — after editing app/*.py, kill "
+                "port 8731 and re-run (refreshing the browser is not enough)"
+            )
         processes.append(_start_process("api", api_cmd))
 
     if _url_responds(WEB_URL):
