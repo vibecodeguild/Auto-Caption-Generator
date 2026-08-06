@@ -81,7 +81,6 @@ import {
 
 const MODULES: Array<{ id: NonNullable<VisualCue["moduleId"]>; name: string; description: string }> = [
   { id: "punchline-reveal", name: "Punchline reveal", description: "Land text with the spoken phrase" },
-  { id: "speaker-side-panel", name: "Speaker side panel", description: "Frame the speaker beside information" },
   { id: "progress-scale", name: "Progress scale", description: "Full white journey stage with speaker in an upper-right window" },
   { id: "dependency-stack", name: "Dependency stack", description: "Title + sequential stack; talking head docks right" },
 ];
@@ -109,8 +108,7 @@ function semanticParameterEntries(moduleId: VisualCue["moduleId"], parameters: V
     const value = parameters[key];
     if (typeof value === "string" && value.trim()) entries.push([`parameters.${key}`, value]);
   }
-  const listKeys = moduleId === "dependency-stack" ? ["nodes"] as const
-    : moduleId === "speaker-side-panel" ? ["items"] as const : [];
+  const listKeys = moduleId === "dependency-stack" ? ["nodes"] as const : [];
   for (const key of listKeys) {
     const values = parameters[key];
     if (Array.isArray(values)) values.forEach((value, index) => entries.push([`parameters.${key}.${index}`, value]));
@@ -1600,7 +1598,7 @@ export default function VisualProductionWorkspace() {
                 : <div className="visual-render-ownership renderable"><strong>Plan-backed · Renderable</strong><span>Inspector changes save to visual-plan.json; the exact HyperFrames runtime above is also used for review and final rendering.</span></div>}
               <fieldset className="visual-cue-controls" disabled={selectedCompositionCue}>
               <label>Enabled<input type="checkbox" checked={selectedCue.enabled} onChange={(event) => updateCue({ enabled: event.target.checked })} /></label>
-              {selectedCue.kind === "module" && <><label>Text<textarea value={selectedCue.parameters.text ?? ""} onChange={(event) => updateCue({}, { text: event.target.value })} /></label><label>Kicker<input value={selectedCue.parameters.kicker ?? ""} onChange={(event) => updateCue({}, { kicker: event.target.value })} /></label>{(selectedCue.moduleId === "speaker-side-panel" || selectedCue.moduleId === "punchline-reveal") && <label>Accent color<input type="color" value={selectedCue.parameters.accentColor ?? "#FF00CE"} onChange={(event) => updateCue({}, { accentColor: event.target.value })} /></label>}</>}
+              {selectedCue.kind === "module" && <><label>Text<textarea value={selectedCue.parameters.text ?? ""} onChange={(event) => updateCue({}, { text: event.target.value })} /></label><label>Kicker<input value={selectedCue.parameters.kicker ?? ""} onChange={(event) => updateCue({}, { kicker: event.target.value })} /></label>{(selectedCue.moduleId === "punchline-reveal") && <label>Accent color<input type="color" value={selectedCue.parameters.accentColor ?? "#FF00CE"} onChange={(event) => updateCue({}, { accentColor: event.target.value })} /></label>}</>}
               <div className="visual-field-row"><label>Start<input type="number" min={0} max={duration} step={0.01} value={selectedCue.startSec} onChange={(event) => updateCue({ startSec: Math.min(Number(event.target.value), selectedCue.endSec - .01) })} /></label><label>End<input type="number" min={0} max={duration} step={0.01} value={selectedCue.endSec} onChange={(event) => updateCue({ endSec: Math.max(Number(event.target.value), selectedCue.startSec + .01) })} /></label></div>
               {selectedCue.kind === "asset" && <>
                 <div className="visual-field-row"><label>X %<input type="number" min={0} max={100} value={selectedCue.parameters.x ?? 0} onChange={(event) => updateCue({}, { x: Number(event.target.value) })} /></label><label>Y %<input type="number" min={0} max={100} value={selectedCue.parameters.y ?? 0} onChange={(event) => updateCue({}, { y: Number(event.target.value) })} /></label></div>

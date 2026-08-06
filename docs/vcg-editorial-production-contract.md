@@ -233,7 +233,7 @@ Drawn from modules that already appear in successful projects and/or the registe
 **Talking-head / emphasis**
 
 - `punchline-reveal` (joke-image card only — not a dual-mode engine)
-- `speaker-side-panel`
+
 - `kinetic-word-punctuation`
 - `speaker-rise-callouts`
 - `problem-card-triptych`

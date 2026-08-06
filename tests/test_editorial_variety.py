@@ -67,7 +67,7 @@ def test_intentional_series_allows_same_graphic_repeat() -> None:
 
 def test_share_cap_fails() -> None:
     items = [{"graphicId": "kinetic-word-punctuation"} for _ in range(5)]
-    items.append({"graphicId": "speaker-side-panel"})
+    items.append({"graphicId": "dependency-stack"})
     items.append({"graphicId": "brand-cta-lockup"})
     items.append({"graphicId": "tradeoff-meter"})
     errors = validate_variety(items, id_key="graphicId")

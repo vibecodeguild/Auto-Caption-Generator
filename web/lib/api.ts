@@ -759,7 +759,7 @@ export type VisualSemanticItem = {
 export type VisualCue = {
   id: string;
   kind: "module" | "asset" | "composition";
-  moduleId?: "punchline-reveal" | "speaker-side-panel" | "progress-scale" | "dependency-stack";
+  moduleId?: "punchline-reveal" | "progress-scale" | "dependency-stack";
   assetId?: string;
   compositionId?: string;
   sceneId?: string;

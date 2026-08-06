@@ -192,6 +192,8 @@ def _default_motion(engine_id: str, layout_id: str | None) -> dict[str, Any]:
             motion["side"] = "left"
     if "anchor" in keys:
         motion["anchor"] = "top"
+    if "pointer" in keys:
+        motion["pointer"] = "below"
     if engine_id == "source-punch-zoom":
         motion.setdefault("focusX", 0.5)
         motion.setdefault("focusY", 0.42)
@@ -199,7 +201,12 @@ def _default_motion(engine_id: str, layout_id: str | None) -> dict[str, Any]:
         motion.setdefault("settleSec", 0.45)
         # visual-plan.schema.json: motion enum is in | out | in-out (not "punch").
         motion.setdefault("motion", "in-out")
+        # zoomInFrame / zoomOutFrame filled in draft_placement_for_beat once span is known.
     return {k: v for k, v in motion.items() if k in keys}
+
+
+# Default ui-callout ring (upper-right demo region) — matches prior draw fallback.
+_UI_CALLOUT_DEFAULT_BOUNDS = {"x": 0.55, "y": 0.12, "width": 0.35, "height": 0.18}
 
 
 def _default_meta(engine_id: str, *, index_among_type: int) -> dict[str, Any]:
@@ -218,7 +225,39 @@ def _default_meta(engine_id: str, *, index_among_type: int) -> dict[str, Any]:
         meta["value"] = 0.5
     if "appName" in keys:
         meta["appName"] = "Grok"
+    # ui-callout ring geometry (normalized 0–1 upper-left + size).
+    if "x" in keys:
+        meta["x"] = _UI_CALLOUT_DEFAULT_BOUNDS["x"]
+    if "y" in keys:
+        meta["y"] = _UI_CALLOUT_DEFAULT_BOUNDS["y"]
+    if "width" in keys:
+        meta["width"] = _UI_CALLOUT_DEFAULT_BOUNDS["width"]
+    if "height" in keys:
+        meta["height"] = _UI_CALLOUT_DEFAULT_BOUNDS["height"]
     return {k: v for k, v in meta.items() if k in keys}
+
+
+def _expand_ui_callout_bounds_into_meta(row: dict[str, Any]) -> dict[str, Any]:
+    """Surface nested targetBounds as craft meta knobs for older placements."""
+
+    out = dict(row)
+    if str(out.get("engineId") or "") != "ui-callout":
+        return out
+    meta = dict(out.get("meta") or {})
+    motion = out.get("motion") if isinstance(out.get("motion"), dict) else {}
+    nested = motion.get("targetBounds") if isinstance(motion.get("targetBounds"), dict) else None
+    if nested is None and isinstance(meta.get("targetBounds"), dict):
+        nested = meta.get("targetBounds")
+    for key in ("x", "y", "width", "height"):
+        if key in meta and meta[key] not in (None, ""):
+            continue
+        if nested is not None and nested.get(key) is not None:
+            meta[key] = nested[key]
+        else:
+            meta.setdefault(key, _UI_CALLOUT_DEFAULT_BOUNDS[key])
+    meta.pop("targetBounds", None)
+    out["meta"] = meta
+    return out
 
 
 # Library sample / live-preview stand-in for the 7-22 joke image card path.
@@ -360,7 +399,8 @@ def draft_lines_for_engine(
 
     lines: list[dict[str, Any]] = []
 
-    if engine_id == "source-punch-zoom":
+    if engine_id in {"source-punch-zoom", "brand-cta-lockup"}:
+        # Punch zoom: motion-only. Brand CTA: join line + link are brand-fixed.
         return []
 
     # Fixed slots first
@@ -392,25 +432,6 @@ def draft_lines_for_engine(
                     reveal_frame=start + max(1, span // 2),
                 )
             )
-        elif engine_id == "brand-cta-lockup":
-            parts = _split_words_text(words, max_parts=3)
-            lines.append(
-                empty_line("logoText", text=parts[0] if parts else "Community", reveal_frame=start)
-            )
-            lines.append(
-                empty_line(
-                    "action",
-                    text=parts[1] if len(parts) > 1 else "JOIN",
-                    reveal_frame=start,
-                )
-            )
-            lines.append(
-                empty_line(
-                    "destination",
-                    text=parts[2] if len(parts) > 2 else "link",
-                    reveal_frame=start,
-                )
-            )
         elif engine_id == "numbered-step-intro":
             parts = _split_words_text(words, max_parts=2)
             lines.append(empty_line("title", text=parts[0] if parts else "Step", reveal_frame=start))
@@ -422,15 +443,7 @@ def draft_lines_for_engine(
                 )
             )
         elif engine_id == "ui-callout":
-            parts = _split_words_text(words, max_parts=2)
-            lines.append(empty_line("label", text=parts[0] if parts else "UI", reveal_frame=start))
-            lines.append(
-                empty_line(
-                    "detail",
-                    text=parts[1] if len(parts) > 1 else words or "",
-                    reveal_frame=start + max(1, span // 4),
-                )
-            )
+            lines.append(empty_line("label", text=words or "UI", reveal_frame=start))
         elif engine_id == "robot-cheer":
             lines.append(empty_line("text", text=words or "YES", reveal_frame=start))
             lines.append(empty_line("tagline", text="LET'S GO", reveal_frame=start))
@@ -525,6 +538,14 @@ def draft_placement_for_beat(
         meta = {}
         motion = {}
         assets = {}
+
+    if engine_id == "source-punch-zoom":
+        # Absolute locked-cut frames when the camera move starts.
+        # Zoom in at beat start; zoom out ~15% of the span before beat end (min 1f gap).
+        span = max(1, end - start)
+        motion = dict(motion or {})
+        motion.setdefault("zoomInFrame", start)
+        motion.setdefault("zoomOutFrame", max(start + 1, end - max(1, span // 6)))
 
     return {
         "beatId": beat_id,
@@ -718,6 +739,26 @@ def _normalize_lines(lines: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _filter_lines_to_engine_slots(engine_id: str, lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop retired slots (e.g. brand-cta logoText) so craft UI matches the interface."""
+
+    try:
+        spec = get_engine_placement_spec(engine_id)
+    except KeyError:
+        return list(lines)
+    fixed = {str(s) for s in (spec.get("fixed_line_slots") or [])}
+    list_slot = spec.get("list_slot")
+    list_prefix = f"{list_slot}." if list_slot else None
+    out: list[dict[str, Any]] = []
+    for row in lines:
+        slot = str(row.get("slot") or "")
+        if slot in fixed:
+            out.append(row)
+        elif list_prefix and slot.startswith(list_prefix):
+            out.append(row)
+    return out
+
+
 def append_placement_ledger_entry(
     project_root: Path,
     *,
@@ -792,7 +833,10 @@ def save_placement_beat_for_video_project(
 
     row = dict(previous)
     if "lines" in payload:
-        row["lines"] = _normalize_lines(payload.get("lines"))
+        row["lines"] = _filter_lines_to_engine_slots(
+            str(row.get("engineId") or ""),
+            _normalize_lines(payload.get("lines")),
+        )
         row["source"] = SOURCE_HUMAN
     if "meta" in payload and isinstance(payload.get("meta"), dict):
         row["meta"] = dict(payload["meta"])
@@ -895,9 +939,21 @@ def placement_status_for_video_project(
 
     beats = list((working or {}).get("beats") or []) if working else []
     locked_n = sum(1 for b in beats if isinstance(b, dict) and b.get("locked"))
-    by_beat = {
-        str(b["beatId"]): b for b in beats if isinstance(b, dict) and b.get("beatId")
-    }
+    by_beat: dict[str, Any] = {}
+    for b in beats:
+        if not isinstance(b, dict) or not b.get("beatId"):
+            continue
+        row = dict(b)
+        eid = str(row.get("engineId") or "")
+        if eid and isinstance(row.get("lines"), list):
+            row["lines"] = _filter_lines_to_engine_slots(eid, list(row["lines"]))
+        # Retired brand-cta asset knobs — not placement craft.
+        if eid == "brand-cta-lockup" and isinstance(row.get("assets"), dict):
+            assets = dict(row["assets"])
+            assets.pop("logoAssetId", None)
+            row["assets"] = assets
+        row = _expand_ui_callout_bounds_into_meta(row)
+        by_beat[str(row["beatId"])] = row
 
     interfaces: dict[str, Any] = {}
     for b in beats:
@@ -1017,7 +1073,17 @@ def _placement_preview_fingerprint(
         # 5: stage/dock at beat start; Title reveal = image + caption only (not whole card).
         # 6: same contract; force rebuild of Claude-era caches that delayed the whole stage.
         # 7: preview range = full beat; placement endFrameExclusive only ends the graphic cue.
-        "previewRecipe": 7,
+        # 8: dependency-stack honors placement node revealFrames (no even redistrib).
+        # 9: kinetic-word-punctuation stamp (pink + phrase) lands together at phrase frame.
+        # 10: numbered-step-intro — title on same teal line as number; larger pink action.
+        # 11: step headline teal size down + gap between number and title.
+        # 12: problem-card-triptych honors card revealFrames (no even redistrib).
+        # 13: speaker-rise-callouts honor revealFrames; face-clear edge slots; up to 8.
+        # 14: rise callouts all pink; bottom slots raised (less stranded).
+        # 15–16: speaker-side-panel experiments (engine retired → dependency-stack).
+        # 17: speaker-side-panel removed from registry; alias to dependency-stack.
+        # 22: ui-callout label-only (no detail); bounds knobs unchanged.
+        "previewRecipe": 22,
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
@@ -1108,6 +1174,20 @@ def _semantic_items_for_placement_cue(
     return items
 
 
+def _coerce_bool_param(value: Any, *, default: bool = True) -> bool:
+    """Accept true bools plus common UI text/number forms from placement knobs."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def _sanitize_engine_parameters_for_plan(engine_id: str, params: dict[str, Any]) -> dict[str, Any]:
     """Coerce placement params so visual-plan.schema.json oneOf accepts the cue.
 
@@ -1134,6 +1214,62 @@ def _sanitize_engine_parameters_for_plan(engine_id: str, params: dict[str, Any])
             except (TypeError, ValueError):
                 val = default
             out[key] = max(lo, min(hi, val))
+        # Absolute frame anchors (when each camera move starts). Keep integers ≥ 0.
+        for key in ("zoomInFrame", "zoomOutFrame"):
+            if key not in out:
+                continue
+            try:
+                out[key] = max(0, int(round(float(out[key]))))
+            except (TypeError, ValueError):
+                out.pop(key, None)
+
+    if eid == "numbered-step-intro":
+        # Placement knobs are free-text in the UI; coerce before schema oneOf.
+        if "stepNumber" in out:
+            try:
+                out["stepNumber"] = max(1, min(99, int(round(float(out["stepNumber"])))))
+            except (TypeError, ValueError):
+                out["stepNumber"] = 1
+        if "showNumber" in out:
+            out["showNumber"] = _coerce_bool_param(out.get("showNumber"), default=True)
+        side = str(out.get("side") or "").strip().lower()
+        if side and side not in {"left", "right"}:
+            out["side"] = "left"
+
+    if eid == "tradeoff-meter":
+        # Meta knobs arrive as strings from the craft UI ("0.8") — schema wants number.
+        if "value" in out:
+            try:
+                out["value"] = max(0.0, min(1.0, float(out["value"])))
+            except (TypeError, ValueError):
+                out["value"] = 0.5
+        side = str(out.get("side") or "").strip().lower()
+        if side and side not in {"left", "right"}:
+            out["side"] = "left"
+
+    if eid == "ui-callout":
+        # Craft knobs are flat x/y/width/height (strings from UI). Schema wants nested
+        # targetBounds; strip flats so unevaluatedProperties does not reject the cue.
+        defaults = dict(_UI_CALLOUT_DEFAULT_BOUNDS)
+        nested = out.get("targetBounds") if isinstance(out.get("targetBounds"), dict) else {}
+        assembled: dict[str, float] = {}
+        for key in ("x", "y", "width", "height"):
+            raw = out.get(key, nested.get(key, defaults[key]))
+            try:
+                assembled[key] = float(raw)
+            except (TypeError, ValueError):
+                assembled[key] = float(defaults[key])
+        assembled["x"] = max(0.0, min(0.98, assembled["x"]))
+        assembled["y"] = max(0.0, min(0.98, assembled["y"]))
+        assembled["width"] = max(0.02, min(1.0 - assembled["x"], assembled["width"]))
+        assembled["height"] = max(0.02, min(1.0 - assembled["y"], assembled["height"]))
+        out["targetBounds"] = assembled
+        for key in ("x", "y", "width", "height"):
+            out.pop(key, None)
+        # Detail line retired from craft (label-only).
+        out.pop("detail", None)
+        pointer = str(out.get("pointer") or "below").strip().lower()
+        out["pointer"] = "above" if pointer == "above" else "below"
 
     # Clamp known list lengths to schema / placement contracts.
     list_caps = {
@@ -1163,9 +1299,38 @@ def _sanitize_engine_parameters_for_plan(engine_id: str, params: dict[str, Any])
     return out
 
 
+def normalize_placement_engine(placement: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite retired engine ids on a placement row (e.g. speaker-side-panel → dependency-stack)."""
+
+    from app.core.visual_production import canonicalize_engine_id
+
+    if not isinstance(placement, dict):
+        return placement
+    raw = str(placement.get("engineId") or "").strip()
+    live = canonicalize_engine_id(raw)
+    if live == raw or not live:
+        return placement
+    out = dict(placement)
+    out["engineId"] = live
+    if raw == "speaker-side-panel" and live == "dependency-stack":
+        lines: list[dict[str, Any]] = []
+        for line in placement.get("lines") or []:
+            if not isinstance(line, dict):
+                continue
+            row = dict(line)
+            slot = str(row.get("slot") or "")
+            if slot.startswith("items."):
+                row["slot"] = "nodes." + slot.split(".", 1)[1]
+            lines.append(row)
+        out["lines"] = lines
+        # usageId may still name the old library card; engineId is authoritative for draw.
+    return out
+
+
 def build_cue_preview_payload(placement: dict[str, Any], *, fps: float = 30.0) -> dict[str, Any]:
     """Engine cue for a single placement (live Tier B preview / final package)."""
 
+    placement = normalize_placement_engine(placement)
     engine_id = str(placement.get("engineId") or "")
     start_f = int(placement.get("startFrame") or 0)
     end_f = int(placement.get("endFrameExclusive") or start_f + 1)

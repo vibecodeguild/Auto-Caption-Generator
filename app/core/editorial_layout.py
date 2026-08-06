@@ -45,10 +45,10 @@ MODULE_OVERLAY_FOOTPRINTS: dict[str, dict[str, float]] = {
     "kinetic-word-punctuation": {"width": 0.46, "height": 0.18},
     # Large white punchline card (uses speaker-safe overlay region; still wide).
     "punchline-reveal": {"width": 0.55, "height": 0.45},
-    # Full-height left/right white panel (~43%).
-    "speaker-side-panel": {"width": 0.43, "height": 1.0},
     # Full white stage with upper-right video window (chrome is full-frame).
     "progress-scale": {"width": 1.0, "height": 1.0},
+    # Full stage: title + stack left, tall right video dock.
+    "dependency-stack": {"width": 1.0, "height": 1.0},
     # Numbered example card — left ~40% width, mid height band.
     "numbered-example-card": {"width": 0.40, "height": 0.34},
     # Full stage: right video dock + left terminal (same footprint as dependency-stack).
@@ -237,17 +237,6 @@ def _try_place(
                 -z["area"],
             ),
         )
-
-    # Full-height side panels need a tall free column.
-    if module_id == "speaker-side-panel":
-        tall = [
-            z
-            for z in ordered
-            if z["bounds"]["height"] >= 0.7 and z["bounds"]["width"] >= 0.35
-        ]
-        if not tall:
-            return None
-        ordered = tall
 
     for zone in ordered:
         side = preferred_side if preferred_side in {"left", "right"} else zone["prefer_side"]

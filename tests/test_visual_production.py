@@ -323,35 +323,58 @@ def test_progress_scale_renders_full_white_stage_with_video_window() -> None:
     assert "parameters.milestones.2" in semantic_paths
 
 
-def test_progress_scale_milestone_hits_track_linear_bar_fill() -> None:
-    """Stops sit at 0/50/100% of fill; bar finishes before a multi-second linger."""
-    start, duration = 1.0, 10.0
-    hold_after_fill = 2.5
-    video_out = 0.45
-    fill_lead = 0.45
-    min_fill = 1.2
-    fill_duration = max(min_fill, duration - fill_lead - hold_after_fill - video_out)
-    fill_start = start + fill_lead
-    fill_end = fill_start + fill_duration
-    milestone_count = 3
-    appears = [
-        fill_start + (index / max(milestone_count - 1, 1)) * fill_duration
-        for index in range(milestone_count)
-    ]
-    assert appears[0] == pytest.approx(fill_start)
-    assert appears[1] == pytest.approx(fill_start + fill_duration * 0.5)
-    assert appears[2] == pytest.approx(fill_end)
-    # Linger after last stop, before video restore / cue end.
-    restore_at = min(start + duration - video_out, fill_end + hold_after_fill)
-    assert restore_at - fill_end == pytest.approx(hold_after_fill)
-    assert appears[0] < appears[1] < appears[2]
+def test_progress_scale_fill_follows_milestone_reveal_frames() -> None:
+    """Bar reaches each stop when that milestone's placement reveal fires."""
+    fps = 30.0
+    range_start = 1379 / fps
+    # Cue local start ~0.05 with 0.05 preroll pad in live preview; use absolute secs.
+    cue = {
+        "moduleId": "progress-scale",
+        "startSec": 1379 / fps,
+        "endSec": 1576 / fps,
+        "parameters": {
+            "text": "Title Goes Here",
+            "startLabel": "First",
+            "targetLabel": "Second",
+            "milestones": ["Third", "Forth", "Firth"],
+        },
+        "semanticItems": [
+            {
+                "parameterPath": "parameters.milestones.0",
+                "spokenStartSec": 1428 / fps,
+                "fullyVisibleSec": 1428 / fps + 0.2,
+            },
+            {
+                "parameterPath": "parameters.milestones.1",
+                "spokenStartSec": 1477 / fps,
+                "fullyVisibleSec": 1477 / fps + 0.2,
+            },
+            {
+                "parameterPath": "parameters.milestones.2",
+                "spokenStartSec": 1526 / fps,
+                "fullyVisibleSec": 1526 / fps + 0.2,
+            },
+        ],
+    }
+    # Composition-local times = absolute − range_start (preview pads −0.05).
+    t0 = 1428 / fps - range_start
+    t1 = 1477 / fps - range_start
+    t2 = 1526 / fps - range_start
+    assert t0 < t1 < t2
+    # Fractions on a 3-stop bar: 0, 0.5, 1.0 — same geometry as markup.
+    fracs = [i / 2 for i in range(3)]
+    assert fracs == [0.0, 0.5, 1.0]
+    # Contract: each stop time is the spoken anchor (engine clamps monotonic only).
+    assert t1 - t0 == pytest.approx((1477 - 1428) / fps)
+    assert t2 - t1 == pytest.approx((1526 - 1477) / fps)
 
 
-def test_brand_cta_lockup_is_community_stage_with_generic_defaults() -> None:
+def test_brand_cta_lockup_is_community_stage_with_brand_fixed_copy() -> None:
     markup = visual_production._module_markup(
         {
             "moduleId": "brand-cta-lockup",
             "parameters": {
+                # Overrides must not win — product brand lock.
                 "action": "JOIN THE COMMUNITY",
                 "destination": "your.community.url",
             },
@@ -368,8 +391,10 @@ def test_brand_cta_lockup_is_community_stage_with_generic_defaults() -> None:
     assert "community-copy" in markup
     assert "community-url" in markup
     assert "community-video-outline" in markup
-    assert "JOIN THE COMMUNITY" in markup
-    assert "your.community.url" in markup
+    assert visual_production.DEFAULT_BRAND_CTA_ACTION in markup
+    assert visual_production.DEFAULT_BRAND_CTA_DESTINATION in markup
+    assert "JOIN THE COMMUNITY" not in markup or "JOIN THE FREE" in markup
+    assert "your.community.url" not in markup
     assert "brand-skool-logo.svg" in markup
     assert "pf-card" not in markup
     assert visual_production.brand_skool_logo_path().is_file()
@@ -408,6 +433,16 @@ def test_punchline_reveal_with_image_is_joke_card() -> None:
     assert "joke-tab" not in markup
     assert "demo-joke-image.png" in markup
     assert "module-fill" not in markup
+
+
+def test_source_punch_zoom_motion_keys_include_frame_anchors() -> None:
+    """Placement can set absolute zoom-in / zoom-out frames on the locked cut."""
+    entry = visual_production.ENGINE_REGISTRY["source-punch-zoom"]["placement"]
+    keys = entry["motion_keys"]
+    assert "zoomInFrame" in keys
+    assert "zoomOutFrame" in keys
+    assert "zoomInFrame" in visual_production.MODULE_PARAMETER_KEYS["source-punch-zoom"]
+    assert "zoomOutFrame" in visual_production.MODULE_PARAMETER_KEYS["source-punch-zoom"]
 
 
 def test_punchline_title_content_at_uses_title_semantic_not_beat_start() -> None:
@@ -602,6 +637,233 @@ def test_dependency_stack_markup_has_title_nodes_and_video_frame() -> None:
     assert 'class="kicker"' not in markup
 
 
+def test_tradeoff_meter_fill_ends_at_verdict_frame() -> None:
+    """Fill lands on value at the verdict revealFrame (not full bar, not free-run)."""
+    fps = 30.0
+    range_start = 1577 / fps
+    verdict_frame = 1638
+    start = 0.0
+    duration = (1699 / fps) - range_start
+    exit_duration = 0.28
+    latest = start + duration - exit_duration - 0.05
+    value_frac = 0.8
+    # Composition-local verdict = absolute spoken − range_start.
+    verdict_at = max(verdict_frame / fps, range_start) - range_start
+    fill_end = max(start + 0.35, min(latest, verdict_at))
+    label_ready = start + 0.25  # labels at beat start
+    earliest = start + 0.12
+    preferred = max(earliest, label_ready)
+    if fill_end - preferred >= 0.35:
+        fill_start = preferred
+    else:
+        fill_start = max(earliest, fill_end - min(2.5, max(0.35, fill_end - earliest)))
+    fill_dur = max(0.05, min(2.5, fill_end - fill_start))
+    fill_start = fill_end - fill_dur
+    assert fill_start + fill_dur == pytest.approx(fill_end, abs=0.001)
+    assert fill_end == pytest.approx(verdict_at, abs=0.02)
+    # Marker is value, not 100% of the track.
+    assert 0.0 <= value_frac <= 1.0
+    assert value_frac == pytest.approx(0.8)
+    # Old free-run (start+0.3, dur 0.6) finished far before craft verdict.
+    old_end = start + 0.3 + 0.6
+    assert old_end < fill_end - 0.5
+    # Knob is fixed at value; fill starts empty (GSAP grows scaleX to value_frac).
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "tradeoff-meter",
+            "parameters": {
+                "leftLabel": "Left",
+                "rightLabel": "Right",
+                "verdict": "Verdict",
+                "value": value_frac,
+            },
+        },
+        "meter",
+        0,
+        4,
+        20,
+    )
+    assert "scaleX(0)" in markup
+    assert "pf-meter-fill" in markup
+    assert 'class="pf-meter-knob" style="left:80.00%"' in markup
+    assert 'data-semantic-path="parameters.verdict"' in markup
+
+
+def test_speaker_side_panel_retired_aliases_to_dependency_stack() -> None:
+    """speaker-side-panel is retired; old cues rewrite to dependency-stack."""
+    assert "speaker-side-panel" not in visual_production.MODULE_IDS
+    assert visual_production.canonicalize_engine_id("speaker-side-panel") == "dependency-stack"
+    cue = visual_production.normalize_cue_engine(
+        {
+            "kind": "module",
+            "moduleId": "speaker-side-panel",
+            "parameters": {
+                "text": "Title",
+                "items": ["Bullet 1", "Bullet 2", "Lumberg."],
+                "side": "right",
+            },
+            "semanticItems": [
+                {
+                    "parameterPath": "parameters.items.0",
+                    "spokenStartSec": 1.0,
+                    "fullyVisibleSec": 1.2,
+                }
+            ],
+        }
+    )
+    assert cue["moduleId"] == "dependency-stack"
+    assert cue["parameters"]["text"] == "Title"
+    assert cue["parameters"]["nodes"] == ["Bullet 1", "Bullet 2", "Lumberg."]
+    assert "items" not in cue["parameters"]
+    assert cue["semanticItems"][0]["parameterPath"] == "parameters.nodes.0"
+    markup = visual_production._module_markup(cue, "side", 1, 10, 20)
+    assert "dependency-stage" in markup
+    assert "Title" in markup
+    assert "Bullet 1" in markup
+
+
+def test_speaker_rise_callouts_markup_uses_edge_slots_and_eight() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "speaker-rise-callouts",
+            "parameters": {
+                "thesis": "Here is the Title",
+                "callouts": ["One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight"],
+            },
+        },
+        "rise",
+        1,
+        10,
+        20,
+    )
+    assert "pf-rise-thesis" in markup
+    assert "Here is the Title" in markup
+    assert 'data-callout-index="0"' in markup
+    assert 'data-callout-index="7"' in markup
+    assert "Eight" in markup
+    # Face-clear layout is CSS nth-child; markup must not hardcode center coords.
+    assert "left:22%" not in markup
+    assert "top:50%" not in markup
+
+
+def test_speaker_rise_honors_placement_callout_reveal_frames() -> None:
+    """Thesis + callouts use craft frames; auto-stagger only when unanchored."""
+    fps = 30.0
+    range_start = 399 / fps
+    frames = [495, 592, 688, 785]
+    expected = [f / fps - range_start for f in frames]
+    # Old engine packed words near the end (~f816+) via reverse stagger — far from craft.
+    assert expected[0] < 4.0
+    assert expected[-1] < 14.0
+    # Placement contract: local appear = spoken − range_start (clamped by engine).
+    for exp, frame in zip(expected, frames, strict=True):
+        assert exp == pytest.approx(frame / fps - range_start, abs=0.001)
+
+
+def test_problem_card_triptych_honors_placement_card_reveal_frames() -> None:
+    """Placement card frames must not be even-redistributed when settle/linger is long."""
+    fps = 30.0
+    range_start = 6755 / fps
+    frames = [6755, 6835, 6885]
+    cue_end = 6996 / fps
+    duration = cue_end - range_start
+    start = 0.0
+    exit_duration = 0.28
+    spoken = [f / fps for f in frames]
+    card_times: list[float] = []
+    anchored_count = 0
+    for spoken_sec in spoken:
+        appear_at = max(spoken_sec, range_start) - range_start
+        card_times.append(max(start + 0.12, appear_at))
+        anchored_count += 1
+    min_gap = 0.08 if anchored_count > 0 else 0.35
+    for index in range(1, len(card_times)):
+        card_times[index] = max(card_times[index], card_times[index - 1] + min_gap)
+
+    expected = [max(start + 0.12, f / fps - range_start) for f in frames]
+    assert anchored_count == 3
+    for got, exp in zip(card_times, expected, strict=True):
+        assert got == pytest.approx(exp, abs=0.02)
+
+    settle_after_last_sec = 2.0
+    linger_all_white_sec = 2.0
+    latest_need = (
+        card_times[-1] + settle_after_last_sec + linger_all_white_sec + exit_duration
+    )
+    assert latest_need > start + duration  # would have triggered old redistrib
+    budget = max(
+        0.8,
+        duration - exit_duration - settle_after_last_sec - linger_all_white_sec - 0.28,
+    )
+    step = budget / 2
+    old_times = [start + 0.28 + index * step for index in range(3)]
+    # Later bullets diverged most (even respace vs speech anchors).
+    assert abs(old_times[1] - expected[1]) > 0.4
+    assert abs(old_times[2] - expected[2]) > 0.4
+
+
+def test_kinetic_word_stamp_lands_with_phrase_not_empty_at_beat_start() -> None:
+    """Pink stamp + phrase reveal together at phrase frame (not empty shell at start)."""
+    fps = 30.0
+    range_start = 2168 / fps
+    phrase_frame = 2250  # later than beat start
+    phrase_spoken = phrase_frame / fps
+    phrase_at = max(phrase_spoken, range_start) - range_start
+    assert phrase_at > 0.5  # delayed relative to beat start
+    # Contract: stamp appear time == phrase local time (engine clamps into cue).
+    start = 0.0
+    duration = (2404 / fps) - range_start
+    clamped = max(start, min(start + max(duration - 0.05, 0.0), phrase_at))
+    assert clamped == pytest.approx(phrase_at, abs=0.001)
+    # Empty-pink bug was shell at entry_start (~0) while words waited for phrase_at.
+    assert clamped != pytest.approx(0.0, abs=0.05)
+
+
+def test_dependency_stack_honors_placement_node_reveal_frames() -> None:
+    """Placement anchors must not be even-redistributed when settle/linger is long.
+
+    Beat-003 craft frames 495/592/688/785 at 30fps with cue [13.3, 29.4]:
+    settle(2s)+linger(2s) after the last bullet would exceed the cue end and used
+    to re-space bullets evenly (~414/526/638/750). Placement path keeps anchors.
+    """
+    fps = 30.0
+    range_start = 399 / fps  # 13.3
+    cue_end = 882 / fps  # 29.4
+    duration = cue_end - range_start
+    start = 0.0  # composition-local cue start after range remap
+    frames = [495, 592, 688, 785]
+    spoken = [f / fps for f in frames]
+    node_times: list[float] = []
+    anchored_count = 0
+    for spoken_sec in spoken:
+        appear_at = max(spoken_sec, range_start) - range_start
+        node_times.append(max(start + 0.12, appear_at))
+        anchored_count += 1
+    min_gap = 0.08 if anchored_count > 0 else 0.35
+    for index in range(1, len(node_times)):
+        node_times[index] = max(node_times[index], node_times[index - 1] + min_gap)
+
+    expected = [f / fps - range_start for f in frames]
+    assert anchored_count == 4
+    for got, exp in zip(node_times, expected, strict=True):
+        assert got == pytest.approx(exp, abs=0.02)
+
+    # Prove the OLD even-redistribute path would have diverged from craft frames.
+    settle_after_last_sec = 2.0
+    linger_all_white_sec = 2.0
+    video_out = 0.45
+    latest_need = node_times[-1] + settle_after_last_sec + linger_all_white_sec + video_out
+    assert latest_need > start + duration  # would have triggered redistribute
+    budget = max(
+        0.8,
+        duration - video_out - settle_after_last_sec - linger_all_white_sec - 0.45,
+    )
+    step = budget / 3
+    old_times = [start + 0.45 + index * step for index in range(4)]
+    for old, exp in zip(old_times, expected, strict=True):
+        assert abs(old - exp) > 1.0  # old path was >1s off each bullet
+
+
 def test_windows_prompt_typing_docks_head_and_types_chars() -> None:
     markup = visual_production._module_markup(
         {
@@ -700,9 +962,9 @@ def test_approved_reuse_variants_render_frozen_media_and_can_hide_step_number() 
             "moduleId": "brand-cta-lockup",
             "parameters": {
                 "logoAssetId": "skool-logo",
-                "logoText": "SKOOL",
-                "action": "JOIN THE CREATOR COMMUNITY",
-                "destination": "COMMUNITY.EXAMPLE/JOIN",
+                # Passed action/destination must not appear — brand-fixed forever.
+                "action": "IGNORED OVERRIDE",
+                "destination": "ignored.example",
                 "side": "left",
             },
         },
@@ -727,16 +989,41 @@ def test_approved_reuse_variants_render_frozen_media_and_can_hide_step_number() 
         5,
         22,
     )
+    step_with_num = visual_production._module_markup(
+        {
+            "moduleId": "numbered-step-intro",
+            "parameters": {
+                "stepNumber": 3,
+                "showNumber": True,
+                "title": "OPEN THE FILE",
+                "action": "LET GROK REVISE IT",
+            },
+        },
+        "step-num",
+        30,
+        5,
+        22,
+    )
 
     assert 'src="assets/joke-image.png"' in joke
     assert "joke-card" in joke
     assert "joke-stage" in joke
     assert 'src="assets/skool-logo.svg"' in cta or "brand-skool-logo.svg" in cta
     assert "community-stage" in cta
-    assert 'data-semantic-path="parameters.logoText"' in cta
+    assert "JOIN THE FREE VIBE CODE GUILD COMMUNITY" in cta
+    assert "skool.com/vibecodeguild" in cta
+    assert "IGNORED OVERRIDE" not in cta
+    assert "ignored.example" not in cta
     assert 'data-semantic-path="parameters.logoAssetId"' not in cta
     assert "pf-step-no-num" in step
     assert "pf-step-num" not in step
+    # Number + title share one headline row; action is the pink line below.
+    assert "pf-step-headline" in step_with_num
+    assert "pf-step-num" in step_with_num
+    assert "OPEN THE FILE" in step_with_num
+    assert step_with_num.index("pf-step-headline") < step_with_num.index("pf-step-num")
+    assert step_with_num.index("pf-step-num") < step_with_num.index("pf-step-title")
+    assert step_with_num.index("pf-step-title") < step_with_num.index("pf-step-action")
 
 
 def test_visual_plan_response_keeps_legacy_frozen_master_compatible_until_migration(tmp_path: Path) -> None:

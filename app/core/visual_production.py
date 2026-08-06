@@ -74,19 +74,8 @@ ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
         # kicker / holdSec: accepted-and-ignored so old plans still validate.
         "legacy_parameter_keys": {"kicker", "holdSec"},
     },
-    "speaker-side-panel": {
-        "placement": {
-            "fixed_line_slots": ["text"],
-            "list_slot": "items",
-            "list_min": 0,
-            "list_max": 12,
-            "meta_keys": [],
-            "asset_keys": [],
-            "motion_keys": ["side", "frameStyle", "panelWidth", "accentColor", "videoBounds"],
-            "notes": "Title + bullet items; each item is lines slot items.i.",
-        },
-        "legacy_parameter_keys": {"kicker"},
-    },
+    # retired 2026-08: speaker-side-panel — duplicative of dependency-stack
+    # (see RETIRED_ENGINE_ALIASES). Do not re-add without product approval.
     "progress-scale": {
         "placement": {
             "fixed_line_slots": ["text", "startLabel", "targetLabel"],
@@ -96,7 +85,10 @@ ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
             "meta_keys": [],
             "asset_keys": [],
             "motion_keys": ["accentColor"],
-            "notes": "No kicker. Title + end labels + milestone lines.",
+            "notes": (
+                "No kicker. Title + Start/Target labels + milestone stops. "
+                "Bar fill reaches each stop at that stop's reveal frame."
+            ),
         },
         "legacy_parameter_keys": {"kicker"},
     },
@@ -110,7 +102,10 @@ ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
             "meta_keys": [],
             "asset_keys": [],
             "motion_keys": [],
-            "notes": "Title + stack nodes.",
+            "notes": (
+                "Title + stack nodes. Each node lands at its line revealFrame "
+                "(placement anchors are not redistributed)."
+            ),
         },
     },
     "numbered-example-card": {
@@ -135,21 +130,41 @@ ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
             "list_max": 0,
             "meta_keys": [],
             "asset_keys": [],
-            "motion_keys": ["focusX", "focusY", "zoom", "settleSec", "motion"],
-            "notes": "Motion-only engine; no copy lines.",
+            # zoomInFrame / zoomOutFrame: absolute locked-cut frames when the camera
+            # move *starts* (default = beat start / near beat end). settleSec = move length.
+            "motion_keys": [
+                "focusX",
+                "focusY",
+                "zoom",
+                "settleSec",
+                "motion",
+                "zoomInFrame",
+                "zoomOutFrame",
+            ],
+            "notes": (
+                "Motion-only camera punch. Zoom in / zoom out frames are absolute on "
+                "the locked cut; default motion is in-out."
+            ),
         },
     },
     "ui-callout": {
         "placement": {
-            "fixed_line_slots": ["label", "detail"],
+            "fixed_line_slots": ["label"],
             "list_slot": None,
             "list_min": 0,
             "list_max": 0,
-            "meta_keys": [],
+            # Craft knobs (normalized 0–1): upper-left + size. Assembled to targetBounds.
+            "meta_keys": ["x", "y", "width", "height"],
             "asset_keys": [],
-            "motion_keys": ["targetBounds", "pointer", "accentColor"],
-            "notes": "",
+            "motion_keys": ["pointer", "accentColor"],
+            "notes": (
+                "Ring a screen region (label only). Meta x/y = upper-left (0–1); "
+                "width/height size the rectangle. Assembled to targetBounds for draw. "
+                "Use placement Grid toggle to aim tenths on the live preview."
+            ),
         },
+        # Nested bounds + retired detail still accepted from samples / older plans.
+        "legacy_parameter_keys": {"targetBounds", "detail"},
     },
     # Ported July-22 families: edge-anchored overlays that leave UI readable.
     "kinetic-word-punctuation": {
@@ -161,7 +176,10 @@ ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
             "meta_keys": [],
             "asset_keys": [],
             "motion_keys": ["side", "anchor", "accentColor"],
-            "notes": "Single kinetic phrase.",
+            "notes": (
+                "Single kinetic phrase. Magenta stamp (box + words) lands together "
+                "at phrase revealFrame — not an empty pink shell at beat start."
+            ),
         },
     },
     "numbered-step-intro": {
@@ -185,7 +203,10 @@ ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
             "meta_keys": [],
             "asset_keys": [],
             "motion_keys": [],
-            "notes": "Exactly three card strings (v1).",
+            "notes": (
+                "Exactly three cards. Each lands at its line revealFrame "
+                "(placement anchors are not redistributed)."
+            ),
         },
     },
     "speaker-rise-callouts": {
@@ -197,7 +218,10 @@ ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
             "meta_keys": ["accentCalloutIndex"],
             "asset_keys": [],
             "motion_keys": [],
-            "notes": "Thesis + rising callout lines.",
+            "notes": (
+                "Thesis + up to 8 callouts around the speaker. "
+                "Each lands at its line revealFrame (not auto-staggered over placement)."
+            ),
         },
     },
     "tradeoff-meter": {
@@ -209,20 +233,36 @@ ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
             "meta_keys": ["value"],
             "asset_keys": [],
             "motion_keys": ["side"],
-            "notes": "No kicker. Meter value is meta 0–1.",
+            "notes": (
+                "No kicker. Meter value is meta 0–1. Knob sits fixed at value; fill "
+                "grows to it when the verdict line reveals (placement revealFrame)."
+            ),
         },
         "legacy_parameter_keys": {"kicker"},
     },
     "brand-cta-lockup": {
         "placement": {
-            "fixed_line_slots": ["logoText", "action", "destination"],
+            # No craft lines — join text + link are brand-fixed forever (see
+            # DEFAULT_BRAND_CTA_*). Placement only times the beat span / Ends.
+            "fixed_line_slots": [],
             "list_slot": None,
             "list_min": 0,
             "list_max": 0,
             "meta_keys": [],
-            "asset_keys": ["logoAssetId"],
+            "asset_keys": [],
             "motion_keys": [],
-            "notes": "",
+            "notes": (
+                "Brand-fixed CTA: join line + skool link are not placement fields. "
+                "Logo is brand-fixed. Time the beat with Ends only."
+            ),
+        },
+        # Still accepted on old plans / library samples; draw ignores overrides.
+        "legacy_parameter_keys": {
+            "logoText",
+            "logoAssetId",
+            "side",
+            "action",
+            "destination",
         },
     },
     "windows-prompt-typing": {
@@ -291,6 +331,12 @@ ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
 
 # Derived view — the set of production engine ids. Never hand-edit.
 MODULE_IDS = set(ENGINE_REGISTRY)
+# Retired engines still seen in old placements / library usages → live engine.
+# Placement + draw normalize through canonicalize_engine_id().
+RETIRED_ENGINE_ALIASES: dict[str, str] = {
+    # Side panel (title + bullets + docked head) was duplicative of dependency-stack.
+    "speaker-side-panel": "dependency-stack",
+}
 ROBOT_MODULE_IDS = frozenset({"robot-cheer", "robot-defiant", "robot-roast"})
 # Engine-fixed: after the mascot is fully drawn, max on-screen hold before exit.
 ROBOT_HOLD_AFTER_DRAWN_SEC = 3.0
@@ -298,10 +344,10 @@ ROBOT_HOLD_AFTER_DRAWN_SEC = 3.0
 ROBOT_ROCKET_MIN_CUE_SEC = 6.5
 # Optional private community wordmark for brand-cta-lockup (lives under gitignored internal/).
 BRAND_SKOOL_LOGO_STAGED_NAME = "brand-skool-logo.svg"
-# Public defaults stay generic so channel URLs / community names are not forced into the repo.
+# Brand-fixed CTA copy — not placement-crafted (product lock for VCG episodes).
 DEFAULT_BRAND_CTA_LOGO_TEXT = "Community"
-DEFAULT_BRAND_CTA_ACTION = "JOIN THE COMMUNITY"
-DEFAULT_BRAND_CTA_DESTINATION = "your.community.url"
+DEFAULT_BRAND_CTA_ACTION = "JOIN THE FREE VIBE CODE GUILD COMMUNITY"
+DEFAULT_BRAND_CTA_DESTINATION = "skool.com/vibecodeguild"
 
 
 def brand_skool_logo_path() -> Path:
@@ -651,14 +697,62 @@ def resolve_project_path(root: Path, relative_path: str) -> Path:
     return resolved
 
 
+def canonicalize_engine_id(module_id: str | None) -> str:
+    """Map retired engine ids to the live replacement (identity if still active)."""
+    mid = str(module_id or "").strip()
+    return RETIRED_ENGINE_ALIASES.get(mid, mid)
+
+
+def normalize_cue_engine(cue: dict) -> dict:
+    """Rewrite a cue that still names a retired engine so draw/placement can run.
+
+    speaker-side-panel → dependency-stack: title stays ``text``; ``items`` become ``nodes``.
+    """
+    if not isinstance(cue, dict) or cue.get("kind") != "module":
+        return cue
+    raw_id = str(cue.get("moduleId") or "").strip()
+    live_id = canonicalize_engine_id(raw_id)
+    if live_id == raw_id:
+        return cue
+    out = dict(cue)
+    out["moduleId"] = live_id
+    params = dict(out.get("parameters") or {})
+    if raw_id == "speaker-side-panel" and live_id == "dependency-stack":
+        items = params.get("items")
+        if isinstance(items, list) and not isinstance(params.get("nodes"), list):
+            params["nodes"] = [str(v) for v in items if str(v).strip()]
+        params.pop("items", None)
+        params.pop("kicker", None)
+        params.pop("frameStyle", None)
+        params.pop("panelWidth", None)
+        params.pop("videoBounds", None)
+        out["parameters"] = params
+        # Semantic paths from old drafts used parameters.items.*
+        remapped: list[dict] = []
+        for item in out.get("semanticItems") or []:
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            path = str(row.get("parameterPath") or "")
+            if path.startswith("parameters.items."):
+                row["parameterPath"] = "parameters.nodes." + path.rsplit(".", 1)[-1]
+            elif path == "parameters.kicker":
+                continue
+            remapped.append(row)
+        if remapped or out.get("semanticItems"):
+            out["semanticItems"] = remapped
+    return out
+
+
 def _module_semantic_texts(cue: dict) -> list[tuple[str, str, str]]:
     """Return every visible module string that requires an explicit reveal anchor."""
     if cue.get("kind") != "module":
         return []
+    cue = normalize_cue_engine(cue)
     params = cue.get("parameters") if isinstance(cue.get("parameters"), dict) else {}
     module_id = cue.get("moduleId")
     fields: list[tuple[str, str]] = []
-    if module_id in {"punchline-reveal", "speaker-side-panel", "progress-scale"}:
+    if module_id in {"punchline-reveal", "progress-scale"}:
         fields.extend([("parameters.kicker", str(params.get("kicker") or "")), ("parameters.text", str(params.get("text") or ""))])
     if module_id == "dependency-stack":
         fields.append(("parameters.text", str(params.get("text") or "")))
@@ -676,14 +770,10 @@ def _module_semantic_texts(cue: dict) -> list[tuple[str, str, str]]:
             if key in MODULE_PARAMETER_KEYS.get(module_id, set()):
                 fields.append((f"parameters.{key}", str(params.get(key) or "")))
     if module_id == "ui-callout":
-        fields.extend([
-            ("parameters.label", str(params.get("label") or "")),
-            ("parameters.detail", str(params.get("detail") or "")),
-        ])
+        fields.append(("parameters.label", str(params.get("label") or "")))
     list_fields = (
         ["nodes"] if module_id == "dependency-stack"
         else ["milestones"] if module_id == "progress-scale"
-        else ["items"] if module_id == "speaker-side-panel"
         else ["titleLines"] if module_id == "numbered-example-card"
         else ["cards"] if module_id == "problem-card-triptych"
         else ["callouts"] if module_id == "speaker-rise-callouts"
@@ -2016,12 +2106,18 @@ def _ported_markup(
         show_number = params.get("showNumber") is not False
         title = html.escape(str(params.get("title") or ""))
         action = html.escape(str(params.get("action") or ""))
+        # Number + title share one teal headline row (same size/weight/color).
         number_markup = f'<div class="pf-step-num">{number:02d}</div>' if show_number else ""
         no_number = " pf-step-no-num" if not show_number else ""
-        return (f'{open_tag}<div class="pf-card pf-step-intro{no_number} pf-{side}">'
-                f'{number_markup}'
-                f'<div class="pf-step-title" data-semantic-path="parameters.title">{title}</div>'
-                f'<div class="pf-step-action" data-semantic-path="parameters.action">{action}</div></div></section>')
+        return (
+            f'{open_tag}<div class="pf-card pf-step-intro{no_number} pf-{side}">'
+            f'<div class="pf-step-headline">'
+            f'{number_markup}'
+            f'<div class="pf-step-title" data-semantic-path="parameters.title">{title}</div>'
+            f'</div>'
+            f'<div class="pf-step-action" data-semantic-path="parameters.action">{action}</div>'
+            f'</div></section>'
+        )
 
     if module_id == "problem-card-triptych":
         # Three sequential point cards only (no eyebrow). Number left, copy right;
@@ -2037,11 +2133,13 @@ def _ported_markup(
 
     if module_id == "speaker-rise-callouts":
         thesis = html.escape(str(params.get("thesis") or ""))
-        # Up to 6 emphasis words/phrases around the speaker + one thesis bar.
-        callouts = _strings(params.get("callouts"), 6)
+        # Up to 8 emphasis words/phrases around the speaker + one thesis bar.
+        # Positions are edge/face-clear (CSS nth-child) — never center over the head.
+        callouts = _strings(params.get("callouts"), 8)
         marked = accent_at("accentCalloutIndex")
         body = "".join(
             f'<div class="pf-rise-item{" lib-accent" if index == marked else ""}" '
+            f'data-callout-index="{index}" '
             f'data-semantic-path="parameters.callouts.{index}">{html.escape(call)}</div>'
             for index, call in enumerate(callouts)
         )
@@ -2052,26 +2150,35 @@ def _ported_markup(
         left_label = html.escape(str(params.get("leftLabel") or "EASY"))
         right_label = html.escape(str(params.get("rightLabel") or "CONTROL"))
         verdict = html.escape(str(params.get("verdict") or ""))
-        value = _number(params.get("value"), 0.5, 0, 1) * 100
-        return (f'{open_tag}<div class="pf-card pf-{side}">{kick}'
-                f'<div class="pf-meter"><div class="pf-meter-fill" style="width:{value:.1f}%"></div>'
-                f'<div class="pf-meter-knob" style="left:{value:.1f}%"></div></div>'
-                f'<div class="pf-meter-labels"><span data-semantic-path="parameters.leftLabel">{left_label}</span>'
-                f'<span data-semantic-path="parameters.rightLabel">{right_label}</span></div>'
-                f'<div class="pf-verdict" data-semantic-path="parameters.verdict">{verdict}</div></div></section>')
+        value_frac = _number(params.get("value"), 0.5, 0, 1)
+        value_pct = value_frac * 100.0
+        # Knob is fixed at the value marker; only the fill grows toward it.
+        return (
+            f'{open_tag}<div class="pf-card pf-{side}">'
+            f'<div class="pf-meter">'
+            f'<div class="pf-meter-fill" style="width:100%;transform:scaleX(0);transform-origin:left center"></div>'
+            f'<div class="pf-meter-knob" style="left:{value_pct:.2f}%"></div>'
+            f'</div>'
+            f'<div class="pf-meter-labels">'
+            f'<span data-semantic-path="parameters.leftLabel">{left_label}</span>'
+            f'<span data-semantic-path="parameters.rightLabel">{right_label}</span>'
+            f'</div>'
+            f'<div class="pf-verdict" data-semantic-path="parameters.verdict">{verdict}</div>'
+            f'</div></section>'
+        )
 
     if module_id == "brand-cta-lockup":
         # Community CTA stage: white stage, teal left band, logo + join line + URL pill,
-        # talking head docked in the right frame. Channel-specific copy is parameters only.
-        logo = html.escape(str(params.get("logoText") or DEFAULT_BRAND_CTA_LOGO_TEXT))
+        # talking head docked in the right frame. Join line + link are brand-fixed forever
+        # (not placement fields). Optional logoAssetId still stages private wordmark art.
+        logo = html.escape(DEFAULT_BRAND_CTA_LOGO_TEXT)
         logo_asset_id = str(params.get("logoAssetId") or "")
         staged_logo = (staged_assets or {}).get(logo_asset_id) if logo_asset_id else None
         if logo_asset_id and not staged_logo:
             raise ValueError(f"brand-cta-lockup references unknown logoAssetId: {logo_asset_id}")
-        # Optional private logo from internal/brand when present; else parameters supply art.
         logo_src = html.escape(staged_logo or BRAND_SKOOL_LOGO_STAGED_NAME)
-        action = html.escape(str(params.get("action") or DEFAULT_BRAND_CTA_ACTION))
-        destination = html.escape(str(params.get("destination") or DEFAULT_BRAND_CTA_DESTINATION))
+        action = html.escape(DEFAULT_BRAND_CTA_ACTION)
+        destination = html.escape(DEFAULT_BRAND_CTA_DESTINATION)
         return (
             f'{open_tag}'
             f'<div class="community-stage">'
@@ -2079,10 +2186,9 @@ def _ported_markup(
             # Do not put a solid full-bleed bg under that hole — it paints the window white.
             f'<div class="community-mask" aria-hidden="true"></div>'
             f'<div class="community-band" aria-hidden="true"></div>'
-            f'<img class="community-logo" src="assets/{logo_src}" alt="{logo}" '
-            f'data-semantic-path="parameters.logoText"/>'
-            f'<div class="community-copy" data-semantic-path="parameters.action">{action}</div>'
-            f'<div class="community-url" data-semantic-path="parameters.destination">{destination}</div>'
+            f'<img class="community-logo" src="assets/{logo_src}" alt="{logo}" />'
+            f'<div class="community-copy">{action}</div>'
+            f'<div class="community-url">{destination}</div>'
             f'<div class="community-video-outline" aria-hidden="true"></div>'
             f'</div></section>'
         )
@@ -2379,6 +2485,7 @@ def _module_markup(
     track: int,
     staged_assets: dict[str, str] | None = None,
 ) -> str:
+    cue = normalize_cue_engine(cue)
     params = cue.get("parameters") or {}
     module_id = cue["moduleId"]
     text = html.escape(str(params.get("text") or "EDIT THIS TEXT"))
@@ -2416,8 +2523,6 @@ def _module_markup(
             f'<div class="joke-line" data-semantic-path="parameters.text">{text}</div>'
             f'</div></div></div></div></section>'
         )
-    if module_id == "speaker-side-panel":
-        return f'<section {common} style="--cue-accent:{accent_color}"><div class="side-copy"><div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div><div class="side-title" data-semantic-path="parameters.text">{text}</div></div><div class="video-outline"></div></section>'
     if module_id == "progress-scale":
         # Full white stage (base is white): copy on the left, source video framed
         # upper-right in .stat-video-outline. Not an overlay card over full-frame video.
@@ -2472,8 +2577,21 @@ def _module_markup(
         return _ported_markup(module_id, params, common, accent_color, kicker, staged_assets)
     if module_id == "ui-callout":
         label = html.escape(str(params.get("label") or "THIS"))
-        detail = html.escape(str(params.get("detail") or ""))
-        target = normalized_bounds(params.get("targetBounds")) or {"x": .55, "y": .12, "width": .35, "height": .18}
+        target = normalized_bounds(params.get("targetBounds"))
+        if target is None:
+            # Placement craft sends flat meta knobs; library samples may nest.
+            try:
+                target = normalized_bounds(
+                    {
+                        "x": float(params.get("x")),
+                        "y": float(params.get("y")),
+                        "width": float(params.get("width")),
+                        "height": float(params.get("height")),
+                    }
+                )
+            except (TypeError, ValueError):
+                target = None
+        target = target or {"x": 0.55, "y": 0.12, "width": 0.35, "height": 0.18}
         pointer = "above" if str(params.get("pointer")) == "above" else "below"
         left, top = target["x"] * 100, target["y"] * 100
         wide, tall = target["width"] * 100, target["height"] * 100
@@ -2481,14 +2599,11 @@ def _module_markup(
         align_right = target["x"] + target["width"] > .78
         label_left = (target["x"] + target["width"]) * 100 if align_right else left
         alignment_class = " callout-align-right" if align_right else ""
-        detail_markup = (
-            f'<span class="callout-detail" data-semantic-path="parameters.detail">{detail}</span>' if detail else ""
-        )
         return (
             f'<section {common} style="--cue-accent:{accent_color}">'
             f'<div class="callout-ring" style="left:{left:.3f}%;top:{top:.3f}%;width:{wide:.3f}%;height:{tall:.3f}%"></div>'
             f'<div class="callout-label callout-{pointer}{alignment_class}" style="left:{label_left:.3f}%;top:{label_top:.3f}%">'
-            f'<span class="callout-text" data-semantic-path="parameters.label">{label}</span>{detail_markup}</div>'
+            f'<span class="callout-text" data-semantic-path="parameters.label">{label}</span></div>'
             f'</section>'
         )
     if module_id == "numbered-example-card":
@@ -2817,6 +2932,7 @@ def build_hyperframes_composition(
     timeline_lines: list[str] = []
     cue_index = 0
     for cue in sorted((item for item in plan.get("cues", []) if item.get("enabled", True)), key=lambda item: float(item["startSec"])):
+        cue = normalize_cue_engine(cue)
         window = _cue_window(cue, range_start, range_end)
         if window is None:
             continue
@@ -2842,6 +2958,8 @@ def build_hyperframes_composition(
                     "robot-rocket-sign",
                     "windows-prompt-typing",
                     "punchline-reveal",
+                    # Stamp owns enter at phrase reveal (box + words together).
+                    "kinetic-word-punctuation",
                 }
             )
             if owns_shell:
@@ -2878,13 +2996,16 @@ def build_hyperframes_composition(
                     "robot-rocket-sign",
                     "windows-prompt-typing",
                     "punchline-reveal",  # joke card owns kicker/line reveals
+                    # Phrase opacity is owned by the stamp reveal (not a separate fade).
+                    "kinetic-word-punctuation",
                     *ROBOT_MODULE_IDS,
                 }
                 if module_id not in skip_semantic:
                     timeline_lines.extend(_semantic_timeline_lines(cue, element_id, range_start, range_end, start))
                 elif module_id == "progress-scale":
-                    # Keep non-milestone copy on normal semantic timing; milestones
-                    # are driven by the bar fill below so words land as the bar hits them.
+                    # Title + end labels use normal semantic timing. Milestones are
+                    # owned by the progress-scale block below (fill reaches each stop
+                    # at that stop's reveal frame).
                     non_milestone = [
                         item
                         for item in cue.get("semanticItems", [])
@@ -3013,50 +3134,105 @@ def build_hyperframes_composition(
                     f'tl.set("{card}", {{opacity:0}}, {end_at:.4f});'
                 )
             elif module_id == "speaker-rise-callouts":
-                # Explicit sequence: thesis bar first, then each emphasis word one-by-one.
-                # Library samples pass sample_reveal_stagger_sec≈1.0 so you can see each land.
-                callouts = _strings(params.get("callouts"), 6)
+                # Placement contract: thesis + each callout land at their revealFrame
+                # (semanticItems). Never auto-stagger over placement anchors — that
+                # packed words near the end of the beat and ignored craft frames.
+                # Unanchored / library samples still stagger after the thesis.
+                callouts = _strings(params.get("callouts"), 8)
                 stagger = (
                     float(sample_reveal_stagger_sec)
                     if sample_reveal_stagger_sec is not None and sample_reveal_stagger_sec > 0
                     else 0.45
                 )
                 stagger = max(0.2, min(2.0, stagger))
+                latest = start + duration - exit_duration - 0.35
+
+                def _rise_spoken(path: str) -> float | None:
+                    match = next(
+                        (
+                            item
+                            for item in cue.get("semanticItems", [])
+                            if str(item.get("parameterPath") or "") == path
+                        ),
+                        None,
+                    )
+                    if match is None:
+                        return None
+                    try:
+                        spoken = float(match.get("spokenStartSec") or 0.0)
+                    except (TypeError, ValueError):
+                        spoken = 0.0
+                    return max(spoken, range_start) - range_start
+
+                thesis_spoken = _rise_spoken("parameters.thesis")
+                thesis_at = (
+                    max(start, min(latest, thesis_spoken))
+                    if thesis_spoken is not None
+                    else start + 0.08
+                )
+                callout_times: list[float] = []
+                anchored_count = 0
+                for index in range(len(callouts)):
+                    spoken_local = _rise_spoken(f"parameters.callouts.{index}")
+                    if spoken_local is not None:
+                        callout_times.append(max(start + 0.08, min(latest, spoken_local)))
+                        anchored_count += 1
+                    else:
+                        callout_times.append(thesis_at + 0.7 + index * stagger)
+                if anchored_count == 0 and callout_times:
+                    for index in range(len(callout_times)):
+                        appear_at = thesis_at + 0.7 + index * stagger
+                        if appear_at > latest:
+                            appear_at = max(
+                                thesis_at + 0.35,
+                                latest
+                                - (len(callout_times) - 1 - index) * min(stagger, 0.35),
+                            )
+                        callout_times[index] = appear_at
+                else:
+                    # Placement path: keep frames; small monotonic gap only.
+                    min_gap = 0.08
+                    for index in range(1, len(callout_times)):
+                        callout_times[index] = max(
+                            callout_times[index], callout_times[index - 1] + min_gap
+                        )
+                        callout_times[index] = min(callout_times[index], latest)
+
                 # Keep children hidden until their beat (CSS also starts data-semantic-path at 0).
                 timeline_lines.append(
                     f'tl.set("#{element_id} .pf-rise-thesis, #{element_id} .pf-rise-item", '
                     f'{{opacity:0,y:18}}, {start:.4f});'
                 )
-                thesis_at = start + 0.08
                 timeline_lines.append(
                     f'tl.fromTo("#{element_id} .pf-rise-thesis", '
                     f'{{opacity:0,y:-18,scale:0.96}}, '
-                    f'{{opacity:1,y:0,scale:1,duration:0.42,ease:"power3.out"}}, {thesis_at:.4f});'
+                    f'{{opacity:1,y:0,scale:1,duration:0.42,ease:"power3.out",'
+                    f'immediateRender:false}}, {thesis_at:.4f});'
                 )
-                first_word_at = thesis_at + 0.7
                 for index in range(len(callouts)):
-                    appear_at = first_word_at + index * stagger
-                    # Leave room for exit; compress only if the cue is too short.
-                    latest = start + duration - exit_duration - 0.35
-                    if appear_at > latest:
-                        appear_at = max(thesis_at + 0.35, latest - (len(callouts) - 1 - index) * min(stagger, 0.35))
+                    appear_at = callout_times[index]
+                    item_sel = (
+                        f'#{element_id} .pf-rise-item[data-callout-index=\\"{index}\\"]'
+                    )
                     timeline_lines.append(
-                        f'tl.fromTo("#{element_id} .pf-rise-item:nth-child({index + 1})", '
+                        f'tl.fromTo("{item_sel}", '
                         f'{{opacity:0,y:26,scale:0.9}}, '
-                        f'{{opacity:1,y:0,scale:1,duration:0.4,ease:"power2.out"}}, {appear_at:.4f});'
+                        f'{{opacity:1,y:0,scale:1,duration:0.4,ease:"power2.out",'
+                        f'immediateRender:false}}, {appear_at:.4f});'
                     )
                 exit_at = start + duration - exit_duration
                 timeline_lines.append(
                     f'tl.to("#{element_id} .pf-rise-thesis, #{element_id} .pf-rise-item", '
                     f'{{opacity:0,duration:{exit_duration:.3f},ease:"power2.in"}}, {exit_at:.4f});'
                 )
-            elif module_id == "speaker-side-panel":
-                timeline_lines.append(f'tl.to("#main-video", {{scale:0.48,x:{width * .48:.2f},y:{height * .26:.2f},duration:0.5,ease:"power3.inOut"}}, {start:.4f});')
-                timeline_lines.append(f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:0.45,ease:"power3.inOut"}}, {(start + duration - 0.45):.4f});')
             elif module_id == "dependency-stack":
                 # Tall right video window (CSS hole + outline). Cover-scale crops the
                 # sides of the full-frame talking head into a skinnier portrait frame.
                 # Must match .dependency-video-outline / .dependency-mask in runtime.css.
+                #
+                # Placement contract: each node lands at its revealFrame (via semantic
+                # items). Never redistribute even spacing over placement anchors —
+                # that made bullets ignore the craft panel frames.
                 video_left, video_top = 0.50, 0.10
                 video_w, video_h = 0.42, 0.78
                 video_scale = max(video_w, video_h)
@@ -3078,6 +3254,7 @@ def build_hyperframes_composition(
                 )
                 node_stagger = max(0.35, min(2.0, node_stagger))
                 node_times: list[float] = []
+                anchored_count = 0
                 for index in range(node_count):
                     path = f"parameters.nodes.{index}"
                     match = next(
@@ -3089,24 +3266,43 @@ def build_hyperframes_composition(
                         None,
                     )
                     if match is not None:
-                        spoken = float(match.get("spokenStartSec") or 0.0)
+                        try:
+                            spoken = float(match.get("spokenStartSec") or 0.0)
+                        except (TypeError, ValueError):
+                            spoken = 0.0
                         appear_at = max(spoken, range_start) - range_start
-                        node_times.append(max(start + 0.35, appear_at))
+                        # Honor placement frame; only keep after a brief dock settle.
+                        node_times.append(max(start + 0.12, appear_at))
+                        anchored_count += 1
                     else:
                         node_times.append(start + 0.45 + index * node_stagger)
+                # Monotonic order — small gap when placement-driven so tight frames stay close.
+                min_gap = 0.08 if anchored_count > 0 else 0.35
                 for index in range(1, len(node_times)):
-                    node_times[index] = max(node_times[index], node_times[index - 1] + 0.35)
-                if node_times:
+                    node_times[index] = max(node_times[index], node_times[index - 1] + min_gap)
+                if node_times and anchored_count == 0 and node_count > 1:
+                    # Library / unanchored samples only: compress evenly if settle won't fit.
                     latest_need = (
                         node_times[-1] + settle_after_last_sec + linger_all_white_sec + video_out
                     )
-                    if latest_need > start + duration and node_count > 1:
+                    if latest_need > start + duration:
                         budget = max(
                             0.8,
                             duration - video_out - settle_after_last_sec - linger_all_white_sec - 0.45,
                         )
                         step = budget / max(node_count - 1, 1)
                         node_times = [start + 0.45 + index * step for index in range(node_count)]
+                elif node_times and anchored_count > 0:
+                    # Placement path: keep node frames; shrink pink-settle / linger to fit.
+                    room_after = max(
+                        0.4,
+                        (start + duration - video_out) - node_times[-1],
+                    )
+                    settle_after_last_sec = min(settle_after_last_sec, max(0.3, room_after * 0.45))
+                    linger_all_white_sec = min(
+                        linger_all_white_sec,
+                        max(0.15, room_after - settle_after_last_sec - 0.05),
+                    )
                 timeline_lines.append(
                     f'tl.to("#main-video", {{scale:{video_scale:.4f},'
                     f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
@@ -3116,8 +3312,10 @@ def build_hyperframes_composition(
                     f'tl.fromTo("#{element_id} .dependency-panel", {{opacity:0,x:-36}}, '
                     f'{{opacity:1,x:0,duration:0.45,ease:"power3.out"}}, {entry_start:.4f});'
                 )
+                # Title starts hidden; non-node semantic timeline (above) reveals at Title frame.
+                # Do not force opacity:1 at entry — that ignored placement Title timing.
                 timeline_lines.append(
-                    f'tl.set("#{element_id} .dependency-title", {{opacity:1}}, {entry_start:.4f});'
+                    f'tl.set("#{element_id} .dependency-title", {{opacity:0}}, {start:.4f});'
                 )
                 if node_count:
                     timeline_lines.append(
@@ -3148,7 +3346,7 @@ def build_hyperframes_composition(
                     last_sel = f'#{element_id} .dep-node[data-node-index=\\"{node_count - 1}\\"]'
                     settle_at = node_times[-1] + settle_after_last_sec
                     settle_at = min(settle_at, start + duration - video_out - linger_all_white_sec)
-                    settle_at = max(settle_at, node_times[-1] + 0.4)
+                    settle_at = max(settle_at, node_times[-1] + 0.25)
                     timeline_lines.append(
                         f'tl.to("{last_sel}", {{backgroundColor:"{white_bg}",color:"{ink}",'
                         f'borderColor:"{ink}",duration:0.3,ease:"power1.out"}}, {settle_at:.4f});'
@@ -3161,60 +3359,157 @@ def build_hyperframes_composition(
             elif module_id == "progress-scale":
                 # Match .stat-video-outline in runtime.css (upper-right window).
                 # main-video uses transform-origin:0 0, so scale + x/y land in the frame.
+                #
+                # Fill + milestone stops are driven by placement reveal frames
+                # (semanticItems → parameters.milestones.*). The bar reaches stop i
+                # when bullet/stop i reveals — not a free-running linear fill.
                 video_x = 0.5625
                 video_y = 0.12
                 video_scale = 0.365
                 video_in = 0.5
                 video_out = 0.45
-                # Bar grows, then the full stage lingers 2–3s before exit (not fill-to-end).
                 hold_after_fill = 2.5
-                fill_lead = 0.45
-                min_fill = 1.2
-                reserved = hold_after_fill + video_out
-                available = max(min_fill, duration - fill_lead - video_out)
-                if available < min_fill + hold_after_fill:
-                    hold_after_fill = max(1.5, available - min_fill)
-                fill_duration = max(min_fill, duration - fill_lead - hold_after_fill - video_out)
-                fill_start = start + fill_lead
-                fill_end = fill_start + fill_duration
+                milestones = params.get("milestones") if isinstance(params.get("milestones"), list) else []
+                milestone_count = min(4, len(milestones))
+                raw_times: list[float | None] = []
+                for index in range(milestone_count):
+                    path = f"parameters.milestones.{index}"
+                    match = next(
+                        (
+                            item
+                            for item in cue.get("semanticItems", [])
+                            if str(item.get("parameterPath") or "") == path
+                        ),
+                        None,
+                    )
+                    if match is not None:
+                        try:
+                            spoken = float(match.get("spokenStartSec") or 0.0)
+                        except (TypeError, ValueError):
+                            spoken = 0.0
+                        appear_at = max(spoken, range_start) - range_start
+                        raw_times.append(max(start + 0.2, appear_at))
+                    else:
+                        raw_times.append(None)
+
+                milestone_times: list[float] = []
+                if milestone_count and all(t is None for t in raw_times):
+                    # No placement anchors — even spacing (legacy sample / library path).
+                    fill_lead = 0.45
+                    min_fill = 1.2
+                    available = max(min_fill, duration - fill_lead - video_out)
+                    if available < min_fill + hold_after_fill:
+                        hold_after_fill = max(1.5, available - min_fill)
+                    fill_duration = max(min_fill, duration - fill_lead - hold_after_fill - video_out)
+                    fill_start = start + fill_lead
+                    milestone_times = [
+                        fill_start + (index / max(milestone_count - 1, 1)) * fill_duration
+                        for index in range(milestone_count)
+                    ]
+                elif milestone_count:
+                    # Fill missing anchors by even steps between known neighbors.
+                    fill_lead = 0.45
+                    min_fill = 1.2
+                    available = max(min_fill, duration - fill_lead - video_out)
+                    if available < min_fill + hold_after_fill:
+                        hold_after_fill = max(1.5, available - min_fill)
+                    fill_duration = max(min_fill, duration - fill_lead - hold_after_fill - video_out)
+                    fill_start = start + fill_lead
+                    fallback = [
+                        fill_start + (index / max(milestone_count - 1, 1)) * fill_duration
+                        for index in range(milestone_count)
+                    ]
+                    milestone_times = [
+                        raw if raw is not None else fallback[index]
+                        for index, raw in enumerate(raw_times)
+                    ]
+                    # Monotonic + room after dock.
+                    milestone_times[0] = max(milestone_times[0], start + 0.35)
+                    for index in range(1, milestone_count):
+                        milestone_times[index] = max(
+                            milestone_times[index],
+                            milestone_times[index - 1] + 0.2,
+                        )
+                    # Keep last stop before restore/exit.
+                    last_cap = start + duration - video_out - 0.35
+                    if milestone_times[-1] > last_cap and milestone_count > 1:
+                        budget = max(0.6, last_cap - milestone_times[0])
+                        step = budget / max(milestone_count - 1, 1)
+                        milestone_times = [
+                            milestone_times[0] + index * step for index in range(milestone_count)
+                        ]
+
+                fill_end = (
+                    milestone_times[-1]
+                    if milestone_times
+                    else start + max(1.2, duration * 0.5)
+                )
                 restore_at = min(start + duration - video_out, fill_end + hold_after_fill)
+                restore_at = max(restore_at, fill_end + 0.4)
+
                 timeline_lines.append(
                     f'tl.to("#main-video", {{scale:{video_scale:.4f},'
                     f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
                     f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
                 )
-                # Linear fill so milestone stops land when the bar reaches them.
                 timeline_lines.append(
-                    f'tl.fromTo("#{element_id} .scale-fill", {{scaleX:0}}, '
-                    f'{{scaleX:1,duration:{fill_duration:.3f},ease:"none"}}, '
-                    f'{fill_start:.4f});'
+                    f'tl.set("#{element_id} .scale-fill", {{scaleX:0}}, {start:.4f});'
                 )
-                milestones = params.get("milestones") if isinstance(params.get("milestones"), list) else []
-                milestone_count = min(4, len(milestones))
                 if milestone_count:
-                    # Opacity only — never animate transform/y here (inline left/translateX
+                    # Opacity only — never animate transform/y (inline left/translateX
                     # places each stop on the bar fraction the fill reaches).
                     timeline_lines.append(
                         f'tl.set("#{element_id} .scale-milestone", {{opacity:0}}, {start:.4f});'
                     )
+                    prev_t = start + 0.2
+                    prev_frac = 0.0
                     for index in range(milestone_count):
-                        frac = index / max(milestone_count - 1, 1) if milestone_count > 1 else 0.5
-                        appear_at = fill_start + frac * fill_duration
+                        frac = (
+                            index / max(milestone_count - 1, 1)
+                            if milestone_count > 1
+                            else 1.0
+                        )
+                        appear_at = milestone_times[index]
+                        seg = max(0.05, appear_at - prev_t)
+                        # Grow the bar to this stop by the stop's reveal time.
+                        timeline_lines.append(
+                            f'tl.to("#{element_id} .scale-fill", '
+                            f'{{scaleX:{frac:.4f},duration:{seg:.3f},ease:"none"}}, '
+                            f'{prev_t:.4f});'
+                        )
                         timeline_lines.append(
                             f'tl.fromTo("#{element_id} .scale-milestone[data-milestone-index=\\"{index}\\"]", '
                             f'{{opacity:0}}, '
                             f'{{opacity:1,duration:0.18,ease:"power2.out",immediateRender:false}}, '
                             f'{appear_at:.4f});'
                         )
+                        prev_t = appear_at
+                        prev_frac = frac
+                    # Ensure we end fully filled if last stop is not at 1.0 (single stop).
+                    if prev_frac < 0.999:
+                        timeline_lines.append(
+                            f'tl.to("#{element_id} .scale-fill", '
+                            f'{{scaleX:1,duration:0.2,ease:"none"}}, {prev_t:.4f});'
+                        )
+                else:
+                    # No stops — still grow the bar once over the mid-cue.
+                    fill_duration = max(1.0, duration - 0.45 - hold_after_fill - video_out)
+                    timeline_lines.append(
+                        f'tl.fromTo("#{element_id} .scale-fill", {{scaleX:0}}, '
+                        f'{{scaleX:1,duration:{fill_duration:.3f},ease:"none"}}, '
+                        f'{(start + 0.45):.4f});'
+                    )
                 timeline_lines.append(
                     f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},ease:"power3.inOut"}}, '
                     f'{restore_at:.4f});'
                 )
             elif module_id == "source-punch-zoom":
                 # One camera engine, three paths (placement picks path; default in-out):
-                #   in     — full → tight, hold tight for the cue
-                #   out    — start tight → full
-                #   in-out — full → tight → hold → full (classic punch)
+                #   in     — full → tight at zoomInFrame, hold tight for the cue
+                #   out    — start tight → full at zoomOutFrame
+                #   in-out — full → tight at zoomInFrame → hold → full at zoomOutFrame
+                # zoomInFrame / zoomOutFrame are absolute locked-cut frames (when the
+                # move *starts*). Missing values fall back to cue start / near cue end.
                 focus_x = _number(params.get("focusX"), 0.5, 0, 1) * 100
                 focus_y = _number(params.get("focusY"), 0.5, 0, 1) * 100
                 zoom = _number(params.get("zoom"), 1.25, 1.02, MAX_PUNCH_ZOOM)
@@ -3225,15 +3520,43 @@ def build_hyperframes_composition(
                 origin = f'"{focus_x:.2f}% {focus_y:.2f}%"'
                 # Keep settle from eating the whole cue when short.
                 settle = min(settle, max(0.2, duration * 0.45))
+                cue_end = start + duration
+                fps_local = max(1.0, float(fps))
+
+                def _punch_frame_local(raw: object, *, default_local: float) -> float:
+                    if raw is None or raw == "":
+                        return default_local
+                    try:
+                        frame_abs = float(raw)
+                    except (TypeError, ValueError):
+                        return default_local
+                    # Absolute frame → composition-local seconds.
+                    local = frame_abs / fps_local - range_start
+                    return max(start, min(cue_end - 0.05, local))
+
+                default_out_local = max(start + settle, cue_end - settle)
+                zoom_in_at = _punch_frame_local(params.get("zoomInFrame"), default_local=start)
+                zoom_out_at = _punch_frame_local(
+                    params.get("zoomOutFrame"),
+                    default_local=default_out_local,
+                )
+                # Ensure room for the settle tween and a sensible order.
+                zoom_in_at = min(zoom_in_at, cue_end - settle - 0.05)
+                zoom_in_at = max(start, zoom_in_at)
+                zoom_out_at = max(zoom_out_at, zoom_in_at + settle)
+                zoom_out_at = min(zoom_out_at, cue_end - settle)
+                if zoom_out_at < zoom_in_at + settle:
+                    zoom_out_at = min(cue_end - settle, zoom_in_at + settle)
+
                 if motion == "in":
                     timeline_lines.append(
                         f'tl.to("#main-video", {{scale:{zoom:.4f},transformOrigin:{origin},'
-                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {start:.4f});'
+                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {zoom_in_at:.4f});'
                     )
                     # Hold tight for the rest of the cue; clean reset after so the next cue starts full.
                     timeline_lines.append(
                         f'tl.set("#main-video", {{scale:1,transformOrigin:{origin}}}, '
-                        f'{(start + duration):.4f});'
+                        f'{cue_end:.4f});'
                     )
                 elif motion == "out":
                     timeline_lines.append(
@@ -3241,26 +3564,24 @@ def build_hyperframes_composition(
                     )
                     timeline_lines.append(
                         f'tl.to("#main-video", {{scale:1,transformOrigin:{origin},'
-                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {start:.4f});'
+                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {zoom_out_at:.4f});'
                     )
                 else:  # in-out
-                    out_at = start + duration - settle
-                    if out_at < start + settle:
-                        out_at = start + settle
                     timeline_lines.append(
                         f'tl.to("#main-video", {{scale:{zoom:.4f},transformOrigin:{origin},'
-                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {start:.4f});'
+                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {zoom_in_at:.4f});'
                     )
                     timeline_lines.append(
                         f'tl.to("#main-video", {{scale:1,transformOrigin:{origin},'
-                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {out_at:.4f});'
+                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {zoom_out_at:.4f});'
                     )
             elif module_id == "problem-card-triptych":
-                # Sequence (hard-coded settle/linger — not parameters):
-                #   1) each card enters pink as the “active” point
+                # Sequence:
+                #   1) each card enters pink as the “active” point at its revealFrame
                 #   2) previous card settles white when the next appears
-                #   3) 2s after the last card enters, it settles white
-                #   4) all three white linger ~2s more, then exit
+                #   3) after the last card enters, it settles white (settle shrinks if needed)
+                #   4) all-white linger, then exit
+                # Placement contract: never even-redistribute over craft frames.
                 settle_after_last_sec = 2.0
                 linger_all_white_sec = 2.0
                 pink = "#ff00ce"
@@ -3275,8 +3596,8 @@ def build_hyperframes_composition(
                     else 0.85
                 )
                 card_stagger = max(0.35, min(2.0, card_stagger))
-                # Prefer spoken/sample semantic times for each card when present.
                 card_times: list[float] = []
+                anchored_count = 0
                 for index in range(card_count):
                     path = f"parameters.cards.{index}"
                     match = next(
@@ -3288,25 +3609,52 @@ def build_hyperframes_composition(
                         None,
                     )
                     if match is not None:
-                        spoken = float(match.get("spokenStartSec") or 0.0)
+                        try:
+                            spoken = float(match.get("spokenStartSec") or 0.0)
+                        except (TypeError, ValueError):
+                            spoken = 0.0
                         appear_at = max(spoken, range_start) - range_start
+                        # Honor placement frame; only keep after a brief stage settle.
                         card_times.append(max(start + 0.12, appear_at))
+                        anchored_count += 1
                     else:
                         card_times.append(start + 0.28 + index * card_stagger)
-                # Guarantee increasing order and room for settle + linger + exit.
+                # Monotonic order — small gap when placement-driven so tight frames stay close.
+                min_gap = 0.08 if anchored_count > 0 else 0.35
                 for index in range(1, len(card_times)):
-                    card_times[index] = max(card_times[index], card_times[index - 1] + 0.35)
-                latest_need = (
-                    (card_times[-1] if card_times else start + 0.28)
-                    + settle_after_last_sec
-                    + linger_all_white_sec
-                    + exit_duration
-                )
-                if card_times and latest_need > start + duration and card_count > 1:
-                    # Compress gaps so the hard-coded settle/linger still fit the cue.
-                    budget = max(0.8, duration - exit_duration - settle_after_last_sec - linger_all_white_sec - 0.28)
-                    step = budget / max(card_count - 1, 1)
-                    card_times = [start + 0.28 + index * step for index in range(card_count)]
+                    card_times[index] = max(card_times[index], card_times[index - 1] + min_gap)
+                if card_times and anchored_count == 0 and card_count > 1:
+                    # Library / unanchored samples only: compress evenly if settle won't fit.
+                    latest_need = (
+                        card_times[-1]
+                        + settle_after_last_sec
+                        + linger_all_white_sec
+                        + exit_duration
+                    )
+                    if latest_need > start + duration:
+                        budget = max(
+                            0.8,
+                            duration
+                            - exit_duration
+                            - settle_after_last_sec
+                            - linger_all_white_sec
+                            - 0.28,
+                        )
+                        step = budget / max(card_count - 1, 1)
+                        card_times = [start + 0.28 + index * step for index in range(card_count)]
+                elif card_times and anchored_count > 0:
+                    # Placement path: keep card frames; shrink pink-settle / linger to fit.
+                    room_after = max(
+                        0.4,
+                        (start + duration - exit_duration) - card_times[-1],
+                    )
+                    settle_after_last_sec = min(
+                        settle_after_last_sec, max(0.3, room_after * 0.45)
+                    )
+                    linger_all_white_sec = min(
+                        linger_all_white_sec,
+                        max(0.15, room_after - settle_after_last_sec - 0.05),
+                    )
                 timeline_lines.append(
                     f'tl.fromTo("#{element_id} .pf-triptych", {{opacity:0,y:16}}, '
                     f'{{opacity:1,y:0,duration:0.4,ease:"power3.out"}}, {entry_start:.4f});'
@@ -3351,8 +3699,10 @@ def build_hyperframes_composition(
                     last_sel = f'#{element_id} .pf-tri-card[data-card-index=\\"{card_count - 1}\\"]'
                     settle_at = card_times[-1] + settle_after_last_sec
                     # Keep settle before exit so the all-white linger is visible.
-                    settle_at = min(settle_at, start + duration - exit_duration - linger_all_white_sec)
-                    settle_at = max(settle_at, card_times[-1] + 0.4)
+                    settle_at = min(
+                        settle_at, start + duration - exit_duration - linger_all_white_sec
+                    )
+                    settle_at = max(settle_at, card_times[-1] + 0.25)
                     timeline_lines.append(
                         f'tl.to("{last_sel}", {{backgroundColor:"{white_bg}",color:"{ink}",'
                         f'duration:0.3,ease:"power1.out"}}, {settle_at:.4f});'
@@ -3758,13 +4108,125 @@ def build_hyperframes_composition(
                 timeline_lines.append(
                     f'tl.set("{wrap}", {{opacity:0}}, {(exit_at + exit_d):.4f});'
                 )
+            elif module_id == "kinetic-word-punctuation":
+                # Magenta stamp: pink box + phrase land together at phrase revealFrame.
+                # Previously the shell entered at beat start while [data-semantic-path]
+                # kept the words at opacity 0 until semantic reveal — empty pink box.
+                phrase_at = start
+                for item in cue.get("semanticItems") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    if str(item.get("parameterPath") or "") != "parameters.phrase":
+                        continue
+                    try:
+                        spoken = float(item.get("spokenStartSec") or 0.0)
+                    except (TypeError, ValueError):
+                        spoken = 0.0
+                    phrase_at = max(spoken, range_start) - range_start
+                    break
+                phrase_at = max(start, min(start + max(duration - 0.05, 0.0), phrase_at))
+                drift = 44 if str(params.get("side")) == "right" else -44
+                phrase_sel = f'#{element_id} [data-semantic-path="parameters.phrase"]'
+                stamp_sel = f"#{element_id} .pf-kinetic"
+                # Words are opaque inside the stamp; the stamp is the only reveal surface.
+                timeline_lines.append(
+                    f"tl.set('{phrase_sel}', {{opacity:1,y:0}}, {start:.4f});"
+                )
+                timeline_lines.append(
+                    f'tl.set("{stamp_sel}", {{opacity:0}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("{stamp_sel}", {{opacity:0,x:{drift},scale:0.97}}, '
+                    f'{{opacity:1,x:0,scale:1,duration:0.44,ease:"power3.out",'
+                    f'immediateRender:false}}, {phrase_at:.4f});'
+                )
+                exit_at = start + duration - 0.28
+                if duration > 0.5:
+                    timeline_lines.append(
+                        f'tl.to("{stamp_sel}", {{opacity:0,duration:0.28,ease:"power2.in"}}, '
+                        f'{exit_at:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.set("{stamp_sel}", {{opacity:0}}, {(start + duration):.4f});'
+                    )
+            elif module_id == "tradeoff-meter":
+                # Fixed knob at value; fill grows toward it and arrives at verdict reveal.
+                # Fill uses scaleX → value (not 1.0). Linear ease; fill_end == verdict_at.
+                value_frac = _number(params.get("value"), 0.5, 0, 1)
+                drift = 44 if str(params.get("side")) == "right" else -44
+                latest = start + duration - exit_duration - 0.05
+
+                def _tradeoff_spoken(path: str) -> float | None:
+                    match = next(
+                        (
+                            item
+                            for item in cue.get("semanticItems", [])
+                            if str(item.get("parameterPath") or "") == path
+                        ),
+                        None,
+                    )
+                    if match is None:
+                        return None
+                    try:
+                        spoken = float(match.get("spokenStartSec") or 0.0)
+                    except (TypeError, ValueError):
+                        spoken = 0.0
+                    return max(spoken, range_start) - range_start
+
+                left_at = _tradeoff_spoken("parameters.leftLabel")
+                right_at = _tradeoff_spoken("parameters.rightLabel")
+                verdict_at = _tradeoff_spoken("parameters.verdict")
+                if verdict_at is None:
+                    verdict_at = start + max(0.8, duration * 0.55)
+                fill_end = max(start + 0.35, min(latest, verdict_at))
+                # Prefer starting after labels; always finish exactly at fill_end.
+                label_ready = start + 0.25
+                for t in (left_at, right_at):
+                    if t is not None:
+                        label_ready = max(label_ready, t + 0.12)
+                earliest = start + 0.12
+                preferred = max(earliest, label_ready)
+                if fill_end - preferred >= 0.35:
+                    fill_start = preferred
+                else:
+                    fill_start = max(earliest, fill_end - min(2.5, max(0.35, fill_end - earliest)))
+                fill_dur = max(0.05, min(2.5, fill_end - fill_start))
+                fill_start = fill_end - fill_dur  # hard lock: end == verdict
+
+                card_sel = f"#{element_id} .pf-card"
+                fill_sel = f"#{element_id} .pf-meter-fill"
+                timeline_lines.append(
+                    f'tl.fromTo("{card_sel}", {{opacity:0,x:{drift},scale:0.97}}, '
+                    f'{{opacity:1,x:0,scale:1,duration:0.44,ease:"power3.out"}}, '
+                    f'{entry_start:.4f});'
+                )
+                # Labels + verdict: generic semantic path (not in skip_semantic).
+                # Knob is static in markup at value%; only fill animates.
+                timeline_lines.append(
+                    f'tl.set("{fill_sel}", {{scaleX:0,transformOrigin:"left center"}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("{fill_sel}", {{scaleX:0,transformOrigin:"left center"}}, '
+                    f'{{scaleX:{value_frac:.4f},duration:{fill_dur:.3f},ease:"none",'
+                    f'immediateRender:false}}, {fill_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.to("{card_sel}", {{opacity:0,duration:0.28,ease:"power2.in"}}, '
+                    f'{(start + duration - 0.28):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("{card_sel}", {{opacity:0}}, {(start + duration):.4f});'
+                )
             elif module_id in PORTED_MODULE_IDS and module_id not in {
                 "brand-cta-lockup",
                 "windows-prompt-typing",
+                "kinetic-word-punctuation",  # stamp timing owned above
+                "speaker-rise-callouts",  # thesis + callouts own placement timing above
+                "tradeoff-meter",  # meter fill owned above (syncs to verdict frame)
             }:
-                shell = ".pf-card, #%s .pf-triptych, #%s .pf-window, #%s .pf-sunrise, #%s .pf-kinetic, #%s .pf-rise-thesis" % ((element_id,) * 5)
-                kids = (".pf-path-row, #%s .pf-pin-row, #%s .pf-rise-item, "
-                        "#%s .pf-payoff, #%s .pf-verdict, #%s .pf-final-action") % ((element_id,) * 5)
+                shell = ".pf-card, #%s .pf-triptych, #%s .pf-window, #%s .pf-sunrise" % ((element_id,) * 3)
+                kids = (".pf-path-row, #%s .pf-pin-row, "
+                        "#%s .pf-payoff, #%s .pf-verdict, #%s .pf-final-action") % ((element_id,) * 4)
                 drift = 44 if str(params.get("side")) == "right" else -44
                 # Production default ~0.1s. Library samples slow this and also stagger semantic
                 # anchors (~1s); skip the group kids tween in sample mode so it does not fight
@@ -3774,8 +4236,6 @@ def build_hyperframes_composition(
                 timeline_lines.append(f'tl.fromTo("#{element_id} {shell}", {{opacity:0,x:{drift},scale:0.97}}, {{opacity:1,x:0,scale:1,duration:0.44,ease:"power3.out"}}, {entry_start:.4f});')
                 if not sample_mode:
                     timeline_lines.append(f'tl.fromTo("#{element_id} {kids}", {{opacity:0,y:18}}, {{opacity:1,y:0,duration:0.35,stagger:{kid_stagger:.3f},ease:"power2.out"}}, {(start + .24):.4f});')
-                if module_id == "tradeoff-meter":
-                    timeline_lines.append(f'tl.fromTo("#{element_id} .pf-meter-fill", {{scaleX:0}}, {{scaleX:1,duration:0.6,ease:"power2.inOut"}}, {(start + .3):.4f});')
                 timeline_lines.append(f'tl.to("#{element_id} {shell}", {{opacity:0,duration:0.28,ease:"power2.in"}}, {(start + duration - 0.28):.4f});')
                 timeline_lines.append(f'tl.set("#{element_id} {shell}", {{opacity:0}}, {(start + duration):.4f});')
             elif module_id == "ui-callout":

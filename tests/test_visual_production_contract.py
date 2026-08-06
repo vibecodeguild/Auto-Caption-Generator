@@ -100,10 +100,10 @@ def _good_suggestions() -> dict:
             "startSec": 4, "endSec": 9, "editorialPurpose": "Land the emphasis beat.",
             "moduleId": "kinetic-word-punctuation", "visualFamily": "kinetic-type",
             "selectionRationale": "Matches the spoken emphasis.",
-            "candidateTreatmentIds": ["kinetic-word-punctuation", "speaker-side-panel", "problem-card-triptych"],
+            "candidateTreatmentIds": ["kinetic-word-punctuation", "dependency-stack", "problem-card-triptych"],
             "rankedCandidates": [
                 {"treatmentId": "kinetic-word-punctuation", "rank": 1, "fitReason": "Exact emphasis intent."},
-                {"treatmentId": "speaker-side-panel", "rank": 2, "fitReason": "Compatible supporting layout."},
+                {"treatmentId": "dependency-stack", "rank": 2, "fitReason": "Compatible supporting layout."},
                 {"treatmentId": "problem-card-triptych", "rank": 3, "fitReason": "Compatible if the beat expands."},
             ],
             "speakerSafety": {

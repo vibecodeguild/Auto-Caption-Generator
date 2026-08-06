@@ -17,7 +17,8 @@ from app.core.visual_production import MODULE_IDS
 def test_specs_cover_all_module_ids() -> None:
     assert_specs_cover_all_engines()
     assert set(ENGINE_PLACEMENT_SPECS) == MODULE_IDS
-    assert len(ENGINE_PLACEMENT_SPECS) == 18
+    assert len(ENGINE_PLACEMENT_SPECS) == len(MODULE_IDS)
+    assert "speaker-side-panel" not in MODULE_IDS
 
 
 def test_no_kicker_in_any_spec_or_adapter() -> None:
@@ -33,19 +34,17 @@ def test_no_kicker_in_any_spec_or_adapter() -> None:
         assert "kicker" not in params, eid
 
 
-def test_side_panel_lines_expand_items() -> None:
+def test_dependency_stack_lines_expand_nodes() -> None:
     params = lines_to_engine_parameters(
-        "speaker-side-panel",
+        "dependency-stack",
         [
             empty_line("text", text="TITLE", reveal_frame=0),
-            empty_line("items.0", text="One", reveal_frame=10),
-            empty_line("items.1", text="Two", reveal_frame=20),
+            empty_line("nodes.0", text="One", reveal_frame=10),
+            empty_line("nodes.1", text="Two", reveal_frame=20),
         ],
-        motion={"side": "left"},
     )
     assert params["text"] == "TITLE"
-    assert params["items"] == ["One", "Two"]
-    assert params["side"] == "left"
+    assert params["nodes"] == ["One", "Two"]
     assert "kicker" not in params
 
 
@@ -71,19 +70,30 @@ def test_source_punch_zoom_has_no_lines() -> None:
     spec = placement_interface_summary("source-punch-zoom")
     assert spec["fixedLineSlots"] == []
     assert spec["listSlot"] is None
+    assert "zoomInFrame" in (spec.get("motionKeys") or [])
+    assert "zoomOutFrame" in (spec.get("motionKeys") or [])
     params = lines_to_engine_parameters(
         "source-punch-zoom",
         [],
-        motion={"focusX": 0.5, "focusY": 0.4, "zoom": 1.4},
+        motion={
+            "focusX": 0.5,
+            "focusY": 0.4,
+            "zoom": 1.4,
+            "zoomInFrame": 120,
+            "zoomOutFrame": 200,
+        },
     )
     assert params["focusX"] == 0.5
     assert params["zoom"] == 1.4
+    assert params["zoomInFrame"] == 120
+    assert params["zoomOutFrame"] == 200
 
 
 def test_all_interfaces_export() -> None:
     rows = all_placement_interfaces()
-    assert len(rows) == 18
+    assert len(rows) == len(MODULE_IDS)
     assert all(row["kicker"] is False for row in rows)
+    assert not any(row["engineId"] == "speaker-side-panel" for row in rows)
 
 
 def test_slot_paths() -> None:

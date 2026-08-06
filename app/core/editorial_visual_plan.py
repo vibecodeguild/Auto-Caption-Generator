@@ -44,10 +44,10 @@ TREATMENT_TO_MODULE: dict[str, dict[str, str]] = {
         "moduleId": "kinetic-word-punctuation",
         "mode": "kinetic",
     },
-    # Side / section labels → left white panel (speaker stays right)
-    "speaker-side-panel": {
-        "moduleId": "speaker-side-panel",
-        "mode": "side-panel",
+    # Lists / stacks → dependency stack (speaker docks right)
+    "dependency-stack": {
+        "moduleId": "dependency-stack",
+        "mode": "dependency",
     },
     # Tutorial structure
     "numbered-example-card": {
@@ -266,7 +266,6 @@ def _module_parameters(beat: dict, binding: dict[str, str], *, index: int) -> di
         base.update(
             {
                 "label": copy or "UI",
-                "detail": "",
                 "targetBounds": beat.get("uiRegion")
                 or {"x": 0.12, "y": 0.18, "width": 0.36, "height": 0.16},
                 "pointer": "below",
@@ -391,7 +390,7 @@ def _binding_for_module(module_id: str, fallback_treatment: str) -> dict[str, st
         "numbered-step-intro": "numbered-step",
         "windows-prompt-typing": "prompt",
         "source-punch-zoom": "punch-zoom",
-        "speaker-side-panel": "side-panel",
+        "dependency-stack": "dependency",
         "numbered-example-card": "numbered-example",
         "robot-cheer": "robot",
         "robot-defiant": "robot",

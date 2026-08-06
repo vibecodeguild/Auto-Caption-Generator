@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from app.core.assignment import (
     OUTPUT_FILENAME as ASSIGN_OUT,
     REVIEWED_FILENAME as ASSIGN_REV,
@@ -17,6 +19,7 @@ from app.core.masterbeater import (
     normalize_masterbeater_result,
     write_masterbeater_output,
 )
+from app.core import visual_production
 from app.core.placement import (
     OUTPUT_FILENAME,
     REVIEWED_FILENAME,
@@ -132,7 +135,7 @@ def _setup_project(tmp_path: Path, library: Path) -> tuple[Path, dict]:
                         "id": "ctx-u",
                         "displayName": "Context",
                         "status": "golden",
-                        "engineId": "speaker-side-panel",
+                        "engineId": "dependency-stack",
                         "beatTypes": ["context"],
                         "allowedLayouts": ["talking-left"],
                     },
@@ -227,6 +230,101 @@ def test_build_cue_preview_sanitizes_legacy_punch_motion() -> None:
     cue = build_cue_preview_payload(placement, fps=30.0)
     assert cue["parameters"]["motion"] == "in-out"
     assert 1.02 <= float(cue["parameters"]["zoom"]) <= 2.0
+
+
+def test_build_cue_preview_coerces_tradeoff_meter_value() -> None:
+    """UI text meta value must become a number so schema oneOf accepts the cue."""
+
+    placement = {
+        "beatId": "b-meter",
+        "engineId": "tradeoff-meter",
+        "startFrame": 0,
+        "endFrameExclusive": 90,
+        "lines": [
+            {"slot": "leftLabel", "text": "Left", "revealFrame": 0},
+            {"slot": "rightLabel", "text": "Right", "revealFrame": 0},
+            {"slot": "verdict", "text": "Verdict", "revealFrame": 45},
+        ],
+        "meta": {"value": "0.8"},
+        "assets": {},
+        "motion": {"side": "left"},
+    }
+    cue = build_cue_preview_payload(placement, fps=30.0)
+    assert cue["moduleId"] == "tradeoff-meter"
+    assert cue["parameters"]["value"] == pytest.approx(0.8)
+    assert isinstance(cue["parameters"]["value"], float)
+
+
+def test_build_cue_preview_assembles_ui_callout_bounds() -> None:
+    """Craft meta x/y/width/height become nested targetBounds; flats stripped."""
+
+    placement = {
+        "beatId": "b-callout",
+        "engineId": "ui-callout",
+        "startFrame": 0,
+        "endFrameExclusive": 90,
+        "lines": [
+            {"slot": "label", "text": "Click here", "revealFrame": 0},
+        ],
+        "meta": {"x": "0.2", "y": "0.3", "width": "0.25", "height": "0.15"},
+        "assets": {},
+        "motion": {"pointer": "below"},
+    }
+    cue = build_cue_preview_payload(placement, fps=30.0)
+    assert cue["moduleId"] == "ui-callout"
+    tb = cue["parameters"]["targetBounds"]
+    assert tb["x"] == pytest.approx(0.2)
+    assert tb["y"] == pytest.approx(0.3)
+    assert tb["width"] == pytest.approx(0.25)
+    assert tb["height"] == pytest.approx(0.15)
+    assert "x" not in cue["parameters"]
+    assert "width" not in cue["parameters"]
+    assert "detail" not in cue["parameters"]
+    assert cue["parameters"]["pointer"] == "below"
+
+    markup = visual_production._module_markup(cue, "callout", 0, 3, 20)
+    assert "callout-ring" in markup
+    assert "callout-detail" not in markup
+    assert "left:20.000%" in markup
+    assert "top:30.000%" in markup
+    assert "width:25.000%" in markup
+    assert "height:15.000%" in markup
+
+
+def test_build_cue_preview_coerces_numbered_step_show_number() -> None:
+    """UI text knobs must not fail schema oneOf (misleading assetId required)."""
+
+    placement = {
+        "beatId": "b-step",
+        "engineId": "numbered-step-intro",
+        "startFrame": 0,
+        "endFrameExclusive": 90,
+        "lines": [
+            {"slot": "title", "text": "STEP TITLE", "revealFrame": 0},
+            {"slot": "action", "text": "Do the thing", "revealFrame": 15},
+        ],
+        "meta": {
+            "stepNumber": "3",  # string from text input
+            "showNumber": "false",  # string from text input — schema wants boolean
+        },
+        "assets": {},
+        "motion": {"side": "left"},
+    }
+    cue = build_cue_preview_payload(placement, fps=30.0)
+    assert cue["moduleId"] == "numbered-step-intro"
+    assert cue["parameters"]["stepNumber"] == 3
+    assert cue["parameters"]["showNumber"] is False
+    assert isinstance(cue["parameters"]["showNumber"], bool)
+
+    placement["meta"]["showNumber"] = 0
+    cue0 = build_cue_preview_payload(placement, fps=30.0)
+    assert cue0["parameters"]["showNumber"] is False
+
+    placement["meta"]["showNumber"] = "true"
+    placement["meta"]["stepNumber"] = 2
+    cue1 = build_cue_preview_payload(placement, fps=30.0)
+    assert cue1["parameters"]["showNumber"] is True
+    assert cue1["parameters"]["stepNumber"] == 2
 
 
 def test_punchline_reveal_preview_uses_joke_image_card_path() -> None:

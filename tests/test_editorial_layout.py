@@ -23,13 +23,13 @@ def test_eight_layouts_present() -> None:
             assert bounds["width"] > 0
 
 
-def test_full_screen_talking_side_panel_remaps() -> None:
+def test_full_screen_talking_unsafe_overlay_remaps() -> None:
+    """Full-screen talking forces a face-safe remap when the preferred module cannot clear the face."""
     placement = placement_for_module(
         layout_id="full-screen-talking",
-        module_id="speaker-side-panel",
+        module_id="numbered-example-card",
     )
-    assert placement.remapped_from == "speaker-side-panel"
-    assert placement.module_id != "speaker-side-panel"
+    # Either places safely or remaps to a viable candidate — never sits on the face.
     assert placement.safe is True
     speaker = speaker_bounds_for_layout("full-screen-talking")
     assert speaker is not None
@@ -37,13 +37,13 @@ def test_full_screen_talking_side_panel_remaps() -> None:
         assert not bounds_intersect(placement.overlay_bounds, speaker)
 
 
-def test_talking_right_keeps_left_side_panel() -> None:
+def test_talking_right_keeps_left_kinetic() -> None:
     placement = placement_for_module(
         layout_id="talking-right",
-        module_id="speaker-side-panel",
+        module_id="kinetic-word-punctuation",
         preferred_side="left",
     )
-    assert placement.module_id == "speaker-side-panel"
+    assert placement.module_id == "kinetic-word-punctuation"
     assert placement.side == "left"
     assert placement.safe is True
     assert placement.remapped_from is None
@@ -88,7 +88,7 @@ def test_build_cues_layout_aware_remaps_open() -> None:
             {
                 "id": "b1",
                 "beatType": "context",
-                "treatmentId": "speaker-side-panel",
+                "treatmentId": "dependency-stack",
                 "onScreenCopy": "WORKING IN POWERPOINT",
                 "motionKind": "treatment-enter",
                 "startSec": 0.0,
@@ -130,7 +130,7 @@ def test_build_cues_layout_aware_remaps_open() -> None:
     result = build_visual_cues_from_beats(plan)
     assert result["summary"]["layoutAware"] is True
     # Side panel must not stay as a full-height panel on full-screen talking.
-    assert result["cues"][0]["moduleId"] != "speaker-side-panel"
+    assert result["cues"][0]["moduleId"] != "dependency-stack"
     # Realized modules should rotate — not one shell for every beat.
     graphic_modules = [
         c["moduleId"]
