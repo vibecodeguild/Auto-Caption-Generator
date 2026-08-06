@@ -21,6 +21,10 @@ screenshots/
 tmp_*.py
 tmp_*.json
 /tmp_*.*
+.tmp_*.py
+# Local masterbeater / placement diagnostic dumps (paths + transcripts).
+.tmp_mb*
+_mb_*.txt
 internal/
 visual-production/
 .tmp-vcg-analysis/

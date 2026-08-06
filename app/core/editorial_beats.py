@@ -68,7 +68,6 @@ DAILY_TREATMENT_KIT: frozenset[str] = frozenset(
     {
         "source-punch-zoom",
         "punchline-reveal",
-        "speaker-side-panel",
         "kinetic-word-punctuation",
         "numbered-example-card",
         "numbered-step-intro",

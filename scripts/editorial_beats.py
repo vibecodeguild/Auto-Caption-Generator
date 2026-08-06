@@ -80,7 +80,7 @@ def _cmd_example(_: argparse.Namespace) -> int:
             {
                 "id": "beat-theme",
                 "beatType": "context",
-                "graphicId": "speaker-side-panel",
+                "graphicId": "dependency-stack",
                 "onScreenCopy": "WORKING IN POWERPOINT",
                 "motionKind": "treatment-enter",
                 "startSec": 4.5,

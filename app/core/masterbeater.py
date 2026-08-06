@@ -733,6 +733,103 @@ def save_masterbeater_edits_for_video_project(
     return result
 
 
+def _write_masterbeater_raw(
+    root: Path,
+    *,
+    stdout: str,
+    stderr: str,
+    returncode: int | None,
+    parsed: dict[str, Any] | None = None,
+    error: str | None = None,
+    max_turns: int | None = None,
+) -> Path | None:
+    """Always persist agent I/O so UI failures are debuggable."""
+
+    raw_path = root / "masterbeater-raw.json"
+    try:
+        raw_path.write_text(
+            json.dumps(
+                {
+                    "stdout": (stdout or "")[:200000],
+                    "stderr": (stderr or "")[:50000],
+                    "returncode": returncode,
+                    "parsed": parsed,
+                    "error": error,
+                    "maxTurns": max_turns,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return raw_path
+    except OSError:
+        return None
+
+
+def _masterbeater_max_turns(*, word_count: int, duration_sec: float) -> int:
+    """Agent turn budget for a full-pass Stage 1 label.
+
+    Override with VCG_MASTERBEATER_MAX_TURNS. Default scales with cut length so a
+    ~15 min talking-head is not cancelled after the cold-open hook.
+    """
+
+    env = os.environ.get("VCG_MASTERBEATER_MAX_TURNS", "").strip()
+    if env:
+        try:
+            return max(4, min(40, int(env)))
+        except ValueError:
+            pass
+    # Baseline 12; +1 turn per ~250 words after 500; +1 per ~2 min after 5 min.
+    turns = 12
+    if word_count > 500:
+        turns += min(12, (word_count - 500) // 250)
+    if duration_sec > 300:
+        turns += min(8, int((duration_sec - 300) // 120))
+    return max(8, min(32, turns))
+
+
+def _masterbeater_coverage_issue(
+    result: dict[str, Any],
+    *,
+    words: list[dict[str, Any]],
+    agent_cancelled: bool,
+) -> str | None:
+    """Return a short issue string if the beat list is clearly incomplete."""
+
+    beats = [b for b in (result.get("beats") or []) if isinstance(b, dict)]
+    if not beats or not words:
+        return None
+    # Short clips can honestly be 1–2 beats.
+    if len(words) < 200 and float(words[-1].get("endSec") or 0) < 90:
+        return None
+
+    id_to_index = {str(w.get("id")): i for i, w in enumerate(words)}
+    last_end_id = str(beats[-1].get("endWordId") or "")
+    end_idx = id_to_index.get(last_end_id)
+    if end_idx is None:
+        # Cannot measure coverage — only flag cancelled + very sparse.
+        if agent_cancelled and len(beats) < 3:
+            return "agent cancelled/max-turns with fewer than 3 beats on a long cut"
+        return None
+
+    coverage = (end_idx + 1) / max(1, len(words))
+    if coverage < 0.45:
+        return (
+            f"last beat ends at word {end_idx + 1}/{len(words)} "
+            f"({coverage:.0%} of transcript covered)"
+        )
+    if len(beats) < 3 and len(words) >= 400:
+        return f"only {len(beats)} beat(s) on a long cut ({len(words)} words)"
+    if agent_cancelled and coverage < 0.85:
+        return (
+            f"agent cancelled/max-turns before full coverage "
+            f"({coverage:.0%} of transcript covered)"
+        )
+    return None
+
+
 def run_masterbeater_for_video_project(
     manifest_path: Path,
     manifest: dict,
@@ -774,6 +871,10 @@ def run_masterbeater_for_video_project(
     sentence_view = format_sentences_for_prompt(document)
     duration = float(words[-1]["endSec"])
 
+    # Long cuts need enough turns to finish the full pass. max-turns=2 historically
+    # cancelled mid-run (stderr "max turns reached") with only the cold-open hook.
+    max_turns = _masterbeater_max_turns(word_count=len(words), duration_sec=duration)
+
     combined_prompt = (
         f"{skill_body}\n\n"
         f"---\n\n"
@@ -788,9 +889,15 @@ def run_masterbeater_for_video_project(
         "- Never invent ids like w1 or W1; only ids that appear in the index.\n"
         "- Do NOT invent frame numbers or rely on clock times as authority.\n"
         "- The app will resolve startFrame/endFrameExclusive from those word IDs.\n"
-        "- Sparse is correct. Use only the 13 beat types. No graphics.\n\n"
+        "- Sparse is correct. Use only the 13 beat types. No graphics.\n"
+        "CRITICAL COVERAGE RULES:\n"
+        "- Label the ENTIRE cut from first word to last — not only the cold open.\n"
+        "- Do NOT stop after the hook. Walk the full overview + word index.\n"
+        "- Skill + universe are already in this prompt: do not re-open skill files.\n"
+        "- Prefer one complete JSON answer over multi-step tool thrash.\n\n"
         f"Approximate duration: {duration:.1f}s · fps={fps:g} · words={len(words)}\n"
-        f"First word id: {words[0]['id']} · Last word id: {words[-1]['id']}\n\n"
+        f"First word id: {words[0]['id']} · Last word id: {words[-1]['id']}\n"
+        f"Agent budget: max-turns={max_turns} — finish the full beat list within budget.\n\n"
         "READABLE OVERVIEW (context only):\n"
         f"{sentence_view}\n\n"
         "WORD INDEX (authoritative for anchors):\n"
@@ -805,6 +912,8 @@ def run_masterbeater_for_video_project(
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text(combined_prompt, encoding="utf-8")
 
+        # Prefer a short tool-free loop: the full skill+transcript is already in
+        # the prompt. Tool thrash was burning max-turns before any beat list.
         cmd = [
             str(grok),
             "--prompt-file",
@@ -814,13 +923,17 @@ def run_masterbeater_for_video_project(
             "--json-schema",
             schema_json,
             "--max-turns",
-            "2",
+            str(max_turns),
             "--always-approve",
             "--cwd",
             str(base),
             "--disable-web-search",
+            "--disallowed-tools",
+            "Agent,Bash,Read,Write,Edit,Glob,Grep,WebSearch,WebFetch,NotebookEdit",
         ]
 
+        completed: subprocess.CompletedProcess[str] | None = None
+        run_error: str | None = None
         try:
             completed = subprocess.run(
                 cmd,
@@ -834,49 +947,58 @@ def run_masterbeater_for_video_project(
                 env={**os.environ, "GROK_AGENT": os.environ.get("GROK_AGENT", "1")},
             )
         except subprocess.TimeoutExpired as exc:
-            raise TimeoutError(
-                f"Masterbeater timed out after {timeout_sec}s."
-            ) from exc
-
-    stdout = (completed.stdout or "").strip()
-    stderr = (completed.stderr or "").strip()
-    if completed.returncode != 0 and not stdout:
-        raise RuntimeError(
-            f"Masterbeater failed (exit {completed.returncode}). {stderr or stdout}"
-        )
-
-    try:
-        payload = _extract_json_payload(stdout)
-    except ValueError:
-        if stderr:
-            try:
-                payload = _extract_json_payload(stderr)
-            except ValueError:
-                raise ValueError(
-                    f"Could not parse Masterbeater JSON. stderr={stderr[:500]!r} "
-                    f"stdout={stdout[:500]!r}"
-                ) from None
-        else:
-            raise
-
-    raw_path = root / "masterbeater-raw.json"
-    try:
-        raw_path.write_text(
-            json.dumps(
-                {
-                    "stdout": stdout[:200000],
-                    "stderr": stderr[:50000],
-                    "returncode": completed.returncode,
-                    "parsed": payload,
-                },
-                indent=2,
-                ensure_ascii=False,
+            run_error = f"Masterbeater timed out after {timeout_sec}s."
+            stdout_timeout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            stderr_timeout = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            _write_masterbeater_raw(
+                root,
+                stdout=stdout_timeout,
+                stderr=stderr_timeout,
+                returncode=-1,
+                parsed=None,
+                error=run_error,
+                max_turns=max_turns,
             )
-            + "\n",
-            encoding="utf-8",
+            raise TimeoutError(run_error) from exc
+
+    stdout = (completed.stdout or "").strip() if completed else ""
+    stderr = (completed.stderr or "").strip() if completed else ""
+    returncode = completed.returncode if completed else -1
+
+    payload: dict[str, Any] | None = None
+    parse_error: str | None = None
+    if returncode != 0 and not stdout:
+        parse_error = f"Masterbeater failed (exit {returncode}). {stderr or '(no stderr)'}"
+    else:
+        try:
+            payload = _extract_json_payload(stdout)
+        except ValueError as exc:
+            if stderr:
+                try:
+                    payload = _extract_json_payload(stderr)
+                except ValueError:
+                    parse_error = (
+                        f"Could not parse Masterbeater JSON. {exc} "
+                        f"stderr={stderr[:500]!r} stdout={stdout[:500]!r}"
+                    )
+            else:
+                parse_error = f"Could not parse Masterbeater JSON. {exc} stdout={stdout[:500]!r}"
+
+    raw_path = _write_masterbeater_raw(
+        root,
+        stdout=stdout,
+        stderr=stderr,
+        returncode=returncode,
+        parsed=payload,
+        error=parse_error,
+        max_turns=max_turns,
+    )
+
+    if parse_error or payload is None:
+        raise ValueError(
+            (parse_error or "Masterbeater produced no parseable payload.")
+            + f" Raw output: {raw_path or 'unavailable'}."
         )
-    except OSError:
-        raw_path = None
 
     result = normalize_masterbeater_result(
         payload,
@@ -896,6 +1018,25 @@ def run_masterbeater_for_video_project(
             f"Model beat count={len(sample) if isinstance(sample, list) else 0}. "
             f"{gaps}"
             f"{sample_preview} "
+            f"Raw output: {raw_path or 'unavailable'}."
+        )
+
+    coverage_issue = _masterbeater_coverage_issue(
+        result,
+        words=words,
+        agent_cancelled=(
+            returncode != 0
+            or "max turns" in stderr.lower()
+            or "cancelled" in (stdout[:2000].lower() if stdout else "")
+        ),
+    )
+    if coverage_issue:
+        raise ValueError(
+            "Masterbeater under-delivered (incomplete beat list). "
+            f"{coverage_issue} "
+            f"beats={result['beatCount']} words={len(words)} duration={duration:.0f}s "
+            f"max-turns={max_turns}. "
+            "Re-run Masterbeater; if this repeats set VCG_MASTERBEATER_MAX_TURNS higher. "
             f"Raw output: {raw_path or 'unavailable'}."
         )
 

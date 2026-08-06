@@ -59,7 +59,7 @@ def _good_plan() -> dict:
             {
                 "id": "b2",
                 "beatType": "context",
-                "graphicId": "speaker-side-panel",
+                "graphicId": "dependency-stack",
                 "onScreenCopy": "WORKING IN POWERPOINT",
                 "motionKind": "treatment-enter",
                 "startSec": 4.0,

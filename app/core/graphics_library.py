@@ -184,16 +184,20 @@ def engine_interface_keys(engine_id: str) -> list[str]:
 def resolve_engine_id(usage_or_engine_id: str, root: Path | None = None) -> str | None:
     """Resolve a usage id or engine id to a runtime engine id, or None."""
 
+    from app.core.visual_production import canonicalize_engine_id
+
     key = str(usage_or_engine_id or "").strip()
     if not key:
         return None
     try:
         entry = _raw_entry(key, root)
         engine_id = str(entry.get("engineId") or entry.get("implementationId") or key).strip()
+        engine_id = canonicalize_engine_id(engine_id)
         if engine_id in MODULE_IDS:
             return engine_id
     except (OSError, ValueError, FileNotFoundError):
         pass
+    key = canonicalize_engine_id(key)
     return key if key in MODULE_IDS else None
 
 
@@ -213,13 +217,6 @@ _DEMO_COPY: dict[str, dict[str, Any]] = {
         "kicker": "RARE MARKETING SKILL",
         "text": "WORD LAYOUT DARK ARTS",
         "imageAssetId": "demo-joke-image",
-    },
-    "speaker-side-panel": {
-        "kicker": "SECTION",
-        "text": "HOW DO YOU START?",
-        "side": "left",
-        "frameStyle": "hairline",
-        "items": ["No secret course", "Build in public", "Ship weekly"],
     },
     "progress-scale": {
         "kicker": "PROGRESS",
@@ -250,7 +247,6 @@ _DEMO_COPY: dict[str, dict[str, Any]] = {
     },
     "ui-callout": {
         "label": "Click here",
-        "detail": "Primary action",
         "targetBounds": {"x": 0.18, "y": 0.22, "width": 0.28, "height": 0.12},
         "pointer": "below",
     },
@@ -283,9 +279,10 @@ _DEMO_COPY: dict[str, dict[str, Any]] = {
         "side": "left",
     },
     "brand-cta-lockup": {
+        # Draw uses brand-fixed DEFAULT_BRAND_CTA_* — params here are sample noise only.
         "logoText": "Community",
-        "action": "JOIN THE COMMUNITY",
-        "destination": "your.community.url",
+        "action": "JOIN THE FREE VIBE CODE GUILD COMMUNITY",
+        "destination": "skool.com/vibecodeguild",
     },
     "windows-prompt-typing": {
         "appName": "Windows PowerShell",

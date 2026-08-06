@@ -89,7 +89,7 @@ def first_minute_tutorial_plan(*, episode_id: str, seconds: float) -> dict:
         {
             "id": "beat-theme-ppt",
             "beatType": "context",
-            "graphicId": "speaker-side-panel",
+            "graphicId": "dependency-stack",
             "onScreenCopy": "WORKING IN POWERPOINT",
             "motionKind": "treatment-enter",
             "startSec": 3.5,
@@ -159,7 +159,7 @@ def first_minute_tutorial_plan(*, episode_id: str, seconds: float) -> dict:
         {
             "id": "beat-hook-end",
             "beatType": "hook",
-            "graphicId": "speaker-side-panel",
+            "graphicId": "dependency-stack",
             "onScreenCopy": "STICK AROUND TO THE END",
             "motionKind": "treatment-enter",
             "startSec": 29.5,
@@ -179,7 +179,7 @@ def first_minute_tutorial_plan(*, episode_id: str, seconds: float) -> dict:
         {
             "id": "beat-identity",
             "beatType": "context",
-            "graphicId": "speaker-side-panel",
+            "graphicId": "dependency-stack",
             "onScreenCopy": "SPEAKER · CREDENTIAL LINE",
             "motionKind": "treatment-enter",
             "startSec": 39.0,

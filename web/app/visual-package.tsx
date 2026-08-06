@@ -2,6 +2,7 @@
 
 import {
   createElement,
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -895,7 +896,8 @@ export default function VisualPackageWorkspace({
   const [railHost, setRailHost] = useState<HTMLElement | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
-  const [loopBeat, setLoopBeat] = useState(true);
+  /** Default off everywhere — one-shot play per click (Stage 1/2 video + Stage 3 live). */
+  const [loopBeat, setLoopBeat] = useState(false);
   /** When on, clicking a beat card seeks and plays that span. */
   const [autoplayOnSelect, setAutoplayOnSelect] = useState(true);
   /** Inclusive phrase selection for multi-word assign/remove. */
@@ -918,14 +920,26 @@ export default function VisualPackageWorkspace({
   const [draftPlacementLines, setDraftPlacementLines] = useState<PlacementLine[] | null>(null);
   /** Live Ends draft so the progress rail can mark graphic undock without waiting for autosave. */
   const [draftPlacementEndFrame, setDraftPlacementEndFrame] = useState<number | null>(null);
+  /** Live motion draft (e.g. punch-zoom zoomIn/Out frames) for progress ticks. */
+  const [draftPlacementMotion, setDraftPlacementMotion] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
+  /** Right-column host under the graphic card — craft panel portals word chips here. */
+  const [placementSpeechHostEl, setPlacementSpeechHostEl] = useState<HTMLDivElement | null>(
+    null,
+  );
 
   // Drop live draft mirrors when leaving a beat so the rail never ticks with stale Ends.
   useEffect(() => {
     setDraftPlacementLines(null);
     setDraftPlacementEndFrame(null);
+    setDraftPlacementMotion(null);
   }, [selectedId]);
   /** App audio is buffered enough to play the whole beat without hitting the cliff. */
   const [previewAudioReady, setPreviewAudioReady] = useState(false);
+  /** Stage 3 craft aid: 10×10 tenths grid over the live preview (not baked into renders). */
+  const [placementGridOn, setPlacementGridOn] = useState(false);
   /** Stall watchdog bookkeeping — last observed frame and when it last changed. */
   const stallRef = useRef({ frame: -1, changedAt: 0 });
   /** Drag-select anchor only — does not commit selection until the pointer moves or click. */
@@ -1045,6 +1059,17 @@ export default function VisualPackageWorkspace({
       return true;
     });
   }, [beats, typeFilter, layoutFilter, scenelayerByBeat]);
+
+  /**
+   * Stage 3 navigation pool: every assigned/placed beat.
+   * Stage 2 type/layout filters must NOT hide beats in Placement.
+   */
+  const placementBeats = useMemo(() => {
+    const placed = beats.filter(
+      (b) => placementByBeat[b.id] || assignmentByBeat[b.id]?.usageId,
+    );
+    return placed.length ? placed : beats;
+  }, [beats, placementByBeat, assignmentByBeat]);
 
   const typeCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -1477,14 +1502,8 @@ export default function VisualPackageWorkspace({
   );
 
   useEffect(() => {
-    const pool = stage3
-      ? (() => {
-          const placed = filteredBeats.filter(
-            (b) => placementByBeat[b.id] || assignmentByBeat[b.id]?.usageId,
-          );
-          return placed.length ? placed : filteredBeats;
-        })()
-      : filteredBeats;
+    // Stage 2/1: respect type/layout filters. Stage 3: full placement set.
+    const pool = stage3 ? placementBeats : filteredBeats;
     if (!selectedId && pool.length > 0) {
       setSelectedId(pool[0].id);
       return;
@@ -1502,14 +1521,7 @@ export default function VisualPackageWorkspace({
     ) {
       setSelectedId(pool[0].id);
     }
-  }, [
-    beats,
-    filteredBeats,
-    selectedId,
-    stage3,
-    placementByBeat,
-    assignmentByBeat,
-  ]);
+  }, [beats, filteredBeats, placementBeats, selectedId, stage3]);
 
   const stage3LivePreview =
     stage3 &&
@@ -1551,12 +1563,44 @@ export default function VisualPackageWorkspace({
       pb?.endFrameExclusive ??
       placementPreview?.endFrameExclusive ??
       null;
+    const motionBag = draftPlacementMotion ?? pb?.motion ?? {};
+    const motionTicks = (["zoomInFrame", "zoomOutFrame"] as const)
+      .map((key) => {
+        const raw = motionBag[key];
+        const frame = typeof raw === "number" ? raw : Number(raw);
+        return Number.isFinite(frame) ? frame : null;
+      })
+      .filter(
+        (frame): frame is number =>
+          frame != null && frame >= startFrame && frame < beatEndFrameExclusive,
+      );
+    const revealTicks = lines
+      .map((line) => {
+        const frame = line.revealFrame;
+        if (!Number.isFinite(frame)) return null;
+        const slot = String(line.slot || "");
+        let label = slot || "reveal";
+        if (slot === "text" || slot === "title") label = "Title";
+        else if (slot === "startLabel") label = "Start";
+        else if (slot === "targetLabel") label = "Target";
+        else if (slot.startsWith("milestones.")) {
+          label = `Stop ${Number(slot.slice("milestones.".length)) + 1}`;
+        } else if (slot.includes(".")) {
+          const [head, idx] = slot.split(".");
+          label = `${head} ${Number(idx) + 1}`;
+        }
+        return { frame: frame as number, label };
+      })
+      .filter(
+        (tick): tick is { frame: number; label: string } =>
+          tick != null &&
+          tick.frame >= startFrame &&
+          tick.frame < beatEndFrameExclusive,
+      );
     return {
       startFrame,
       endFrameExclusive: beatEndFrameExclusive,
-      revealFrames: lines
-        .map((line) => line.revealFrame)
-        .filter((frame): frame is number => Number.isFinite(frame)),
+      revealTicks,
       graphicEndFrame:
         graphicEnd != null &&
         Number.isFinite(graphicEnd) &&
@@ -1564,6 +1608,7 @@ export default function VisualPackageWorkspace({
         graphicEnd < beatEndFrameExclusive
           ? graphicEnd
           : null,
+      motionFrames: motionTicks,
     };
   }, [
     stage3,
@@ -1572,6 +1617,7 @@ export default function VisualPackageWorkspace({
     placementPreview,
     draftPlacementLines,
     draftPlacementEndFrame,
+    draftPlacementMotion,
   ]);
 
   /**
@@ -1785,6 +1831,7 @@ export default function VisualPackageWorkspace({
         lines?: PlacementLine[];
         meta?: Record<string, unknown>;
         assets?: Record<string, unknown>;
+        motion?: Record<string, unknown>;
         endFrameExclusive?: number;
         force?: boolean;
       },
@@ -1805,6 +1852,7 @@ export default function VisualPackageWorkspace({
           lines: draft?.lines,
           meta: draft?.meta,
           assets: draft?.assets,
+          motion: draft?.motion,
           endFrameExclusive: draft?.endFrameExclusive,
           force: draft?.force,
         });
@@ -2012,8 +2060,19 @@ export default function VisualPackageWorkspace({
       syncPreviewAudio(Number.NaN, "pause");
       setPlaying(false);
     };
-    const onEnded = () => {
-      // One-shot playback: stop at the end, rewind, wait for the next click.
+    const stopAtEnd = () => {
+      // One-shot: hard stop (pause + rewind). Never leave the transport "playing"
+      // after a seek-to-0 — that restarts the clip and looks like a loop.
+      try {
+        player.pause();
+      } catch {
+        /* ignore */
+      }
+      try {
+        player.loop = false;
+      } catch {
+        /* ignore */
+      }
       syncPreviewAudio(Number.NaN, "pause");
       setPlaying(false);
       try {
@@ -2023,16 +2082,31 @@ export default function VisualPackageWorkspace({
       }
       syncPreviewAudio(0);
     };
+    const onEnded = () => {
+      stopAtEnd();
+    };
+    const onTimeUpdateGuard = (event: Event) => {
+      onTimeUpdate(event);
+      // Some HF builds wrap without a clean "ended" — stop when we hit the tail.
+      const duration = Math.max(
+        0.05,
+        Number(player.duration) || Number(placementPreview?.durationSec) || 0.05,
+      );
+      const local = Number(player.currentTime) || 0;
+      if (local >= duration - 0.04 && !player.paused) {
+        stopAtEnd();
+      }
+    };
 
     player.addEventListener("ready", onReady);
-    player.addEventListener("timeupdate", onTimeUpdate);
+    player.addEventListener("timeupdate", onTimeUpdateGuard);
     player.addEventListener("play", onPlay);
     player.addEventListener("pause", onPause);
     player.addEventListener("ended", onEnded);
     if (player.ready) onReady();
     return () => {
       player.removeEventListener("ready", onReady);
-      player.removeEventListener("timeupdate", onTimeUpdate);
+      player.removeEventListener("timeupdate", onTimeUpdateGuard);
       player.removeEventListener("play", onPlay);
       player.removeEventListener("pause", onPause);
       player.removeEventListener("ended", onEnded);
@@ -2041,6 +2115,7 @@ export default function VisualPackageWorkspace({
     stage3LivePreview,
     runtimeScriptReady,
     placementPreview?.cacheKey,
+    placementPreview?.durationSec,
     fps,
     compositionRangeStartSec,
     syncPreviewAudio,
@@ -2079,15 +2154,12 @@ export default function VisualPackageWorkspace({
 
   /**
    * Beats to step through in Stage 2/3 transport.
-   * Stage 3: only assigned/placed beats (graphics already chosen) — one at a time via Prev/Next.
+   * Stage 2: filtered by type/layout. Stage 3: full placement set (filters ignored).
    */
   const reviewBeats = useMemo(() => {
     if (!stage3) return filteredBeats;
-    const placed = filteredBeats.filter(
-      (b) => placementByBeat[b.id] || assignmentByBeat[b.id]?.usageId,
-    );
-    return placed.length ? placed : filteredBeats;
-  }, [stage3, filteredBeats, placementByBeat, assignmentByBeat]);
+    return placementBeats;
+  }, [stage3, filteredBeats, placementBeats]);
   const reviewIndex = useMemo(() => {
     if (!reviewBeats.length || !selectedId) return -1;
     return reviewBeats.findIndex((b) => b.id === selectedId);
@@ -2288,6 +2360,7 @@ export default function VisualPackageWorkspace({
       lines?: PlacementLine[];
       meta?: Record<string, unknown>;
       assets?: Record<string, unknown>;
+      motion?: Record<string, unknown>;
       endFrameExclusive?: number;
       locked?: boolean;
       detail?: string;
@@ -2316,6 +2389,7 @@ export default function VisualPackageWorkspace({
             lines: patch.lines,
             meta: patch.meta,
             assets: patch.assets,
+            motion: patch.motion,
             endFrameExclusive: patch.endFrameExclusive,
             force: patch.locked !== undefined,
           });
@@ -2486,6 +2560,61 @@ export default function VisualPackageWorkspace({
   const hasBeats = Boolean(result && (result.beatCount || beats.length));
   const hasTranscript = transcriptWords.length > 0;
 
+  /** Stage 3 header: jump to any placed beat (row under title + lock). */
+  const stage3BeatJump =
+    stage3 && reviewBeats.length > 0 ? (
+      <label className="visual-package-beat-jump is-header">
+        <span className="visual-package-beat-jump-label">Jump</span>
+        <select
+          className="visual-package-beat-jump-select"
+          value={
+            selectedId && reviewBeats.some((b) => b.id === selectedId) ? selectedId : ""
+          }
+          onChange={(event) => {
+            const next = reviewBeats.find((b) => b.id === event.target.value);
+            if (next) selectBeat(next, false);
+          }}
+          aria-label="Jump to beat"
+          title="Jump to a specific beat"
+        >
+          {!selectedId || !reviewBeats.some((b) => b.id === selectedId) ? (
+            <option value="" disabled>
+              Pick a beat…
+            </option>
+          ) : null}
+          {reviewBeats.map((beat, index) => {
+            const pb = placementByBeat[beat.id];
+            const ap = assignmentByBeat[beat.id];
+            const engine =
+              pb?.displayName ||
+              pb?.engineId ||
+              ap?.displayName ||
+              ap?.engineId ||
+              "";
+            const typeLabel = beat.beatType
+              ? beat.beatType.charAt(0).toUpperCase() + beat.beatType.slice(1)
+              : "Beat";
+            const words = String(beat.wordsText || "")
+              .replace(/\s+/g, " ")
+              .trim();
+            const snippet =
+              words.length > 28 ? `${words.slice(0, 28).trimEnd()}…` : words;
+            const parts = [
+              `${index + 1}/${reviewBeats.length}`,
+              typeLabel,
+              engine || null,
+              snippet ? `“${snippet}”` : null,
+            ].filter(Boolean);
+            return (
+              <option key={beat.id} value={beat.id}>
+                {parts.join(" · ")}
+              </option>
+            );
+          })}
+        </select>
+      </label>
+    ) : null;
+
   /** Shared transport buttons — right panel in Stage 1/2, craft panel in Stage 3. */
   const playerTransportControls = (
     <div className="visual-package-player-controls">
@@ -2622,8 +2751,9 @@ export default function VisualPackageWorkspace({
             startFrame={beatProgress.startFrame}
             endFrameExclusive={beatProgress.endFrameExclusive}
             playheadFrame={playheadFrame}
-            revealFrames={beatProgress.revealFrames}
+            revealTicks={beatProgress.revealTicks}
             graphicEndFrame={beatProgress.graphicEndFrame}
+            motionFrames={beatProgress.motionFrames}
           />
         ) : null}
         <div className="visual-package-placement-transport-readout" aria-live="polite">
@@ -2723,12 +2853,16 @@ export default function VisualPackageWorkspace({
                   lines,
                   meta: extras?.meta,
                   assets: extras?.assets,
+                  motion: extras?.motion,
                   endFrameExclusive: extras?.endFrameExclusive,
                 });
               }}
               onLinesChange={setDraftPlacementLines}
               onEndFrameChange={setDraftPlacementEndFrame}
+              onMotionChange={setDraftPlacementMotion}
               transportSlot={stage3TransportCluster}
+              beatJumpSlot={stage3BeatJump}
+              speechHostEl={placementSpeechHostEl}
             />
           ) : null}
 
@@ -2843,6 +2977,58 @@ export default function VisualPackageWorkspace({
                   {runtimeReady ? "" : " · loading"}
                 </div>
               ) : null}
+              {stage3 ? (
+                <>
+                  <button
+                    type="button"
+                    className={[
+                      "visual-package-placement-grid-toggle",
+                      placementGridOn ? "is-on" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    aria-pressed={placementGridOn}
+                    title="Show a 10×10 tenths grid over the preview (craft aid only)"
+                    onClick={() => setPlacementGridOn((on) => !on)}
+                  >
+                    Grid
+                  </button>
+                  {placementGridOn ? (
+                    <div
+                      className="visual-package-placement-grid"
+                      aria-hidden
+                    >
+                      {Array.from({ length: 9 }, (_, i) => {
+                        const pct = (i + 1) * 10;
+                        return (
+                          <Fragment key={pct}>
+                            <div
+                              className="visual-package-placement-grid-line is-v"
+                              style={{ left: `${pct}%` }}
+                            />
+                            <div
+                              className="visual-package-placement-grid-line is-h"
+                              style={{ top: `${pct}%` }}
+                            />
+                            <span
+                              className="visual-package-placement-grid-label is-x"
+                              style={{ left: `${pct}%` }}
+                            >
+                              0.{i + 1}
+                            </span>
+                            <span
+                              className="visual-package-placement-grid-label is-y"
+                              style={{ top: `${pct}%` }}
+                            >
+                              0.{i + 1}
+                            </span>
+                          </Fragment>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
             </div>
 
             {/* Stage 3: graphic identity (poster + name + layout/status) under the player. */}
@@ -2887,6 +3073,14 @@ export default function VisualPackageWorkspace({
                 </div>
               );
             })() : null}
+
+            {/* Stage 3: spoken-word chips portal target — under graphic card, right column. */}
+            {stage3 ? (
+              <div
+                ref={setPlacementSpeechHostEl}
+                className="visual-package-placement-speech-host"
+              />
+            ) : null}
 
             {/* Stage 3 moves the whole transport cluster into the craft panel. */}
             {stage3 ? null : playerTransportControls}
@@ -3573,29 +3767,44 @@ export default function VisualPackageWorkspace({
 
 /**
  * Stage 3 beat progress rail under the preview.
- * End caps = full beat span. Yellow ticks = line revealFrames + graphic Ends
- * (when Ends is trimmed earlier than the beat). Fill tracks playheadFrame.
+ * End caps = full beat span. Yellow ticks = line revealFrames, graphic Ends
+ * (when earlier than beat end), and motion anchors (punch-zoom in/out).
+ * Fill tracks playheadFrame.
  */
 function PlacementBeatProgress({
   startFrame,
   endFrameExclusive,
   playheadFrame,
-  revealFrames,
+  revealTicks = [],
   graphicEndFrame = null,
+  motionFrames = [],
 }: {
   startFrame: number;
   endFrameExclusive: number;
   playheadFrame: number;
-  revealFrames: number[];
+  /** Line reveals with human labels (Title, Stop 1, …) for tick tooltips. */
+  revealTicks?: { frame: number; label: string }[];
   /** Placement graphic undock frame when earlier than beat end. */
   graphicEndFrame?: number | null;
+  /** Camera / motion anchor frames (e.g. punch zoom in/out). */
+  motionFrames?: number[];
 }) {
   const span = endFrameExclusive - startFrame;
   const fraction = Math.max(0, Math.min(1, (playheadFrame - startFrame) / span));
-  const ticks: { frame: number; kind: "reveal" | "end"; key: string }[] = [];
-  for (const [index, frame] of revealFrames.entries()) {
-    if (frame >= startFrame && frame < endFrameExclusive) {
-      ticks.push({ frame, kind: "reveal", key: `reveal-${frame}-${index}` });
+  const ticks: {
+    frame: number;
+    kind: "reveal" | "end" | "motion";
+    key: string;
+    title: string;
+  }[] = [];
+  for (const [index, tick] of revealTicks.entries()) {
+    if (tick.frame >= startFrame && tick.frame < endFrameExclusive) {
+      ticks.push({
+        frame: tick.frame,
+        kind: "reveal",
+        key: `reveal-${tick.frame}-${index}`,
+        title: `${tick.label} · f ${tick.frame}`,
+      });
     }
   }
   if (
@@ -3607,7 +3816,18 @@ function PlacementBeatProgress({
       frame: graphicEndFrame,
       kind: "end",
       key: `end-${graphicEndFrame}`,
+      title: `Ends · f ${graphicEndFrame}`,
     });
+  }
+  for (const [index, frame] of motionFrames.entries()) {
+    if (frame >= startFrame && frame < endFrameExclusive) {
+      ticks.push({
+        frame,
+        kind: "motion",
+        key: `motion-${frame}-${index}`,
+        title: `motion · f ${frame}`,
+      });
+    }
   }
   return (
     <div className="visual-package-beat-progress">
@@ -3623,13 +3843,10 @@ function PlacementBeatProgress({
             className={[
               "visual-package-beat-progress-tick",
               tick.kind === "end" ? "is-graphic-end" : "",
+              tick.kind === "motion" ? "is-motion" : "",
             ].join(" ")}
             style={{ left: `${((tick.frame - startFrame) / span) * 100}%` }}
-            title={
-              tick.kind === "end"
-                ? `graphic ends f ${tick.frame}`
-                : `reveal f ${tick.frame}`
-            }
+            title={tick.title}
           />
         ))}
       </div>
@@ -3638,10 +3855,28 @@ function PlacementBeatProgress({
   );
 }
 
+/** Placement boolean meta keys (schema type boolean — not free-text). */
+const BOOLEAN_META_KEYS = new Set(["showNumber"]);
+
+function coerceBoolKnob(value: unknown, fallback = true): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(text)) return true;
+  if (["0", "false", "no", "n", "off"].includes(text)) return false;
+  return fallback;
+}
+
 /** Meta knob drafts hold raw input strings; normalize (numbers, drop empties) at send time. */
 function normalizeKnobBag(bag: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(bag)) {
+    if (BOOLEAN_META_KEYS.has(key)) {
+      out[key] = coerceBoolKnob(value, true);
+      continue;
+    }
     if (typeof value === "string") {
       const trimmed = value.trim();
       if (!trimmed) continue;
@@ -3683,7 +3918,10 @@ function PlacementEditorPanel({
   onDraftPreview,
   onLinesChange,
   onEndFrameChange,
+  onMotionChange,
   transportSlot,
+  beatJumpSlot,
+  speechHostEl = null,
 }: {
   selected: MasterbeaterBeat | null;
   placement?: PlacementBeat;
@@ -3695,6 +3933,7 @@ function PlacementEditorPanel({
     /** Engine-declared knobs (ENGINE_REGISTRY) — rendered generically, never hardcoded. */
     metaKeys?: string[];
     assetKeys?: string[];
+    motionKeys?: string[];
   };
   beatWords: VisualPackageTranscriptWord[];
   fps: number;
@@ -3711,6 +3950,7 @@ function PlacementEditorPanel({
     lines?: PlacementLine[];
     meta?: Record<string, unknown>;
     assets?: Record<string, unknown>;
+    motion?: Record<string, unknown>;
     endFrameExclusive?: number;
     locked?: boolean;
     detail?: string;
@@ -3721,6 +3961,7 @@ function PlacementEditorPanel({
     extras?: {
       meta?: Record<string, unknown>;
       assets?: Record<string, unknown>;
+      motion?: Record<string, unknown>;
       endFrameExclusive?: number;
     },
   ) => void;
@@ -3728,16 +3969,24 @@ function PlacementEditorPanel({
   onLinesChange?: (lines: PlacementLine[]) => void;
   /** Live Ends draft for the progress rail graphic-end tick. */
   onEndFrameChange?: (endFrameExclusive: number | null) => void;
+  /** Live motion draft (punch-zoom frames, etc.) for progress rail ticks. */
+  onMotionChange?: (motion: Record<string, unknown> | null) => void;
   /** Transport cluster (progress + readout + buttons) rendered under the nudges. */
   transportSlot?: ReactNode;
+  /** Header jump control — full-width row under title + lock. */
+  beatJumpSlot?: ReactNode;
+  /** Right-column host under the graphic card; word chips portal here when set. */
+  speechHostEl?: HTMLDivElement | null;
 }) {
+  type ArmedKind = "line" | "end" | "zoomIn" | "zoomOut";
   const [draftLines, setDraftLines] = useState<PlacementLine[]>([]);
   const [armedIndex, setArmedIndex] = useState(0);
-  /** One armed target for the shared hero nudges: a line OR the graphic end frame. */
-  const [armedKind, setArmedKind] = useState<"line" | "end">("line");
+  /** One armed target for the shared hero nudges. */
+  const [armedKind, setArmedKind] = useState<ArmedKind>("line");
   /** Engine-declared knob drafts (meta/assets bags) — generic, driven by interfaceSpec. */
   const [metaDraft, setMetaDraft] = useState<Record<string, unknown>>({});
   const [assetsDraft, setAssetsDraft] = useState<Record<string, unknown>>({});
+  const [motionDraft, setMotionDraft] = useState<Record<string, unknown>>({});
   /** Graphic end frame (placement endFrameExclusive). Default = beat end. */
   const [endFrameDraft, setEndFrameDraft] = useState<number | null>(null);
   const previewTimer = useRef<number | null>(null);
@@ -3746,12 +3995,13 @@ function PlacementEditorPanel({
   const lastSentLines = useRef<string>("");
   /** Last end frame we autosaved — skip clobber when server echoes our write. */
   const lastSentEndFrame = useRef<number | null>(null);
+  const lastSentMotion = useRef<string>("");
   /** Beat the draft currently mirrors — a change always forces a full re-sync. */
   const prevBeatId = useRef<string | null>(null);
   const locked = Boolean(placement?.locked);
   /** Only re-sync draft from server when beat/lock/server lines actually change — not object identity. */
   const serverLinesKey = placement
-    ? `${placement.beatId}|${placement.locked ? "1" : "0"}|${JSON.stringify(placement.lines || [])}|${placement.endFrameExclusive ?? ""}`
+    ? `${placement.beatId}|${placement.locked ? "1" : "0"}|${JSON.stringify(placement.lines || [])}|${placement.endFrameExclusive ?? ""}|${JSON.stringify(placement.motion || {})}`
     : "";
 
   useEffect(() => {
@@ -3761,9 +4011,11 @@ function PlacementEditorPanel({
       setArmedKind("line");
       setMetaDraft({});
       setAssetsDraft({});
+      setMotionDraft({});
       setEndFrameDraft(null);
       lastSentLines.current = "";
       lastSentEndFrame.current = null;
+      lastSentMotion.current = "";
       prevBeatId.current = null;
       return;
     }
@@ -3772,7 +4024,11 @@ function PlacementEditorPanel({
     if (beatChanged) {
       lastSentLines.current = "";
       lastSentEndFrame.current = null;
-      setArmedKind("line");
+      lastSentMotion.current = "";
+      // Punch-zoom has no copy lines — arm Zoom in by default.
+      setArmedKind(
+        placement.engineId === "source-punch-zoom" ? "zoomIn" : "line",
+      );
     }
     const incoming = (placement.lines || []).map((line) => ({
       slot: line.slot,
@@ -3780,18 +4036,36 @@ function PlacementEditorPanel({
       revealFrame: line.revealFrame ?? 0,
     }));
     const serverEnd = Number(placement.endFrameExclusive ?? 0) || 0;
+    const serverMotion = { ...(placement.motion || {}) };
+    // Seed absolute frame anchors for older punch-zoom placements that only had settleSec.
+    if (placement.engineId === "source-punch-zoom") {
+      const start = Number(placement.startFrame ?? 0) || 0;
+      const end = serverEnd > start ? serverEnd : start + 1;
+      const span = Math.max(1, end - start);
+      if (serverMotion.zoomInFrame == null || serverMotion.zoomInFrame === "") {
+        serverMotion.zoomInFrame = start;
+      }
+      if (serverMotion.zoomOutFrame == null || serverMotion.zoomOutFrame === "") {
+        serverMotion.zoomOutFrame = Math.max(start + 1, end - Math.max(1, Math.floor(span / 6)));
+      }
+    }
+    const serverMotionKey = JSON.stringify(serverMotion);
     // Our own autosave echoing back must not clobber newer draft edits or
     // reset the armed line — only real external changes (beat switch, re-Place,
     // unlock reset) re-sync the draft.
     const linesEcho = !beatChanged && linesFingerprint(incoming) === lastSentLines.current;
     const endEcho = !beatChanged && lastSentEndFrame.current != null && serverEnd === lastSentEndFrame.current;
-    if (linesEcho && endEcho) return;
+    const motionEcho = !beatChanged && lastSentMotion.current !== "" && serverMotionKey === lastSentMotion.current;
+    if (linesEcho && endEcho && motionEcho) return;
     if (!linesEcho) {
       setDraftLines(incoming);
       if (beatChanged) setArmedIndex(0);
     }
     if (!endEcho || beatChanged) {
       setEndFrameDraft(serverEnd > 0 ? serverEnd : null);
+    }
+    if (!motionEcho || beatChanged) {
+      setMotionDraft(serverMotion);
     }
     setMetaDraft({ ...(placement.meta || {}) });
     setAssetsDraft({ ...(placement.assets || {}) });
@@ -3821,6 +4095,10 @@ function PlacementEditorPanel({
     onEndFrameChange?.(endFrameDraft);
   }, [endFrameDraft, onEndFrameChange]);
 
+  useEffect(() => {
+    onMotionChange?.(motionDraft);
+  }, [motionDraft, onMotionChange]);
+
   // Prefer server interface; fall back to slot shape so list engines still edit if status lags.
   const listSlot =
     interfaceSpec?.listSlot ||
@@ -3832,6 +4110,9 @@ function PlacementEditorPanel({
   const listMax = interfaceSpec?.listMax ?? (listSlot === "nodes" ? 6 : listSlot ? 12 : 0);
   const armed = draftLines[armedIndex] || null;
   const editDisabled = locked; // never block craft on preview rebuild
+  const motionKeys = interfaceSpec?.motionKeys || [];
+  const hasZoomIn = motionKeys.includes("zoomInFrame");
+  const hasZoomOut = motionKeys.includes("zoomOutFrame");
 
   const schedulePreview = useCallback(
     (
@@ -3839,6 +4120,7 @@ function PlacementEditorPanel({
       knobs?: {
         meta?: Record<string, unknown>;
         assets?: Record<string, unknown>;
+        motion?: Record<string, unknown>;
         endFrameExclusive?: number;
       },
     ) => {
@@ -3847,6 +4129,7 @@ function PlacementEditorPanel({
       // Drop retired holdSec if it still sits in older placement meta bags.
       delete meta.holdSec;
       const assets = normalizeKnobBag(knobs?.assets ?? assetsDraft);
+      const motion = normalizeKnobBag(knobs?.motion ?? motionDraft);
       const endFrame =
         knobs?.endFrameExclusive ??
         endFrameDraft ??
@@ -3857,6 +4140,7 @@ function PlacementEditorPanel({
         onDraftPreview(lines, {
           meta,
           assets,
+          motion,
           endFrameExclusive: endFrame,
         });
       }, 450);
@@ -3867,28 +4151,49 @@ function PlacementEditorPanel({
       autosaveTimer.current = window.setTimeout(() => {
         lastSentLines.current = linesFingerprint(lines);
         if (endFrame != null) lastSentEndFrame.current = endFrame;
+        lastSentMotion.current = JSON.stringify(motion);
         onSave({
           lines,
           meta,
           assets,
+          motion,
           endFrameExclusive: endFrame,
           detail: "edit lines (auto)",
         });
       }, 700);
     },
-    [locked, onDraftPreview, onSave, metaDraft, assetsDraft, endFrameDraft, placement?.endFrameExclusive],
+    [
+      locked,
+      onDraftPreview,
+      onSave,
+      metaDraft,
+      assetsDraft,
+      motionDraft,
+      endFrameDraft,
+      placement?.endFrameExclusive,
+    ],
   );
 
-  /** Knob edits (meta/assets) share the same debounce + autosave path as lines. */
+  /** Knob edits (meta/assets/motion) share the same debounce + autosave path as lines. */
   const updateKnobs = useCallback(
-    (patch: { meta?: Record<string, unknown>; assets?: Record<string, unknown> }) => {
+    (patch: {
+      meta?: Record<string, unknown>;
+      assets?: Record<string, unknown>;
+      motion?: Record<string, unknown>;
+    }) => {
       const nextMeta = patch.meta ?? metaDraft;
       const nextAssets = patch.assets ?? assetsDraft;
+      const nextMotion = patch.motion ?? motionDraft;
       if (patch.meta) setMetaDraft(patch.meta);
       if (patch.assets) setAssetsDraft(patch.assets);
-      schedulePreview(draftLines, { meta: nextMeta, assets: nextAssets });
+      if (patch.motion) setMotionDraft(patch.motion);
+      schedulePreview(draftLines, {
+        meta: nextMeta,
+        assets: nextAssets,
+        motion: nextMotion,
+      });
     },
-    [metaDraft, assetsDraft, draftLines, schedulePreview],
+    [metaDraft, assetsDraft, motionDraft, draftLines, schedulePreview],
   );
 
   /** Placement span end — when the graphic undocks back to full talking-head. */
@@ -3926,6 +4231,39 @@ function PlacementEditorPanel({
     ],
   );
 
+  const setMotionFrame = useCallback(
+    (key: "zoomInFrame" | "zoomOutFrame", raw: number) => {
+      if (locked) return;
+      const next = Math.max(spanStartFrame, Math.min(beatEndFrame - 1, Math.round(raw)));
+      const updated = { ...motionDraft, [key]: next };
+      // Keep zoom-out after zoom-in when both exist.
+      if (key === "zoomInFrame" && updated.zoomOutFrame != null) {
+        const outF = Number(updated.zoomOutFrame);
+        if (Number.isFinite(outF) && outF <= next) {
+          updated.zoomOutFrame = Math.min(beatEndFrame - 1, next + 1);
+        }
+      }
+      if (key === "zoomOutFrame" && updated.zoomInFrame != null) {
+        const inF = Number(updated.zoomInFrame);
+        if (Number.isFinite(inF) && next <= inF) {
+          updated.zoomInFrame = Math.max(spanStartFrame, next - 1);
+        }
+      }
+      setMotionDraft(updated);
+      schedulePreview(draftLines, { motion: updated });
+      onSeekReveal(next);
+    },
+    [
+      locked,
+      spanStartFrame,
+      beatEndFrame,
+      motionDraft,
+      draftLines,
+      schedulePreview,
+      onSeekReveal,
+    ],
+  );
+
   const updateLine = (index: number, patch: Partial<PlacementLine>) => {
     setDraftLines((prev) => {
       const next = prev.map((line, i) => (i === index ? { ...line, ...patch } : line));
@@ -3943,12 +4281,22 @@ function PlacementEditorPanel({
     setArmedKind("end");
   };
 
-  /** Shared hero nudges — only the armed target moves (Title line OR Ends). */
+  /** Shared hero nudges — only the armed target moves. */
   const nudgeArmed = (delta: number) => {
     if (locked) return;
     if (armedKind === "end") {
       if (endFrameDraft == null) return;
       setEndFrame(endFrameDraft + delta);
+      return;
+    }
+    if (armedKind === "zoomIn") {
+      const cur = Number(motionDraft.zoomInFrame ?? spanStartFrame);
+      setMotionFrame("zoomInFrame", cur + delta);
+      return;
+    }
+    if (armedKind === "zoomOut") {
+      const cur = Number(motionDraft.zoomOutFrame ?? beatEndFrame - 1);
+      setMotionFrame("zoomOutFrame", cur + delta);
       return;
     }
     if (!armed || armedIndex < 0) return;
@@ -3965,6 +4313,14 @@ function PlacementEditorPanel({
       setEndFrame(frame);
       return;
     }
+    if (armedKind === "zoomIn") {
+      setMotionFrame("zoomInFrame", frame);
+      return;
+    }
+    if (armedKind === "zoomOut") {
+      setMotionFrame("zoomOutFrame", frame);
+      return;
+    }
     if (!armed || armedIndex < 0) return;
     const spanEnd = (endFrameDraft ?? placement?.endFrameExclusive ?? spanStartFrame + 1) - 1;
     const nextFrame = Math.max(spanStartFrame, Math.min(spanEnd, Math.round(frame)));
@@ -3972,22 +4328,44 @@ function PlacementEditorPanel({
     onSeekReveal(nextFrame);
   };
 
-  const heroFrameValue =
-    armedKind === "end" ? (endFrameDraft ?? "") : (armed?.revealFrame ?? "");
+  const motionFrameDisplay = (key: "zoomInFrame" | "zoomOutFrame"): string | number => {
+    const raw = motionDraft[key];
+    if (raw == null || raw === "") return "";
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : "";
+  };
+  const heroFrameValue: string | number =
+    armedKind === "end"
+      ? (endFrameDraft ?? "")
+      : armedKind === "zoomIn"
+        ? motionFrameDisplay("zoomInFrame")
+        : armedKind === "zoomOut"
+          ? motionFrameDisplay("zoomOutFrame")
+          : (armed?.revealFrame ?? "");
   const heroCanNudge =
     !editDisabled &&
-    (armedKind === "end" ? endFrameDraft != null : Boolean(armed));
+    (armedKind === "end"
+      ? endFrameDraft != null
+      : armedKind === "zoomIn" || armedKind === "zoomOut"
+        ? true
+        : Boolean(armed));
 
   const metaKeys = interfaceSpec?.metaKeys || [];
   const assetKeys = interfaceSpec?.assetKeys || [];
   /** "holdSec" → "Hold sec" — generic humanizer, no per-engine strings. */
-  const knobLabel = (key: string) =>
-    key
+  const knobLabel = (key: string) => {
+    // ui-callout ring geometry (normalized 0–1).
+    if (key === "x") return "X (left)";
+    if (key === "y") return "Y (top)";
+    if (key === "width") return "Width";
+    if (key === "height") return "Height";
+    return key
       .replace(/([A-Z])/g, " $1")
       .replace(/^./, (c) => c.toUpperCase())
       .replace(/ Asset Id$/i, "");
+  };
 
-  const setMetaValue = (key: string, raw: string) => {
+  const setMetaValue = (key: string, raw: string | boolean) => {
     updateKnobs({ meta: { ...metaDraft, [key]: raw } });
   };
 
@@ -4062,14 +4440,19 @@ function PlacementEditorPanel({
   const slotLabel = (slot: string, index: number) => {
     if (listSlot && slot.startsWith(`${listSlot}.`)) {
       const n = slot.slice(listSlot.length + 1);
+      // Progress-scale stops sit on the bar — not generic "bullets".
+      if (listSlot === "milestones") return `Stop ${Number(n) + 1}`;
       return `Bullet ${Number(n) + 1}`;
     }
     if (slot === "text" || slot === "title" || slot === "phrase" || slot === "thesis") {
       return "Title";
     }
+    if (slot === "startLabel") return "Start";
+    if (slot === "targetLabel") return "Target";
     if (slot === "label") return "Label";
     if (slot === "detail") return "Detail";
     if (slot === "action") return "Action";
+    if (slot === "destination") return "Link";
     if (slot === "prompt") return "Prompt";
     return slot || `Line ${index + 1}`;
   };
@@ -4077,12 +4460,15 @@ function PlacementEditorPanel({
   const heroTargetLabel =
     armedKind === "end"
       ? "Ends (undock)"
-      : armed
-        ? slotLabel(armed.slot, armedIndex)
-        : "arm a line or Ends";
+      : armedKind === "zoomIn"
+        ? "Zoom in"
+        : armedKind === "zoomOut"
+          ? "Zoom out"
+          : armed
+            ? slotLabel(armed.slot, armedIndex)
+            : "arm a timing target";
 
-  return (
-    <>
+  const editor = (
     <aside className="visual-package-placement-editor" aria-label="Placement craft panel">
       <header className="visual-package-placement-panel-head">
         <div className="visual-package-placement-panel-title-row">
@@ -4104,6 +4490,9 @@ function PlacementEditorPanel({
             </span>
           ) : null}
         </div>
+        {beatJumpSlot ? (
+          <div className="visual-package-placement-panel-jump-row">{beatJumpSlot}</div>
+        ) : null}
         {/* Graphic poster + name moved below the video player (parent renders it). */}
       </header>
 
@@ -4122,11 +4511,12 @@ function PlacementEditorPanel({
       ) : (
         <>
           <div className="visual-package-placement-lines" role="list">
-            {draftLines.length === 0 ? (
+            {draftLines.length === 0 && !hasZoomIn && !hasZoomOut ? (
               <p className="visual-package-layout-review-hint">
                 Motion-only engine — no copy lines. Scrub live preview and Lock when ready.
               </p>
-            ) : (
+            ) : null}
+            {draftLines.length > 0 ? (
               draftLines.map((line, index) => {
                 const isList = Boolean(listSlot && line.slot.startsWith(`${listSlot}.`));
                 const isArmed = armedKind === "line" && index === armedIndex;
@@ -4192,7 +4582,99 @@ function PlacementEditorPanel({
                   </div>
                 );
               })
-            )}
+            ) : null}
+
+            {/* Punch-zoom: arm Zoom in / Zoom out like Title, then use shared hero nudges. */}
+            {hasZoomIn ? (
+              <div
+                role="listitem"
+                className={[
+                  "visual-package-placement-line-row",
+                  armedKind === "zoomIn" ? "is-armed" : "",
+                ].join(" ")}
+                onClick={() => {
+                  setArmedKind("zoomIn");
+                  const f = Number(motionDraft.zoomInFrame ?? spanStartFrame);
+                  if (Number.isFinite(f)) onSeekReveal(f);
+                }}
+              >
+                <span className="visual-package-placement-slot" title="Frame when zoom-in starts">
+                  Zoom in
+                </span>
+                <span className="visual-package-placement-end-hint">
+                  Camera punches in (starts)
+                </span>
+                <button
+                  type="button"
+                  className={[
+                    "visual-package-placement-line-frame",
+                    armedKind === "zoomIn" ? "is-armed" : "",
+                  ].join(" ")}
+                  title="Arm Zoom in and jump to frame"
+                  disabled={editDisabled}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setArmedKind("zoomIn");
+                    const f = Number(motionDraft.zoomInFrame ?? spanStartFrame);
+                    if (Number.isFinite(f)) onSeekReveal(f);
+                  }}
+                >
+                  f {String(motionDraft.zoomInFrame ?? "—")}
+                </button>
+                {armedKind === "zoomIn" ? (
+                  <span className="visual-package-placement-armed-check" aria-hidden>
+                    ✓
+                  </span>
+                ) : (
+                  <span className="visual-package-placement-armed-check muted" aria-hidden />
+                )}
+              </div>
+            ) : null}
+            {hasZoomOut ? (
+              <div
+                role="listitem"
+                className={[
+                  "visual-package-placement-line-row",
+                  armedKind === "zoomOut" ? "is-armed" : "",
+                ].join(" ")}
+                onClick={() => {
+                  setArmedKind("zoomOut");
+                  const f = Number(motionDraft.zoomOutFrame ?? beatEndFrame - 1);
+                  if (Number.isFinite(f)) onSeekReveal(f);
+                }}
+              >
+                <span className="visual-package-placement-slot" title="Frame when zoom-out starts">
+                  Zoom out
+                </span>
+                <span className="visual-package-placement-end-hint">
+                  Camera returns to full (starts)
+                </span>
+                <button
+                  type="button"
+                  className={[
+                    "visual-package-placement-line-frame",
+                    armedKind === "zoomOut" ? "is-armed" : "",
+                  ].join(" ")}
+                  title="Arm Zoom out and jump to frame"
+                  disabled={editDisabled}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setArmedKind("zoomOut");
+                    const f = Number(motionDraft.zoomOutFrame ?? beatEndFrame - 1);
+                    if (Number.isFinite(f)) onSeekReveal(f);
+                  }}
+                >
+                  f {String(motionDraft.zoomOutFrame ?? "—")}
+                </button>
+                {armedKind === "zoomOut" ? (
+                  <span className="visual-package-placement-armed-check" aria-hidden>
+                    ✓
+                  </span>
+                ) : (
+                  <span className="visual-package-placement-armed-check muted" aria-hidden />
+                )}
+              </div>
+            ) : null}
 
             {/* Ends is a peer of Title: click to arm, then use the shared hero nudges. */}
             <div
@@ -4289,19 +4771,50 @@ function PlacementEditorPanel({
                 ))}
                 {metaKeys
                   .filter((key) => key !== "holdSec")
-                  .map((key) => (
-                    <label className="visual-package-placement-knob" key={key}>
-                      <span className="visual-package-placement-knob-label">{knobLabel(key)}</span>
-                      <input
-                        type="text"
-                        inputMode="decimal"
-                        value={String(metaDraft[key] ?? "")}
-                        placeholder="default"
-                        disabled={editDisabled}
-                        onChange={(event) => setMetaValue(key, event.target.value)}
-                      />
-                    </label>
-                  ))}
+                  .map((key) => {
+                    if (BOOLEAN_META_KEYS.has(key)) {
+                      const on = coerceBoolKnob(metaDraft[key], true);
+                      return (
+                        <button
+                          type="button"
+                          key={key}
+                          className={[
+                            "visual-package-toggle",
+                            "visual-package-placement-knob-toggle",
+                            on ? "is-on" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                          role="switch"
+                          aria-checked={on}
+                          disabled={editDisabled}
+                          onClick={() => setMetaValue(key, !on)}
+                        >
+                          <span className="visual-package-toggle-track" aria-hidden>
+                            <span className="visual-package-toggle-thumb" />
+                          </span>
+                          {knobLabel(key)}
+                        </button>
+                      );
+                    }
+                    const boundsHint =
+                      key === "x" || key === "y" || key === "width" || key === "height"
+                        ? "Normalized 0–1 of the frame (upper-left + size for the ring)"
+                        : undefined;
+                    return (
+                      <label className="visual-package-placement-knob" key={key} title={boundsHint}>
+                        <span className="visual-package-placement-knob-label">{knobLabel(key)}</span>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={String(metaDraft[key] ?? "")}
+                          placeholder={boundsHint ? "0–1" : "default"}
+                          disabled={editDisabled}
+                          onChange={(event) => setMetaValue(key, event.target.value)}
+                        />
+                      </label>
+                    );
+                  })}
               </div>
             ) : null}
           </div>
@@ -4317,10 +4830,15 @@ function PlacementEditorPanel({
             </button>
           ) : null}
 
-          {/* Shared hero frame control — drives only the armed target (line OR Ends). */}
+          {/* Shared hero frame control — drives only the armed target. */}
           <div className="visual-package-placement-frame-hero" aria-label="Frame fine-tune">
             <span className="visual-package-placement-speech-label" style={{ width: "100%", textAlign: "center" }}>
-              {armedKind === "end" ? "Graphic end" : "Reveal timing"} · {heroTargetLabel}
+              {armedKind === "end"
+                ? "Graphic end"
+                : armedKind === "zoomIn" || armedKind === "zoomOut"
+                  ? "Camera timing"
+                  : "Reveal timing"}{" "}
+              · {heroTargetLabel}
               {previewBusy ? " · updating live preview…" : ""}
             </span>
             <button
@@ -4357,7 +4875,11 @@ function PlacementEditorPanel({
                 title={
                   armedKind === "end"
                     ? "Graphic end frame (exclusive) — when the card undocks"
-                    : "Reveal frame (absolute on locked cut) for the armed line"
+                    : armedKind === "zoomIn"
+                      ? "Frame when zoom-in starts (absolute on locked cut)"
+                      : armedKind === "zoomOut"
+                        ? "Frame when zoom-out starts (absolute on locked cut)"
+                        : "Reveal frame (absolute on locked cut) for the armed line"
                 }
               />
             </label>
@@ -4390,46 +4912,56 @@ function PlacementEditorPanel({
         </>
       )}
     </aside>
-      {selected && placement ? (
-        <section
-          className="visual-package-placement-speech-card"
-          aria-label="Spoken words in this beat"
-        >
-          <div className="visual-package-placement-word-chips">
-            {beatWords.length === 0 ? (
-              <span className="muted" style={{ fontSize: 12 }}>
-                No word timing for this beat.
-              </span>
-            ) : (
-              beatWords.map((word) => {
-                const frame =
-                  word.startFrame != null && Number.isFinite(word.startFrame)
-                    ? Math.round(word.startFrame)
-                    : Math.round((word.startSec ?? 0) * fps);
-                const isReveal =
-                  armedKind === "line" &&
-                  armed != null &&
-                  Math.abs((armed.revealFrame || 0) - frame) <= 1;
-                return (
-                  <button
-                    key={word.id}
-                    type="button"
-                    className={[
-                      "visual-package-placement-word-chip",
-                      isReveal ? "is-reveal" : "",
-                    ].join(" ")}
-                    disabled={editDisabled || armedKind !== "line" || !armed}
-                    title={`Set reveal · f ${frame} · ${frameToClock(frame, fps)}`}
-                    onClick={() => setRevealFromWord(word)}
-                  >
-                    {word.text}
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </section>
-      ) : null}
+  );
+
+  const speechCard =
+    selected && placement ? (
+      <section
+        className="visual-package-placement-speech-card"
+        aria-label="Spoken words in this beat"
+      >
+        <div className="visual-package-placement-word-chips">
+          {beatWords.length === 0 ? (
+            <span className="muted" style={{ fontSize: 12 }}>
+              No word timing for this beat.
+            </span>
+          ) : (
+            beatWords.map((word) => {
+              const frame =
+                word.startFrame != null && Number.isFinite(word.startFrame)
+                  ? Math.round(word.startFrame)
+                  : Math.round((word.startSec ?? 0) * fps);
+              const isReveal =
+                armedKind === "line" &&
+                armed != null &&
+                Math.abs((armed.revealFrame || 0) - frame) <= 1;
+              return (
+                <button
+                  key={word.id}
+                  type="button"
+                  className={[
+                    "visual-package-placement-word-chip",
+                    isReveal ? "is-reveal" : "",
+                  ].join(" ")}
+                  disabled={editDisabled || armedKind !== "line" || !armed}
+                  title={`Set reveal · f ${frame} · ${frameToClock(frame, fps)}`}
+                  onClick={() => setRevealFromWord(word)}
+                >
+                  {word.text}
+                </button>
+              );
+            })
+          )}
+        </div>
+      </section>
+    ) : null;
+
+  return (
+    <>
+      {editor}
+      {speechCard && speechHostEl
+        ? createPortal(speechCard, speechHostEl)
+        : speechCard}
     </>
   );
 }

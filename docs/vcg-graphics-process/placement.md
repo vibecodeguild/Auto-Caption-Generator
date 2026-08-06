@@ -118,23 +118,23 @@ Adapters map slots → existing `parameters.*` (engines keep draw names until cl
 | robot-defiant | `text` | — | — | — | — |
 | robot-roast | `text` | — | — | — | — |
 | robot-rocket-sign | `text` | — | — | — | — |
-| speaker-side-panel | `text` + `items.*` | **items** max 12 | — | — | `side`, frame/panel knobs |
 | dependency-stack | `text` + `nodes.*` | **nodes** max **6** | — | — | — |
+| ~~speaker-side-panel~~ | *retired* → use **dependency-stack** | — | — | — | — |
 | numbered-example-card | `titleLines.*` | **titleLines** max 8 | example #s | — | tags / accent |
 | speaker-rise-callouts | `thesis` + `callouts.*` | **callouts** max 8 | accent index | — | — |
 | problem-card-triptych | `cards.0`…`cards.2` | fixed 3 | — | — | — |
 | progress-scale | `text`, `startLabel`, `targetLabel` + `milestones.*` | **milestones** max 8 | — | — | accent |
 | numbered-step-intro | `title`, `action` | — | `stepNumber`, `showNumber?` | — | `side` |
-| ui-callout | `label`, `detail` | — | — | — | bounds / pointer |
+| ui-callout | `label` | — | `x`, `y`, `width`, `height` (normalized 0–1; upper-left + size → `targetBounds`) | — | `pointer`, `accentColor?` |
 | windows-prompt-typing | `prompt` | — | `appName?` | — | `side` |
-| brand-cta-lockup | `logoText`, `action`, `destination` | — | — | `logoAssetId?` | — |
+| brand-cta-lockup | *(none — join line + link brand-fixed)* | — | — | — | — |
 | tradeoff-meter | `leftLabel`, `rightLabel`, `verdict` | — | `value` | — | `side` |
-| source-punch-zoom | *(none)* | — | — | — | focus / zoom / motion |
+| source-punch-zoom | *(none)* | — | — | — | `focusX`/`focusY`/`zoom`/`settleSec`/`motion`; **`zoomInFrame`/`zoomOutFrame`** (absolute frames when zoom-in / zoom-out *start*; default beat start / near beat end) |
 
 **No `kicker` slot** anywhere. Adapters never fill kicker.
 
 **Video-docking engines** (move `#main-video`, not only overlay text): include at least  
-dependency-stack, speaker-side-panel, progress-scale, windows-prompt-typing, punchline-reveal (joke card), source-punch-zoom, brand-cta-lockup.  
+dependency-stack, progress-scale, windows-prompt-typing, punchline-reveal (joke card), source-punch-zoom, brand-cta-lockup.  
 Live preview **must** use real composition (Tier B), not a text-only sticker.
 
 **Engine identity:** one engine id = one look. No dual modes.  

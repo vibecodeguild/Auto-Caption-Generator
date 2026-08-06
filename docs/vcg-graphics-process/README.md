@@ -13,6 +13,7 @@ This folder stays **small on purpose**: only durable product authority. No expla
 | [assignment.md](./assignment.md) | **APPROVED** Stage 2 assignment design (algorithm + UI + artifacts) |
 | [scenelayer.md](./scenelayer.md) | **APPROVED** Stage 2 layout label per beat (before Assign) |
 | [placement.md](./placement.md) | **APPROVED / LOCKED** Stage 3 (studio UI, live Tier B, reveal UX, lock, final) |
+| [placement-perfected-engines.md](./placement-perfected-engines.md) | Human checklist: which engines are placement-craft perfected |
 
 Stage 1 skill (Grok): **`masterbeater`** — `.grok/skills/masterbeater` — loads [beat-universe.md](./beat-universe.md).
 
