@@ -33,6 +33,29 @@ def test_create_and_ensure_candidates_never_auto_golden(library_root: Path) -> N
     assert not any(entry["status"] == "golden" for entry in document["entries"])
     # buildable is dropped product noise - not written on new usages
     assert not any("buildable" in entry for entry in document["entries"])
+    # Create itself seeds candidates so a new library is immediately usable.
+    assert len(document["entries"]) >= len(MODULE_IDS)
+    assert "intro-credentials" in {entry["id"] for entry in document["entries"]}
+
+
+def test_summary_auto_seeds_missing_engine_usages(library_root: Path) -> None:
+    """Opening/summarying the library must surface new engines without a manual ensure."""
+
+    gr.create_graphics_library(library_root)
+    document = gr.load_graphics_library(library_root)
+    document["entries"] = [
+        entry for entry in document["entries"] if entry.get("id") != "intro-credentials"
+    ]
+    gr.save_graphics_library(document, library_root)
+    ids_before = {entry["id"] for entry in gr.load_graphics_library(library_root)["entries"]}
+    assert "intro-credentials" not in ids_before
+
+    snap = gr.summary(library_root)
+    ids_after = {entry["id"] for entry in snap["entries"]}
+    assert "intro-credentials" in ids_after
+    intro = next(entry for entry in snap["entries"] if entry["id"] == "intro-credentials")
+    assert intro["status"] == "candidate"
+    assert intro["engineId"] == "intro-credentials"
 
 
 def test_update_status_only(library_root: Path) -> None:

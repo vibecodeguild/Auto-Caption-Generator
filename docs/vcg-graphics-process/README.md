@@ -206,8 +206,8 @@ Never “fix” original by pasting human edits into `masterbeater-beats.json`.
 | Placement design | **APPROVED / LOCKED** — [placement.md](./placement.md) §2 decision table |
 | Placement (draft, lines, lock APIs) | **BUILT** — Place / Save / Lock; Final gated |
 | Placement studio UI + live Tier B preview + reveal nudges | **BUILT** — single-beat studio, word chips, ±1/5/10, pin, live HyperFrames |
-| Final full episode render | **Not built** — gate ready when all locked |
-| Full daily “go” button | **Not done** |
+| Final full episode render | **BUILT** — all locked → one HyperFrames encode + locked-cut audio remux → `exports/final-video.mp4` |
+| Full daily “go” button | **Not wanted** — hybrid AI / code / human stages are the product path |
 | Creator Production / old multi-agent VP essays | **Not** daily authority |
 
 ---
@@ -234,9 +234,8 @@ Do not add process docs that only restate those paths.
 
 ## Deliberate next focuses
 
-1. **Final full-episode render** from locked placements (gate ready; encode path next).
-2. **Final full render** from locked placements.
-3. **Deferred:** engine kicker CSS cleanup (operator); goldens coverage.
+1. **Live-test Final** on a real locked project (watch docks, typing, audio identity).
+2. **Deferred:** engine kicker CSS cleanup (operator); goldens coverage; joke-image aspect contract.
 
 ### Tighten the run further (**proposed** eng — not approved until scheduled)
 

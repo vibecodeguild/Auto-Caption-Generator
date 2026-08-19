@@ -83,7 +83,10 @@ def historical_paths(repo: Path) -> list[str]:
 
 
 def forbidden_path_reason(path: str) -> str | None:
-    normalized = path.replace("\\", "/").lstrip("./")
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = normalized.lstrip("/")
     lowered = normalized.lower()
     name = Path(lowered).name
 
@@ -94,6 +97,8 @@ def forbidden_path_reason(path: str) -> str | None:
             return f"generated/private content under {directory}"
     if name in PRIVATE_FILENAMES:
         return "transcript artifact"
+    if name.startswith(".tmp-") or name.startswith(".tmp_"):
+        return "local scratch artifact"
     if lowered.endswith(PRIVATE_SUFFIXES):
         return "creator media or project format"
     return None

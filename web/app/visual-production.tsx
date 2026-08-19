@@ -83,6 +83,7 @@ const MODULES: Array<{ id: NonNullable<VisualCue["moduleId"]>; name: string; des
   { id: "punchline-reveal", name: "Punchline reveal", description: "Land text with the spoken phrase" },
   { id: "progress-scale", name: "Progress scale", description: "Full white journey stage with speaker in an upper-right window" },
   { id: "dependency-stack", name: "Dependency stack", description: "Title + sequential stack; talking head docks right" },
+  { id: "intro-credentials", name: "Intro credentials", description: "Head docks left; name + experience right; large Wai robot thank-you" },
 ];
 
 type LibraryTab = "generated" | "creator" | "imported" | "curate";
@@ -108,10 +109,19 @@ function semanticParameterEntries(moduleId: VisualCue["moduleId"], parameters: V
     const value = parameters[key];
     if (typeof value === "string" && value.trim()) entries.push([`parameters.${key}`, value]);
   }
-  const listKeys = moduleId === "dependency-stack" ? ["nodes"] as const : [];
+  const listKeys =
+    moduleId === "dependency-stack" || moduleId === "intro-credentials"
+      ? (["nodes"] as const)
+      : [];
   for (const key of listKeys) {
     const values = parameters[key];
     if (Array.isArray(values)) values.forEach((value, index) => entries.push([`parameters.${key}.${index}`, value]));
+  }
+  if (moduleId === "intro-credentials") {
+    const thankYou = parameters.thankYou;
+    if (typeof thankYou === "string" && thankYou.trim()) {
+      entries.push(["parameters.thankYou", thankYou]);
+    }
   }
   return entries;
 }
@@ -125,6 +135,8 @@ function defaultModuleCue(moduleId: NonNullable<VisualCue["moduleId"]>, at: numb
   };
   const parameters: VisualCueParameters = moduleId === "dependency-stack"
     ? { ...common, text: "WHAT YOU NEED", nodes: ["Transcript", "Locked cut", "Graphics kit"] }
+    : moduleId === "intro-credentials"
+      ? { ...common, text: "YOUR NAME", nodes: ["Builder", "Teacher", "Community host"], thankYou: "Thank you!" }
     : moduleId === "progress-scale"
       ? { ...common, text: "ANIMATE TOWARD THE TARGET", kicker: "VCG / VISUAL", startLabel: "START", targetLabel: "TARGET", accentColor: "#FF00CE" }
       : { ...common, text: "EDIT THIS MESSAGE", kicker: "VCG / VISUAL", accentColor: "#FF00CE" };

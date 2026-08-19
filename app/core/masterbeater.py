@@ -178,6 +178,12 @@ def extract_words(document: dict) -> list[dict[str, Any]]:
         if end_sec is None:
             end_sec = (end_frame + 1) / fps
 
+        sentence_raw = word.get("sentence_id", word.get("sentenceId"))
+        try:
+            sentence_id = int(sentence_raw) if sentence_raw is not None else 0
+        except (TypeError, ValueError):
+            sentence_id = 0
+
         out.append(
             {
                 "id": word_id,
@@ -187,6 +193,7 @@ def extract_words(document: dict) -> list[dict[str, Any]]:
                 "endFrameExclusive": end_frame + 1,
                 "startSec": float(start_sec),
                 "endSec": float(end_sec),
+                "sentenceId": sentence_id,
             }
         )
     return out
@@ -494,6 +501,11 @@ def normalize_masterbeater_result(
     if duration_sec is None and words:
         duration_sec = float(words[-1]["endSec"])
 
+    # Always store beats in transcript time order. Stage 1 split/merge/add used to
+    # append new rows at the end of the array, which desynced Prev/Next and Place
+    # navigation from speech order (Final already sorted cues by startSec).
+    beats_out = sort_beats_by_timeline(beats_out)
+
     return {
         "agent": "masterbeater",
         "schemaVersion": 2,
@@ -515,6 +527,29 @@ def normalize_masterbeater_result(
             "startSec/endSec are informational for human review. No graphicId at this stage."
         ),
     }
+
+
+def sort_beats_by_timeline(beats: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stable transcript order: startFrame, then endFrameExclusive, then id."""
+
+    def key(beat: dict[str, Any]) -> tuple[int, int, str]:
+        try:
+            start = int(beat.get("startFrame") or 0)
+        except (TypeError, ValueError):
+            start = 0
+        end_raw = beat.get("endFrameExclusive")
+        if end_raw is None and beat.get("endFrame") is not None:
+            try:
+                end_raw = int(beat["endFrame"]) + 1
+            except (TypeError, ValueError):
+                end_raw = start + 1
+        try:
+            end = int(end_raw if end_raw is not None else start + 1)
+        except (TypeError, ValueError):
+            end = start + 1
+        return (start, end, str(beat.get("id") or beat.get("beatId") or ""))
+
+    return sorted((b for b in beats if isinstance(b, dict)), key=key)
 
 
 def load_masterbeater_output(project_root: Path) -> dict | None:
@@ -650,8 +685,13 @@ def save_masterbeater_edits_for_video_project(
 ) -> dict[str, Any]:
     """Auto-save human word-bound edits to the reviewed working copy.
 
-    The original ``masterbeater-beats.json`` is left untouched. Each save also
-    appends an entry to ``masterbeater-edit-ledger.json`` for process review.
+    Masterbeater agent run is **optional**. Creators who know their beat map can
+    place beats by hand; the first successful save seeds
+    ``masterbeater-beats.json`` as a human baseline (``agent: masterbeater-manual``)
+    and that baseline stays immutable afterward — same contract as an agent original.
+
+    Subsequent saves only update ``masterbeater-beats-reviewed.json`` and append
+    ``masterbeater-edit-ledger.json``.
     """
 
     root = video_project_root(manifest_path)
@@ -663,14 +703,8 @@ def save_masterbeater_edits_for_video_project(
         )
 
     original = load_masterbeater_output(root)
-    if original is None:
-        raise FileNotFoundError(
-            f"Original Masterbeater output missing at {output_path_for_project(root)}. "
-            "Run Masterbeater before editing."
-        )
-
     previous = load_masterbeater_reviewed(root) or original
-    previous_beats = list(previous.get("beats") or [])
+    previous_beats = list((previous or {}).get("beats") or [])
 
     beats_in = payload.get("beats")
     if not isinstance(beats_in, list):
@@ -680,18 +714,17 @@ def save_masterbeater_edits_for_video_project(
 
     mode = str(
         payload.get("mode")
-        or previous.get("mode")
-        or original.get("mode")
+        or (previous or {}).get("mode")
+        or (original or {}).get("mode")
         or "tutorial"
     ).strip()
-    gaps_source = (
-        payload["gaps"]
-        if "gaps" in payload
-        else previous.get("gaps")
-        if previous.get("gaps") is not None
-        else original.get("gaps")
-        or []
-    )
+    if previous is not None and previous.get("gaps") is not None:
+        default_gaps = previous.get("gaps")
+    elif original is not None and original.get("gaps") is not None:
+        default_gaps = original.get("gaps")
+    else:
+        default_gaps = []
+    gaps_source = payload["gaps"] if "gaps" in payload else default_gaps
     normalize_payload = {
         "mode": mode,
         "beats": beats_in,
@@ -710,11 +743,33 @@ def save_masterbeater_edits_for_video_project(
             "Check startWordId/endWordId values."
         )
 
+    seeded_manual_baseline = False
+    if original is None:
+        # First human-authored save: freeze a baseline original so later edits
+        # keep the same immutability contract as agent-run projects.
+        baseline = dict(result)
+        baseline["agent"] = "masterbeater-manual"
+        baseline["manualSeed"] = True
+        baseline["edited"] = False
+        baseline["notes"] = (
+            "Human-authored Stage 1 baseline (Masterbeater agent not run). "
+            "Immutable after first save; further membership edits go only to "
+            f"{REVIEWED_FILENAME}."
+        )
+        write_masterbeater_output(root, baseline)
+        original = baseline
+        seeded_manual_baseline = True
+        # Ledger "before" is empty — this save is the first placement.
+        previous_beats = []
+
     result["agent"] = "masterbeater-reviewed"
     result["edited"] = True
     result["originalFile"] = OUTPUT_FILENAME
-    result["originalBeatCount"] = int(original.get("beatCount") or len(original.get("beats") or []))
+    result["originalBeatCount"] = int(
+        (original or {}).get("beatCount") or len((original or {}).get("beats") or [])
+    )
     result["basedOnOriginal"] = True
+    result["manualSeed"] = bool((original or {}).get("manualSeed")) or seeded_manual_baseline
     ledger_entry = append_edit_ledger_entry(
         root,
         edit=payload.get("edit") if isinstance(payload.get("edit"), dict) else None,
@@ -722,7 +777,7 @@ def save_masterbeater_edits_for_video_project(
         next_beats=list(result.get("beats") or []),
     )
     out_path = write_masterbeater_reviewed(root, result)
-    # Original must remain byte-stable for this save path.
+    # Original must remain byte-stable after the first seed (agent or manual).
     result["outputPath"] = str(out_path)
     result["originalPath"] = str(output_path_for_project(root))
     result["ledgerPath"] = str(ledger_path_for_project(root))
@@ -730,6 +785,7 @@ def save_masterbeater_edits_for_video_project(
     result["ledgerEntryCount"] = int(load_masterbeater_ledger(root).get("entryCount") or 0)
     result["ok"] = True
     result["role"] = "reviewed"
+    result["seededManualBaseline"] = seeded_manual_baseline
     return result
 
 
@@ -1106,6 +1162,7 @@ def status_for_video_project(manifest_path: Path, manifest: dict) -> dict[str, A
                     "endFrame": word["endFrame"],
                     "startSec": word["startSec"],
                     "endSec": word["endSec"],
+                    "sentenceId": int(word.get("sentenceId") or 0),
                 }
                 for word in extract_words(document)
             ]

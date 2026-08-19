@@ -70,19 +70,22 @@ import {
   deleteDeadSpace,
   deleteCaptionStyle,
   deleteTokens,
+  cancelExportCut,
   exportCut,
   generateAudioPreview,
   generateCaptionVideo,
+  getExportCutJob,
   getProjectDocument,
   getTranscriptionJob,
   getCurrentProject,
   getCurrentVideoProject,
   getVisualPlanPrompt,
+  liveCutPreview,
   normalizeVideoAudio,
   openProjectDialog,
   openVideoProject,
   removeVideoProjectClip,
-  removeManualCut,
+  removeSplice,
   reorderVideoProjectClips,
   prepareCaptionPreview,
   restoreTokens,
@@ -118,9 +121,11 @@ const DEFAULT_WHISPER_MODEL = "Large v3 - best accuracy";
 const DEFAULT_WHISPER_COMPUTE = "NVIDIA GPU";
 
 type ExportProgressState = {
-  status: "running" | "complete" | "failed";
+  status: "running" | "canceling" | "canceled" | "complete" | "failed";
   message: string;
   outputPath?: string;
+  value?: number;
+  jobId?: string;
 };
 
 type ProjectFileHandle = {
@@ -190,7 +195,7 @@ export default function Home() {
   const [audioSource, setAudioSource] = useState<string | null>(null);
   const [audioOutputFolder, setAudioOutputFolder] = useState("");
   const [audioPresetId, setAudioPresetId] = useState("gentle");
-  const [normalizeCutAudio, setNormalizeCutAudio] = useState(false);
+  const [normalizeCutAudio, setNormalizeCutAudio] = useState(true);
   const [audioTargetI, setAudioTargetI] = useState(-14);
   const [audioTargetLra, setAudioTargetLra] = useState(7);
   const [audioTargetTp, setAudioTargetTp] = useState(-1.5);
@@ -516,38 +521,104 @@ export default function Home() {
     setBusy(true);
     setExportProgress({
       status: "running",
+      value: 0,
       message: normalizeCutAudio
-        ? "Exporting the cut, then analyzing and normalizing its audio..."
-        : "Exporting edited video with FFmpeg...",
+        ? "Exporting the cut, then analyzing and normalizing its audio…"
+        : "Exporting edited video with FFmpeg…",
     });
-    exportCut({
+    void exportCut({
       normalize_audio: normalizeCutAudio,
       normalization_preset_id: audioPresetId,
       target_i: audioTargetI,
       target_lra: audioTargetLra,
       target_tp: audioTargetTp,
     })
-      .then((result) => {
-        setCaptionSource(result.output_path);
-        setAudioSource(result.output_path);
-        setStatus(`Exported ${result.output_path}`);
+      .then(async (started) => {
+        const jobId = started.job.job_id;
         setExportProgress({
-          status: "complete",
-          message: result.normalized
-            ? `Cut and normalized export finished. The original cut remains at ${result.cut_output_path}`
-            : "Export finished.",
-          outputPath: result.output_path,
+          status: "running",
+          value: started.job.value,
+          message: started.job.message || "Exporting…",
+          jobId,
         });
+        // Poll until terminal state.
+        for (;;) {
+          await new Promise((r) => window.setTimeout(r, 800));
+          const job = await getExportCutJob(jobId);
+          if (job.status === "running" || job.status === "canceling") {
+            setExportProgress({
+              status: job.status === "canceling" ? "canceling" : "running",
+              value: job.value,
+              message: job.message || "Exporting…",
+              jobId,
+            });
+            continue;
+          }
+          if (job.status === "complete") {
+            if (job.output_path) {
+              setCaptionSource(job.output_path);
+              setAudioSource(job.output_path);
+              setStatus(`Exported ${job.output_path}`);
+            }
+            setExportProgress({
+              status: "complete",
+              value: 100,
+              message: job.normalized
+                ? `Cut and normalized export finished. The original cut remains at ${job.cut_output_path}`
+                : "Export finished.",
+              outputPath: job.output_path ?? undefined,
+              jobId,
+            });
+            break;
+          }
+          if (job.status === "canceled") {
+            setExportProgress({
+              status: "canceled",
+              value: job.value,
+              message: "Export canceled.",
+              jobId,
+            });
+            setStatus("Export canceled.");
+            break;
+          }
+          setExportProgress({
+            status: "failed",
+            value: job.value,
+            message: job.error || job.message || "Export failed.",
+            jobId,
+          });
+          setStatus(job.error || job.message || "Export failed.");
+          break;
+        }
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         setStatus(message);
-        setExportProgress({
-          status: "failed",
-          message,
-        });
+        setExportProgress({ status: "failed", message });
       })
       .finally(() => setBusy(false));
+  };
+
+  const handleCancelExport = () => {
+    const jobId = exportProgress?.jobId;
+    if (!jobId) return;
+    setExportProgress((prev) =>
+      prev
+        ? { ...prev, status: "canceling", message: "Canceling export…" }
+        : prev,
+    );
+    void cancelExportCut(jobId)
+      .then((result) => {
+        setExportProgress({
+          status: result.job.status === "canceled" ? "canceled" : "canceling",
+          value: result.job.value,
+          message: result.job.message || "Canceling export…",
+          jobId,
+        });
+      })
+      .catch((error) => {
+        setStatus(error instanceof Error ? error.message : "Could not cancel export.");
+      });
   };
 
   const handleChooseCaptionVideo = () => {
@@ -877,35 +948,84 @@ export default function Home() {
       });
   };
 
-  const handleRenderCutPreview = () => {
+  /** Stage 4 CapCut-style: instant EDL plan, no FFmpeg bake. */
+  const handleLiveCutPreview = useCallback((options?: { quiet?: boolean }) => {
     if (!project) return;
-    setBusy(true);
-    setPreviewRenderProgress({ status: "running", message: "Rendering the complete edited video as a fast review draft..." });
-    renderCutPreview()
+    const quiet = Boolean(options?.quiet);
+    if (!quiet) {
+      setBusy(true);
+      setPreviewRenderProgress({
+        status: "running",
+        message: "Building live cut timeline (no re-encode)…",
+      });
+    }
+    liveCutPreview()
       .then((result) => {
         setRenderedCutPreview(result);
-        setStatus(`Rendered complete ${formatTime(result.duration_seconds)} cut preview with ${result.splices.length} splice markers`);
-        setPreviewRenderProgress({ status: "complete", message: "The complete rendered cut is ready for final review." });
+        if (!quiet) {
+          setStatus(
+            `Live cut ready · ${formatTime(result.duration_seconds)} · ${result.splices.length} splice markers · seek source (no bake)`,
+          );
+          setPreviewRenderProgress({
+            status: "complete",
+            message: "Live cut timeline ready. Edits update instantly; export encodes once.",
+          });
+        }
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         setStatus(message);
-        setPreviewRenderProgress({ status: "failed", message });
+        if (!quiet) setPreviewRenderProgress({ status: "failed", message });
       })
-      .finally(() => setBusy(false));
-  };
+      .finally(() => {
+        if (!quiet) setBusy(false);
+      });
+  }, [project]);
+
+  // Entering Stage 4 loads the live plan; splice/manual-cut edits quietly refresh it.
+  const livePlanKey = project
+    ? [
+        project.splices.map((s) => `${s.anchor_key}:${s.left_out_frame}:${s.right_in_frame}`).join("|"),
+        (project.deleted_word_ids || []).join(","),
+        (project.deleted_silence_ids || []).join(","),
+        project.final_cut?.out_frame ?? "",
+      ].join("::")
+    : "";
+  useEffect(() => {
+    if (activeTab !== "transcript" || activeWorkflowStage !== 4 || !project || !livePlanKey) return;
+    handleLiveCutPreview({ quiet: Boolean(renderedCutPreview) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only replan when EDL fingerprint changes
+  }, [activeTab, activeWorkflowStage, livePlanKey]);
 
   const seekRenderedJoin = (splice: DynamicSplice, autoplay = true) => {
     const video = renderedCutVideoRef.current;
     const marker = renderedBoundaryByAnchor.get(splice.anchor_key);
+    const fps = Math.max(project?.project.fps ?? 30, 1);
     const mappedSegment = renderedCutPreview?.segments.find(
       (segment) => segment.source_start_frame <= splice.left_out_frame && splice.left_out_frame <= segment.source_end_frame,
     );
     const previewTime = marker?.preview_time_seconds ?? (mappedSegment
-      ? mappedSegment.preview_start_seconds + (splice.left_out_frame - mappedSegment.source_start_frame) / Math.max(project?.project.fps ?? 30, 1)
+      ? mappedSegment.preview_start_seconds + (splice.left_out_frame - mappedSegment.source_start_frame) / fps
       : null);
-    if (!video || previewTime === null) return;
-    video.currentTime = Math.max(0, previewTime - 2);
+    if (!video || previewTime === null || !renderedCutPreview) return;
+    const targetContinuous = Math.max(0, previewTime - 2);
+    if (renderedCutPreview.mode === "live" || renderedCutPreview.preview_id.startsWith("live-")) {
+      const segment = renderedCutPreview.segments.find(
+        (item, index) =>
+          targetContinuous >= item.preview_start_seconds
+          && (targetContinuous < item.preview_end_seconds
+            || (index === renderedCutPreview.segments.length - 1
+              && targetContinuous <= item.preview_end_seconds)),
+      );
+      if (!segment) return;
+      const sourceTime =
+        segment.source_start_frame / fps
+        + (targetContinuous - segment.preview_start_seconds);
+      video.currentTime = sourceTime;
+      if (autoplay) void video.play().catch((error) => setStatus(`Preview failed: ${error.message}`));
+      return;
+    }
+    video.currentTime = targetContinuous;
     if (autoplay) void video.play().catch((error) => setStatus(`Preview failed: ${error.message}`));
   };
 
@@ -994,6 +1114,7 @@ export default function Home() {
         <ExportProgressModal
           progress={exportProgress}
           onClose={() => setExportProgress(null)}
+          onCancel={handleCancelExport}
         />
       )}
       {previewRenderProgress && (
@@ -1177,13 +1298,13 @@ export default function Home() {
             </WorkflowStage>
             <WorkflowStage stage={4} activeStage={activeWorkflowStage} setActiveStage={setActiveWorkflowStage}>
               <span className="workflow-stage-label">Preview</span>
-              <button
-                className="workflow-action teal"
-                onClick={handleRenderCutPreview}
-                disabled={busy || !project}
-              >
-                <Play size={15} /> {renderedCutPreview ? "Rerender Preview" : "Render Cut Preview"}
-              </button>
+              <span className="workflow-status">
+                {renderedCutPreview
+                  ? "Live EDL · encode only on Export"
+                  : project
+                    ? "Building live plan…"
+                    : "Seek source cut · no bake"}
+              </span>
             </WorkflowStage>
             <WorkflowStage stage={5} activeStage={activeWorkflowStage} setActiveStage={setActiveWorkflowStage}>
               <span className="workflow-stage-label">Output</span>
@@ -1334,19 +1455,22 @@ export default function Home() {
       {activeTab === "transcript" && activeWorkflowStage === 4 && renderedCutPreview && project ? (
         <RenderedCutPreviewWorkspace
           busy={busy}
-          onRefresh={handleRenderCutPreview}
-          pendingFrames={pendingPreviewFrames}
+          pendingFrames={0}
           preview={renderedCutPreview}
           project={project}
-          reviewSpliceAndAdvance={reviewSpliceAndAdvance}
           seekRenderedJoin={seekRenderedJoin}
           selectSplice={(splice) => {
             setActiveSplice(splice.anchor_key);
-            seekRenderedJoin(splice);
+            seekRenderedJoin(splice, false);
           }}
           selectedSplice={selectedSplice}
           selectedSpliceIndex={selectedSpliceIndex}
-          stale={renderedPreviewStale}
+          stale={false}
+          sourceVideoSrc={
+            transcriptVideoKey
+              ? `${sourceVideoUrl()}?source=${encodeURIComponent(transcriptVideoKey)}`
+              : undefined
+          }
           updateSplice={updateSplice}
           videoRef={renderedCutVideoRef}
         />
@@ -2607,25 +2731,49 @@ function ProgressModal({ progress }: { progress: TranscriptionJobStatus }) {
 
 function ExportProgressModal({
   onClose,
+  onCancel,
   progress,
 }: {
   onClose: () => void;
+  onCancel?: () => void;
   progress: ExportProgressState;
 }) {
-  const running = progress.status === "running";
+  const running = progress.status === "running" || progress.status === "canceling";
   const failed = progress.status === "failed";
+  const canceled = progress.status === "canceled";
+  const value = Math.max(0, Math.min(100, Math.round(progress.value ?? 0)));
   return (
-    <div className="modal-backdrop" role="status" aria-live="polite">
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-live="polite">
       <div className={failed ? "progress-modal failed" : "progress-modal"}>
         <span className="eyebrow">Video Export</span>
-        <h2>{running ? "Exporting cut" : failed ? "Export failed" : "Export complete"}</h2>
+        <h2>
+          {progress.status === "canceling"
+            ? "Canceling export…"
+            : running
+              ? "Exporting cut"
+              : failed
+                ? "Export failed"
+                : canceled
+                  ? "Export canceled"
+                  : "Export complete"}
+        </h2>
         <p>{progress.message}</p>
         {progress.outputPath && <p className="modal-path">{progress.outputPath}</p>}
-        <div className={running ? "progress-track indeterminate" : "progress-track"}>
-          <div className="progress-bar" style={running ? undefined : { width: "100%" }} />
+        <div className={running && value < 2 ? "progress-track indeterminate" : "progress-track"}>
+          <div
+            className="progress-bar"
+            style={running && value < 2 ? undefined : { width: `${running ? value : failed || canceled ? value : 100}%` }}
+          />
         </div>
         {running ? (
-          <strong>Working...</strong>
+          <div className="placement-final-progress-actions">
+            <strong>{value > 0 ? `${value}%` : "Working…"}</strong>
+            {onCancel && progress.status === "running" ? (
+              <button type="button" className="modal-action" onClick={onCancel}>
+                Cancel
+              </button>
+            ) : null}
+          </div>
         ) : (
           <button className="modal-action" onClick={onClose}>
             OK
@@ -2898,36 +3046,36 @@ function WorkflowStage({
 
 function RenderedCutPreviewWorkspace({
   busy,
-  onRefresh,
   pendingFrames,
   preview,
   project,
-  reviewSpliceAndAdvance,
   seekRenderedJoin,
   selectSplice,
   selectedSplice,
   selectedSpliceIndex,
   stale,
+  sourceVideoSrc,
   updateSplice,
   videoRef,
 }: {
   busy: boolean;
-  onRefresh: () => void;
   pendingFrames: number;
   preview: RenderedCutPreviewResponse;
   project: EditorProjectResponse;
-  reviewSpliceAndAdvance: (splice: DynamicSplice) => void;
   seekRenderedJoin: (splice: DynamicSplice, autoplay?: boolean) => void;
   selectSplice: (splice: DynamicSplice) => void;
   selectedSplice: DynamicSplice | undefined;
   selectedSpliceIndex: number;
   stale: boolean;
+  sourceVideoSrc?: string;
   updateSplice: (
     operation: () => Promise<EditorProjectResponse>,
     afterApply?: (data: EditorProjectResponse) => void,
   ) => Promise<EditorProjectResponse | undefined>;
   videoRef: RefObject<HTMLVideoElement | null>;
 }) {
+  const isLive = preview.mode === "live" || preview.preview_id.startsWith("live-");
+  const fps = Math.max(project.project.fps, 1);
   const [manualOutTime, setManualOutTime] = useState("");
   const [manualInTime, setManualInTime] = useState("");
   const [manualCutError, setManualCutError] = useState("");
@@ -2935,41 +3083,243 @@ function RenderedCutPreviewWorkspace({
   const [renderedPlayheadSeconds, setRenderedPlayheadSeconds] = useState(0);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [timelineScrubbing, setTimelineScrubbing] = useState(false);
+  const [timelinePlaying, setTimelinePlaying] = useState(false);
   const [manualPreviewSeconds, setManualPreviewSeconds] = useState<2 | 4 | 6 | null>(null);
   const timelineViewportRef = useRef<HTMLDivElement | null>(null);
   const timelineContentRef = useRef<HTMLDivElement | null>(null);
   const timelinePlayheadRef = useRef<HTMLDivElement | null>(null);
+  const cutControlsRef = useRef<HTMLElement | null>(null);
+  const cutVideoPanelRef = useRef<HTMLElement | null>(null);
   const timelineScrubbingRef = useRef(false);
   const renderedPlayheadSecondsRef = useRef(0);
   const timelinePlaybackFrameRef = useRef<number | null>(null);
-  const manualPreviewRef = useRef<{ segments: [[number, number], [number, number]]; index: number } | null>(null);
+  const manualPreviewRef = useRef<{
+    segments: [[number, number], [number, number]];
+    index: number;
+    /** Base-timeline continuous times for playhead (pre-roll start, IN start). */
+    baseContinuous?: [number, number];
+  } | null>(null);
   const previewMarkerByAnchor = new Map(preview.splices.map((splice) => [splice.anchor_key, splice]));
-  const move = (direction: -1 | 1) => {
-    const next = project.splices[selectedSpliceIndex + direction];
-    if (next) selectSplice(next);
-  };
   const isFrontTrim = selectedSplice?.kind === "front_trim";
-  const sourceFrameAtPreviewTime = (currentTime: number) => {
-    const segment = preview.segments.find(
-      (item, index) => currentTime >= item.preview_start_seconds
-        && (currentTime < item.preview_end_seconds
-          || (index === preview.segments.length - 1 && currentTime <= item.preview_end_seconds)),
+  type CutSegment = RenderedCutPreviewResponse["segments"][number];
+
+  // Keep the left controls card the same height as the video card (video defines height).
+  useEffect(() => {
+    const controls = cutControlsRef.current;
+    const videoPanel = cutVideoPanelRef.current;
+    if (!controls || !videoPanel) return;
+    const syncHeight = () => {
+      const next = Math.round(videoPanel.getBoundingClientRect().height);
+      if (next > 0) controls.style.height = `${next}px`;
+    };
+    syncHeight();
+    const observer = new ResizeObserver(syncHeight);
+    observer.observe(videoPanel);
+    const video = videoRef.current;
+    video?.addEventListener("loadedmetadata", syncHeight);
+    return () => {
+      observer.disconnect();
+      video?.removeEventListener("loadedmetadata", syncHeight);
+    };
+  }, [preview.preview_id, videoRef]);
+
+  /** Split base keep-segments at a draft manual cut (same rules as server _apply_manual_cuts). */
+  const segmentsWithDraftCut = (
+    base: CutSegment[],
+    outFrame: number,
+    inFrame: number,
+  ): CutSegment[] => {
+    const next: Array<{ source_start_frame: number; source_end_frame: number }> = [];
+    for (const segment of base) {
+      if (segment.source_start_frame <= outFrame && inFrame <= segment.source_end_frame) {
+        if (outFrame >= segment.source_start_frame) {
+          next.push({
+            source_start_frame: segment.source_start_frame,
+            source_end_frame: outFrame,
+          });
+        }
+        if (inFrame <= segment.source_end_frame) {
+          next.push({
+            source_start_frame: inFrame,
+            source_end_frame: segment.source_end_frame,
+          });
+        }
+      } else {
+        next.push({
+          source_start_frame: segment.source_start_frame,
+          source_end_frame: segment.source_end_frame,
+        });
+      }
+    }
+    // Rebuild continuous preview times from source frame spans.
+    let elapsedFrames = 0;
+    return next
+      .filter((item) => item.source_end_frame >= item.source_start_frame)
+      .map((item) => {
+        const frameCount = item.source_end_frame - item.source_start_frame + 1;
+        const built = {
+          source_start_frame: item.source_start_frame,
+          source_end_frame: item.source_end_frame,
+          preview_start_seconds: elapsedFrames / fps,
+          preview_end_seconds: (elapsedFrames + frameCount) / fps,
+        };
+        elapsedFrames += frameCount;
+        return built;
+      });
+  };
+
+  // Draft OUT/IN (valid, not yet accepted) are applied to playback immediately so
+  // fine-tune can hear/see the join before Accept commits the cut to the project.
+  const draftCutForPlayback = (() => {
+    if (!isLive) return null;
+    // Prefer nudged frames when present (set after Set IN / frame cards).
+    if (manualDraftBaseFrames) {
+      const { outFrame, inFrame } = manualDraftBaseFrames;
+      if (
+        inFrame >= outFrame + 2
+        && preview.segments.some(
+          (item) => item.source_start_frame <= outFrame && inFrame <= item.source_end_frame,
+        )
+      ) {
+        return { outFrame, inFrame };
+      }
+    }
+    if (!manualOutTime.trim() || !manualInTime.trim()) return null;
+    const outSeconds = parsePreviewTimecode(manualOutTime, fps);
+    const inSeconds = parsePreviewTimecode(manualInTime, fps);
+    if (outSeconds === null || inSeconds === null) return null;
+    // Live: times are source clock. Baked: continuous compressed plan times.
+    const mapFrame = (seconds: number) => {
+      if (isLive) {
+        const frame = Math.round(seconds * fps);
+        const segment = preview.segments.find(
+          (item) => item.source_start_frame <= frame && frame <= item.source_end_frame,
+        );
+        if (!segment) return null;
+        return Math.min(segment.source_end_frame, Math.max(segment.source_start_frame, frame));
+      }
+      const segment = preview.segments.find(
+        (item, index) =>
+          seconds >= item.preview_start_seconds
+          && (seconds < item.preview_end_seconds
+            || (index === preview.segments.length - 1 && seconds <= item.preview_end_seconds)),
+      );
+      if (!segment) return null;
+      const offset = Math.floor((seconds - segment.preview_start_seconds) * fps);
+      return Math.min(
+        segment.source_end_frame,
+        Math.max(segment.source_start_frame, segment.source_start_frame + offset),
+      );
+    };
+    const outFrame = mapFrame(outSeconds);
+    const inFrame = mapFrame(inSeconds);
+    if (outFrame === null || inFrame === null || inFrame < outFrame + 2) return null;
+    const sameSection = preview.segments.some(
+      (item) => item.source_start_frame <= outFrame && inFrame <= item.source_end_frame,
     );
+    if (!sameSection) return null;
+    return { outFrame, inFrame };
+  })();
+
+  const playSegments: CutSegment[] = draftCutForPlayback
+    ? segmentsWithDraftCut(
+        preview.segments,
+        draftCutForPlayback.outFrame,
+        draftCutForPlayback.inFrame,
+      )
+    : preview.segments;
+
+  const segmentAtContinuous = (currentTime: number, segments: CutSegment[] = playSegments) =>
+    segments.find(
+      (item, index) =>
+        currentTime >= item.preview_start_seconds
+        && (currentTime < item.preview_end_seconds
+          || (index === segments.length - 1 && currentTime <= item.preview_end_seconds)),
+    );
+  /** Map continuous draft-entry times (base plan) for OUT/IN capture — always base segments. */
+  const sourceFrameAtPreviewTime = (currentTime: number) => {
+    const segment = segmentAtContinuous(currentTime, preview.segments);
     if (!segment) return null;
-    const offset = Math.floor((currentTime - segment.preview_start_seconds) * project.project.fps);
+    const offset = Math.floor((currentTime - segment.preview_start_seconds) * fps);
     return Math.min(segment.source_end_frame, Math.max(segment.source_start_frame, segment.source_start_frame + offset));
   };
-  const previewTimeAtSourceFrame = (frame: number) => {
-    const segment = preview.segments.find(
+  const previewTimeAtSourceFrame = (frame: number, segments: CutSegment[] = playSegments) => {
+    const segment = segments.find(
       (item) => item.source_start_frame <= frame && frame <= item.source_end_frame,
     );
     return segment
-      ? segment.preview_start_seconds + (frame - segment.source_start_frame) / project.project.fps
+      ? segment.preview_start_seconds + (frame - segment.source_start_frame) / fps
       : null;
   };
+  const sourceSecondsFromContinuous = (currentTime: number, segments: CutSegment[] = playSegments) => {
+    const segment = segmentAtContinuous(currentTime, segments);
+    if (!segment) return null;
+    return segment.source_start_frame / fps + (currentTime - segment.preview_start_seconds);
+  };
+  const continuousFromSourceSeconds = (sourceTime: number, segments: CutSegment[] = playSegments) => {
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      const start = segment.source_start_frame / fps;
+      const end = (segment.source_end_frame + 1) / fps;
+      if (sourceTime + 1e-4 >= start && (sourceTime < end - 1e-4 || index === segments.length - 1)) {
+        return segment.preview_start_seconds + Math.max(0, sourceTime - start);
+      }
+    }
+    return null;
+  };
+  /** Source-timeline duration so cut gaps render with real removed length. */
+  const sourceTimelineSeconds = (() => {
+    let maxFrame = 0;
+    for (const segment of preview.segments) {
+      maxFrame = Math.max(maxFrame, segment.source_end_frame + 1);
+    }
+    for (const splice of project.splices) {
+      maxFrame = Math.max(maxFrame, splice.left_out_frame + 1, splice.right_in_frame + 1);
+    }
+    for (const word of project.project.words) {
+      maxFrame = Math.max(maxFrame, word.end_frame ?? 0);
+    }
+    if (project.final_cut?.out_frame != null) {
+      maxFrame = Math.max(maxFrame, project.final_cut.out_frame + 1);
+    }
+    if (draftCutForPlayback) {
+      maxFrame = Math.max(maxFrame, draftCutForPlayback.inFrame + 1, draftCutForPlayback.outFrame + 1);
+    }
+    const mediaFrames = Number.isFinite(videoRef.current?.duration)
+      ? Math.ceil((videoRef.current?.duration ?? 0) * fps)
+      : 0;
+    maxFrame = Math.max(maxFrame, mediaFrames);
+    return Math.max(preview.duration_seconds, maxFrame / fps);
+  })();
+  /** Live uses full source clock (gaps = chopped sections). Baked stays compressed. */
+  const timelineDurationSeconds = isLive ? sourceTimelineSeconds : preview.duration_seconds;
+  const timelinePct = (seconds: number) =>
+    `${Math.min(100, Math.max(0, seconds / Math.max(timelineDurationSeconds, 0.001) * 100))}%`;
+  const sourceTimeForFrame = (frame: number) => frame / fps;
+  /** Keep bands drawn on the source timeline (accepted plan + draft skip). */
+  const timelineKeepRanges = playSegments.map((segment) => ({
+    start: sourceTimeForFrame(segment.source_start_frame),
+    end: sourceTimeForFrame(segment.source_end_frame + 1),
+  }));
+  /**
+   * Cut-output duration (kept length after accepted cuts + draft skip when active).
+   * Not source/unedited length — that is timelineDurationSeconds in live mode.
+   */
+  const cutDurationSeconds =
+    playSegments.length > 0
+      ? playSegments[playSegments.length - 1].preview_end_seconds
+      : preview.duration_seconds;
+  /** Live playlist: source ranges that implement continuous cut playback. */
+  const livePlaylistRef = useRef<
+    | {
+        ranges: Array<{ sourceStart: number; sourceEnd: number; continuousStart: number }>;
+        index: number;
+      }
+    | null
+  >(null);
   const maximumTimelineZoom = () => {
     const viewportWidth = Math.max(1, timelineViewportRef.current?.clientWidth ?? 1);
-    const frameCount = Math.max(1, Math.ceil(preview.duration_seconds * project.project.fps));
+    const frameCount = Math.max(1, Math.ceil(timelineDurationSeconds * fps));
     return Math.max(1, Math.min(500, frameCount * 10 / viewportWidth));
   };
   const changeTimelineZoom = (requestedZoom: number, anchorX?: number) => {
@@ -2995,15 +3345,63 @@ function RenderedCutPreviewWorkspace({
     };
     viewport.addEventListener("wheel", zoomWithWheel, { passive: false });
     return () => viewport.removeEventListener("wheel", zoomWithWheel);
-  }, [timelineZoom, preview.duration_seconds, project.project.fps]);
+  }, [timelineZoom, timelineDurationSeconds, fps]);
   const positionTimelinePlayhead = useCallback((seconds: number) => {
-    const clamped = Math.min(preview.duration_seconds, Math.max(0, seconds));
+    const clamped = Math.min(timelineDurationSeconds, Math.max(0, seconds));
     renderedPlayheadSecondsRef.current = clamped;
     if (timelinePlayheadRef.current) {
-      timelinePlayheadRef.current.style.left = `${clamped / Math.max(preview.duration_seconds, 0.001) * 100}%`;
+      timelinePlayheadRef.current.style.left = `${clamped / Math.max(timelineDurationSeconds, 0.001) * 100}%`;
     }
     return clamped;
-  }, [preview.duration_seconds]);
+  }, [timelineDurationSeconds]);
+
+  const commitPlayhead = useCallback(
+    (seconds: number) => {
+      const clamped = positionTimelinePlayhead(seconds);
+      setRenderedPlayheadSeconds(clamped);
+      return clamped;
+    },
+    [positionTimelinePlayhead],
+  );
+
+  /** Nearest keep-edge source time for a scrub inside a removed gap. */
+  const snapSourcePlaybackTime = (sourceTime: number) => {
+    const frame = Math.round(sourceTime * fps);
+    if (draftCutForPlayback && frame > draftCutForPlayback.outFrame && frame < draftCutForPlayback.inFrame) {
+      return draftCutForPlayback.inFrame / fps;
+    }
+    for (const segment of playSegments) {
+      if (frame >= segment.source_start_frame && frame <= segment.source_end_frame) {
+        return sourceTime;
+      }
+    }
+    // In a chopped gap: park the video on the following IN (or previous OUT).
+    let nextIn: number | null = null;
+    let prevOut: number | null = null;
+    for (const segment of playSegments) {
+      const start = segment.source_start_frame / fps;
+      const end = (segment.source_end_frame + 1) / fps;
+      if (end <= sourceTime) prevOut = end;
+      if (start >= sourceTime && nextIn == null) nextIn = start;
+    }
+    if (nextIn != null) return nextIn;
+    if (prevOut != null) return Math.max(0, prevOut - 1 / fps);
+    return sourceTime;
+  };
+
+  /**
+   * Play position in the *cut* timeline (after removals), not source footage time.
+   * Live UI playhead is source-based; map through playSegments for the output clock.
+   */
+  const cutPlayheadSeconds = (() => {
+    if (!isLive) {
+      return Math.min(cutDurationSeconds, Math.max(0, renderedPlayheadSeconds));
+    }
+    const sourceTime = snapSourcePlaybackTime(renderedPlayheadSeconds);
+    const continuous = continuousFromSourceSeconds(sourceTime, playSegments);
+    return Math.min(cutDurationSeconds, Math.max(0, continuous ?? 0));
+  })();
+
   const stopTimelinePlaybackMonitor = useCallback(() => {
     if (timelinePlaybackFrameRef.current !== null) {
       cancelAnimationFrame(timelinePlaybackFrameRef.current);
@@ -3018,47 +3416,122 @@ function RenderedCutPreviewWorkspace({
         timelinePlaybackFrameRef.current = null;
         return;
       }
+      const frameGuard = 1 / fps;
       const manualPreview = manualPreviewRef.current;
-      const segment = manualPreview?.segments[manualPreview.index];
-      const frameGuard = 1 / Math.max(project.project.fps, 1);
-      if (manualPreview && segment && video.currentTime >= segment[1] - frameGuard / 2) {
-        if (manualPreview.index === 0) {
-          manualPreview.index = 1;
-          video.currentTime = manualPreview.segments[1][0];
-          positionTimelinePlayhead(manualPreview.segments[1][0]);
+      if (manualPreview) {
+        const segment = manualPreview.segments[manualPreview.index];
+        if (segment && video.currentTime >= segment[1] - frameGuard / 2) {
+          if (manualPreview.index === 0) {
+            manualPreview.index = 1;
+            video.currentTime = manualPreview.segments[1][0];
+            commitPlayhead(manualPreview.segments[1][0]);
+          } else {
+            commitPlayhead(Math.min(timelineDurationSeconds, segment[1]));
+            manualPreviewRef.current = null;
+            setManualPreviewSeconds(null);
+            video.pause();
+            timelinePlaybackFrameRef.current = null;
+            return;
+          }
         } else {
-          const heldTime = positionTimelinePlayhead(segment[1]);
-          manualPreviewRef.current = null;
-          setManualPreviewSeconds(null);
-          setRenderedPlayheadSeconds(heldTime);
+          // Live join preview: playhead follows source clock (jumps OUT→IN with the seek).
+          commitPlayhead(Math.min(timelineDurationSeconds, Math.max(0, video.currentTime)));
+        }
+      } else if (isLive && livePlaylistRef.current) {
+        const playlist = livePlaylistRef.current;
+        const range = playlist.ranges[playlist.index];
+        if (!range) {
           video.pause();
           timelinePlaybackFrameRef.current = null;
           return;
         }
+        // Source-timeline playhead: jumps across cut gaps when the playlist seeks.
+        commitPlayhead(Math.min(timelineDurationSeconds, Math.max(0, video.currentTime)));
+        if (video.currentTime >= range.sourceEnd - frameGuard / 2) {
+          if (playlist.index + 1 < playlist.ranges.length) {
+            playlist.index += 1;
+            const next = playlist.ranges[playlist.index];
+            video.currentTime = next.sourceStart;
+            commitPlayhead(next.sourceStart);
+          } else {
+            commitPlayhead(Math.min(timelineDurationSeconds, range.sourceEnd));
+            livePlaylistRef.current = null;
+            video.pause();
+            timelinePlaybackFrameRef.current = null;
+            return;
+          }
+        }
+      } else if (isLive) {
+        commitPlayhead(Math.min(timelineDurationSeconds, Math.max(0, video.currentTime)));
       } else {
-        positionTimelinePlayhead(video.currentTime);
+        commitPlayhead(video.currentTime);
       }
       timelinePlaybackFrameRef.current = requestAnimationFrame(tick);
     };
     timelinePlaybackFrameRef.current = requestAnimationFrame(tick);
-  }, [positionTimelinePlayhead, project.project.fps, stopTimelinePlaybackMonitor, videoRef]);
+  }, [
+    commitPlayhead,
+    fps,
+    isLive,
+    stopTimelinePlaybackMonitor,
+    timelineDurationSeconds,
+    videoRef,
+  ]);
   useEffect(() => stopTimelinePlaybackMonitor, [stopTimelinePlaybackMonitor]);
   const timelineTimeAtPointer = (clientX: number) => {
     const timeline = timelineContentRef.current;
     if (!timeline) return null;
     const bounds = timeline.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (clientX - bounds.left) / Math.max(1, bounds.width)));
-    const totalFrames = Math.max(1, Math.round(preview.duration_seconds * project.project.fps));
-    return Math.min(preview.duration_seconds, Math.round(ratio * totalFrames) / project.project.fps);
+    const totalFrames = Math.max(1, Math.round(timelineDurationSeconds * fps));
+    return Math.min(timelineDurationSeconds, Math.round(ratio * totalFrames) / fps);
   };
   const scrubTimelineToPointer = (clientX: number, commitState = false) => {
     const time = timelineTimeAtPointer(clientX);
     const video = videoRef.current;
     if (time === null || !video) return null;
+    livePlaylistRef.current = null;
+    if (isLive) {
+      // Playhead can sit inside a chopped gap; video parks on the nearest keep edge.
+      const playbackTime = snapSourcePlaybackTime(time);
+      video.currentTime = playbackTime;
+      positionTimelinePlayhead(time);
+      if (commitState) setRenderedPlayheadSeconds(time);
+      return time;
+    }
     video.currentTime = time;
     positionTimelinePlayhead(time);
     if (commitState) setRenderedPlayheadSeconds(time);
     return time;
+  };
+
+  const playLiveFromContinuous = (fromTimelineSeconds: number) => {
+    const video = videoRef.current;
+    if (!video || !isLive) return;
+    // Timeline is source clock in live mode.
+    let startSource = fromTimelineSeconds;
+    startSource = snapSourcePlaybackTime(startSource);
+    // Source playlist from playSegments (accepted cuts + draft skip).
+    const ranges: Array<{ sourceStart: number; sourceEnd: number; continuousStart: number }> = [];
+    for (const segment of playSegments) {
+      const segStart = segment.source_start_frame / fps;
+      const segEnd = (segment.source_end_frame + 1) / fps;
+      if (segEnd <= startSource + 1e-6) continue;
+      const sourceStart = Math.max(startSource, segStart);
+      ranges.push({
+        sourceStart,
+        sourceEnd: segEnd,
+        continuousStart: 0,
+      });
+    }
+    if (!ranges.length) return;
+    livePlaylistRef.current = { ranges, index: 0 };
+    manualPreviewRef.current = null;
+    setManualPreviewSeconds(null);
+    video.currentTime = ranges[0].sourceStart;
+    commitPlayhead(ranges[0].sourceStart);
+    void video.play().catch(() => undefined);
+    startTimelinePlaybackMonitor();
   };
   const cancelManualDraftPreview = () => {
     manualPreviewRef.current = null;
@@ -3073,6 +3546,12 @@ function RenderedCutPreviewWorkspace({
     setTimelineScrubbing(true);
     event.currentTarget.setPointerCapture(event.pointerId);
     scrubTimelineToPointer(event.clientX);
+  };
+  /** Click / drag anywhere on the timeline body (not cut buttons) to move the playhead. */
+  const beginTimelineAreaSeek = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest(".rendered-timeline-playhead, .timeline-cut-markers, button")) return;
+    beginTimelineScrub(event);
   };
   const moveTimelineScrub = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!timelineScrubbingRef.current) return;
@@ -3099,15 +3578,31 @@ function RenderedCutPreviewWorkspace({
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault();
       cancelManualDraftPreview();
+      livePlaylistRef.current = null;
       videoRef.current?.pause();
       const direction = event.key === "ArrowLeft" ? -1 : 1;
-      const next = positionTimelinePlayhead(renderedPlayheadSecondsRef.current + direction / project.project.fps);
-      if (videoRef.current) videoRef.current.currentTime = next;
+      const next = positionTimelinePlayhead(renderedPlayheadSecondsRef.current + direction / fps);
+      if (videoRef.current) {
+        if (isLive) {
+          videoRef.current.currentTime = snapSourcePlaybackTime(next);
+        } else {
+          videoRef.current.currentTime = next;
+        }
+      }
       setRenderedPlayheadSeconds(next);
     } else if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      void videoRef.current?.play().catch(() => undefined);
+      if (isLive) playLiveFromContinuous(renderedPlayheadSecondsRef.current);
+      else void videoRef.current?.play().catch(() => undefined);
     }
+  };
+  const sourceFrameAtSourceTime = (sourceSeconds: number) => {
+    const frame = Math.round(sourceSeconds * fps);
+    const segment = preview.segments.find(
+      (item) => item.source_start_frame <= frame && frame <= item.source_end_frame,
+    );
+    if (!segment) return null;
+    return Math.min(segment.source_end_frame, Math.max(segment.source_start_frame, frame));
   };
   const resolveManualCutDraft = (outValue: string, inValue: string): {
     cut: { outSeconds: number; inSeconds: number; outFrame: number; inFrame: number } | null;
@@ -3118,11 +3613,13 @@ function RenderedCutPreviewWorkspace({
     if (outSeconds === null || inSeconds === null) {
       return { cut: null, error: "Enter times as SS, MM:SS, HH:MM:SS, or HH:MM:SS:FF." };
     }
-    if (outSeconds < 0 || inSeconds < 0 || outSeconds > preview.duration_seconds || inSeconds > preview.duration_seconds) {
-      return { cut: null, error: `Times must stay within this ${formatTime(preview.duration_seconds)} preview.` };
+    const maxTime = isLive ? timelineDurationSeconds : preview.duration_seconds;
+    if (outSeconds < 0 || inSeconds < 0 || outSeconds > maxTime || inSeconds > maxTime) {
+      return { cut: null, error: `Times must stay within this ${formatTime(maxTime)} timeline.` };
     }
-    const outFrame = sourceFrameAtPreviewTime(outSeconds);
-    const inFrame = sourceFrameAtPreviewTime(inSeconds);
+    // Live timeline is source clock; baked preview stays continuous compressed time.
+    const outFrame = isLive ? sourceFrameAtSourceTime(outSeconds) : sourceFrameAtPreviewTime(outSeconds);
+    const inFrame = isLive ? sourceFrameAtSourceTime(inSeconds) : sourceFrameAtPreviewTime(inSeconds);
     if (outFrame === null || inFrame === null) {
       return { cut: null, error: "One of those times does not map to a kept section of this preview." };
     }
@@ -3139,8 +3636,10 @@ function RenderedCutPreviewWorkspace({
   const parsedManualOutSeconds = parsePreviewTimecode(manualOutTime, project.project.fps);
   const manualOutReady = parsedManualOutSeconds !== null
     && parsedManualOutSeconds >= 0
-    && parsedManualOutSeconds <= preview.duration_seconds
-    && sourceFrameAtPreviewTime(parsedManualOutSeconds) !== null;
+    && parsedManualOutSeconds <= (isLive ? timelineDurationSeconds : preview.duration_seconds)
+    && (isLive
+      ? sourceFrameAtSourceTime(parsedManualOutSeconds) !== null
+      : sourceFrameAtPreviewTime(parsedManualOutSeconds) !== null);
   const resolvedManualDraft = manualInTime.trim()
     ? resolveManualCutDraft(manualOutTime, manualInTime).cut
     : null;
@@ -3154,17 +3653,23 @@ function RenderedCutPreviewWorkspace({
     )
     : null;
   const manualDraftTimeText = (frame: number) => {
-    const seconds = previewTimeAtSourceFrame(frame);
+    // Live: source clock. Baked: continuous base plan.
+    const seconds = isLive
+      ? sourceTimeForFrame(frame)
+      : previewTimeAtSourceFrame(frame, preview.segments);
     if (seconds === null) return null;
-    const timecode = formatPreviewTimecode(seconds, project.project.fps);
-    const parsed = parsePreviewTimecode(timecode, project.project.fps);
+    const timecode = formatPreviewTimecode(seconds, fps);
+    if (isLive) return timecode;
+    const parsed = parsePreviewTimecode(timecode, fps);
     if (parsed !== null && sourceFrameAtPreviewTime(parsed) === frame) return timecode;
-    return (seconds + 0.25 / project.project.fps).toFixed(6);
+    return (seconds + 0.25 / fps).toFixed(6);
   };
   const nudgeManualDraft = (outDelta: number, inDelta: number) => {
     if (!resolvedManualDraft || !manualDraftSegment) return;
-    const nextOutFrame = resolvedManualDraft.outFrame + outDelta;
-    const nextInFrame = resolvedManualDraft.inFrame + inDelta;
+    const baseOut = manualDraftBaseFrames?.outFrame ?? resolvedManualDraft.outFrame;
+    const baseIn = manualDraftBaseFrames?.inFrame ?? resolvedManualDraft.inFrame;
+    const nextOutFrame = baseOut + outDelta;
+    const nextInFrame = baseIn + inDelta;
     if (
       nextOutFrame < manualDraftSegment.source_start_frame
       || nextInFrame > manualDraftSegment.source_end_frame
@@ -3177,15 +3682,27 @@ function RenderedCutPreviewWorkspace({
       return;
     }
     cancelManualDraftPreview();
+    livePlaylistRef.current = null;
     videoRef.current?.pause();
     setManualOutTime(nextOutTime);
     setManualInTime(nextInTime);
+    setManualDraftBaseFrames({ outFrame: nextOutFrame, inFrame: nextInFrame });
     setManualCutError("");
+  };
+  /** Timeline clock under the playhead for OUT/IN entry (source in live mode). */
+  const timelineTimeFromPlayhead = () => {
+    if (isLive) {
+      // Prefer the white playhead so scrubbing a gap still sets OUT/IN to that source time
+      // when the pointer is on a keep; otherwise use the parked video clock.
+      return renderedPlayheadSecondsRef.current;
+    }
+    return renderedPlayheadSecondsRef.current;
   };
   const setManualOutFromPlayhead = () => {
     cancelManualDraftPreview();
+    livePlaylistRef.current = null;
     videoRef.current?.pause();
-    setManualOutTime(formatPreviewTimecode(renderedPlayheadSecondsRef.current, project.project.fps));
+    setManualOutTime(formatPreviewTimecode(timelineTimeFromPlayhead(), fps));
     setManualInTime("");
     setManualDraftBaseFrames(null);
     setManualCutError("");
@@ -3195,38 +3712,95 @@ function RenderedCutPreviewWorkspace({
       setManualCutError("Set a valid OUT point before setting IN.");
       return;
     }
-    const candidate = formatPreviewTimecode(renderedPlayheadSecondsRef.current, project.project.fps);
+    const candidate = formatPreviewTimecode(timelineTimeFromPlayhead(), fps);
     const resolved = resolveManualCutDraft(manualOutTime, candidate);
     if (!resolved.cut) {
       setManualCutError(resolved.error);
       return;
     }
     cancelManualDraftPreview();
+    livePlaylistRef.current = null;
     videoRef.current?.pause();
     setManualInTime(candidate);
     setManualDraftBaseFrames({ outFrame: resolved.cut.outFrame, inFrame: resolved.cut.inFrame });
     setManualCutError("");
   };
-  const playManualCutDraft = (seconds: 2 | 4 | 6) => {
-    const resolved = resolveManualCutDraft(manualOutTime, manualInTime);
+  /** Half-math join preview: N/2 before OUT, N/2 after IN (draft manual cut or selected splice). */
+  const playJoinPreview = (seconds: 2 | 4 | 6) => {
     const video = videoRef.current;
-    if (!resolved.cut || !video) {
-      setManualCutError(resolved.error || "The rendered preview is not ready.");
+    if (!video) {
+      setManualCutError("The cut preview is not ready.");
       return;
     }
-    const halfSeconds = seconds / 2;
-    const outEnd = Math.min(preview.duration_seconds, resolved.cut.outSeconds + 1 / project.project.fps);
-    const segments: [[number, number], [number, number]] = [
-      [Math.max(0, outEnd - halfSeconds), outEnd],
-      [resolved.cut.inSeconds, Math.min(preview.duration_seconds, resolved.cut.inSeconds + halfSeconds)],
-    ];
+
+    let segments: [[number, number], [number, number]] | null = null;
+
+    // Prefer an in-progress draft OUT/IN when both sides are set.
+    const draftResolved = manualOutTime.trim() && manualInTime.trim()
+      ? resolveManualCutDraft(manualOutTime, manualInTime)
+      : null;
+    if (draftResolved?.cut) {
+      const outFrame = manualDraftBaseFrames?.outFrame ?? draftResolved.cut.outFrame;
+      const inFrame = manualDraftBaseFrames?.inFrame ?? draftResolved.cut.inFrame;
+      const section = preview.segments.find(
+        (item) => item.source_start_frame <= outFrame && inFrame <= item.source_end_frame,
+      );
+      if (!section) {
+        setManualCutError("That manual cut no longer sits inside one kept section.");
+        return;
+      }
+      const halfSeconds = seconds / 2;
+      const sectionSourceStart = section.source_start_frame / fps;
+      const sectionSourceEnd = (section.source_end_frame + 1) / fps;
+      const outEndSource = (outFrame + 1) / fps;
+      const inStartSource = inFrame / fps;
+      const preRollStart = Math.max(sectionSourceStart, outEndSource - halfSeconds);
+      const postRollEnd = Math.min(sectionSourceEnd, inStartSource + halfSeconds);
+      if (outEndSource - preRollStart < 1 / fps || postRollEnd - inStartSource < 1 / fps) {
+        setManualCutError("Not enough room around OUT/IN for that join preview length.");
+        return;
+      }
+      segments = [
+        [preRollStart, outEndSource],
+        [inStartSource, postRollEnd],
+      ];
+    } else if (selectedSplice) {
+      // Accepted splices: use server-built source pre/post rolls (same half-math).
+      const key = `preview_segments_${seconds}s` as const;
+      const prepared = selectedSplice[key];
+      if (prepared?.length >= 2) {
+        segments = [
+          [prepared[0][0], prepared[0][1]],
+          [prepared[1][0], prepared[1][1]],
+        ];
+      } else {
+        // Fallback if preview segments are missing from the project payload.
+        const halfSeconds = seconds / 2;
+        const outEndSource = (selectedSplice.left_out_frame + 1) / fps;
+        const inStartSource = selectedSplice.right_in_frame / fps;
+        segments = [
+          [Math.max(0, outEndSource - halfSeconds), outEndSource],
+          [inStartSource, inStartSource + halfSeconds],
+        ];
+      }
+      setManualCutError("");
+    } else {
+      setManualCutError(draftResolved?.error || "Select a splice or set draft OUT/IN to preview a join.");
+      return;
+    }
+
     video.pause();
-    manualPreviewRef.current = { segments, index: 0 };
+    livePlaylistRef.current = null;
+    manualPreviewRef.current = {
+      segments,
+      index: 0,
+    };
     setManualPreviewSeconds(seconds);
     setManualCutError("");
-    const heldTime = positionTimelinePlayhead(segments[0][0]);
-    setRenderedPlayheadSeconds(heldTime);
+    // Source-timeline playhead follows the media clock across the OUT→IN jump.
+    commitPlayhead(segments[0][0]);
     void playMediaAt(video, segments[0][0])
+      .then(() => startTimelinePlaybackMonitor())
       .catch((error) => {
         manualPreviewRef.current = null;
         setManualPreviewSeconds(null);
@@ -3261,287 +3835,121 @@ function RenderedCutPreviewWorkspace({
       setManualCutError("");
     }
   };
+  const clearManualDraft = () => {
+    cancelManualDraftPreview();
+    livePlaylistRef.current = null;
+    videoRef.current?.pause();
+    setManualOutTime("");
+    setManualInTime("");
+    setManualDraftBaseFrames(null);
+    setManualCutError("");
+    setManualPreviewSeconds(null);
+  };
+  /** Clear draft OUT/IN, or remove the selected accepted splice (manual or transcript). */
+  const clearOrRemoveCut = async () => {
+    const hasDraft = Boolean(manualOutTime.trim() || manualInTime.trim() || manualDraftBaseFrames);
+    if (hasDraft) {
+      clearManualDraft();
+      return;
+    }
+    if (!selectedSplice) {
+      setManualCutError("Select a splice to remove, or set a draft OUT/IN to clear.");
+      return;
+    }
+    cancelManualDraftPreview();
+    videoRef.current?.pause();
+    const removedKey = selectedSplice.anchor_key;
+    const nextKey =
+      project.splices[selectedSpliceIndex + 1]?.anchor_key
+      ?? project.splices[selectedSpliceIndex - 1]?.anchor_key
+      ?? null;
+    const result = await updateSplice(
+      () => removeSplice(selectedSplice.anchor_key),
+      (data) => {
+        const stillThere = data.splices.some((splice) => splice.anchor_key === removedKey);
+        if (stillThere) return;
+        const preferred = nextKey && data.splices.some((splice) => splice.anchor_key === nextKey)
+          ? nextKey
+          : data.splices[0]?.anchor_key ?? null;
+        if (preferred) {
+          const next = data.splices.find((splice) => splice.anchor_key === preferred);
+          if (next) selectSplice(next);
+        }
+      },
+    );
+    if (result) setManualCutError("");
+  };
+  const canClearOrRemove = Boolean(
+    manualOutTime.trim()
+    || manualInTime.trim()
+    || manualDraftBaseFrames
+    || selectedSplice,
+  );
   return (
     <section className="rendered-cut-workspace">
-      <aside className="rendered-cut-sidebar">
-        <div className="rendered-sidebar-heading">
-          <div>
-            <span className="eyebrow">Final Review</span>
-            <h2>Splices</h2>
-          </div>
-          <strong>{project.splices.length}</strong>
-        </div>
-        <div className="rendered-splice-list">
-          {project.splices.map((splice, index) => {
-            const marker = previewMarkerByAnchor.get(splice.anchor_key);
-            return (
-              <button
-                key={splice.anchor_key}
-                className={["rendered-splice-entry", selectedSplice?.anchor_key === splice.anchor_key ? "active" : "", splice.reviewed ? "reviewed" : ""].join(" ")}
-                onClick={() => selectSplice(splice)}
-              >
-                <span>{index + 1}</span>
-                <div>
-                  <strong>{splice.kind === "manual"
-                    ? `Manual cut · ${formatTime(marker?.preview_time_seconds ?? previewTimeAtSourceFrame(splice.left_out_frame) ?? 0)}`
-                    : formatTime(marker?.preview_time_seconds ?? 0)}</strong>
-                  <p><small>Before</small>{marker?.left_section || splice.left_context || "Start of source"}</p>
-                  <p><small>After</small>{marker?.right_section || splice.right_context}</p>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-        <div className="rendered-sidebar-footer">
-          <span>{project.splices.filter((splice) => splice.reviewed).length} reviewed</span>
-          <span>{formatTime(preview.duration_seconds)}</span>
-        </div>
-      </aside>
+      {/* Former left splice transcript list (Before/After) — restore if needed.
+      <aside className="rendered-cut-sidebar">…</aside>
+      */}
 
-      <section className="rendered-cut-main">
-        <div className="rendered-cut-heading">
-          <div>
-            <span className="eyebrow">Stage 4</span>
-            <h2>Rendered Cut Preview</h2>
-          </div>
-          {stale ? (
+      {/* Left: all Stage 4 controls (transport, manual cut, timeline, nudges). */}
+      <section className="rendered-cut-controls" ref={cutControlsRef}>
+        {!isLive && stale ? (
+          <div className="rendered-cut-heading">
             <span className="preview-stale"><Gauge size={15} /> Working preview · {pendingFrames} pending change{pendingFrames === 1 ? "" : "s"}</span>
-          ) : (
-            <span className="preview-current"><Check size={15} /> Preview current</span>
-          )}
-        </div>
-        <div className="rendered-cut-video">
-          <video
-            key={preview.preview_id}
-            ref={videoRef}
-            controls
-            preload="metadata"
-            src={renderedCutPreviewUrl(preview.preview_id)}
-            onLoadedMetadata={() => {
-              if (selectedSplice) seekRenderedJoin(selectedSplice, false);
-              const currentTime = positionTimelinePlayhead(videoRef.current?.currentTime ?? 0);
-              setRenderedPlayheadSeconds(currentTime);
-            }}
-            onTimeUpdate={(event) => {
-              const currentTime = positionTimelinePlayhead(event.currentTarget.currentTime);
-              setRenderedPlayheadSeconds(currentTime);
-            }}
-            onPlay={startTimelinePlaybackMonitor}
-            onPause={stopTimelinePlaybackMonitor}
-            onEnded={stopTimelinePlaybackMonitor}
-          />
-        </div>
-        <div className="manual-cut-toolbar">
-          <div className="manual-cut-copy">
-            <strong><Scissors size={15} /> Manual cut</strong>
-            <span>
-              {stale
-                ? "Accepted changes are pending. Keep editing here or rerender the entire preview when useful."
-                : "Type preview times or drag the playhead, then set each boundary."}
-            </span>
           </div>
-          <div className="manual-cut-time-fields">
-            <label>
-              <span>OUT</span>
-              <input
-                aria-label="Manual cut OUT preview time"
-                value={manualOutTime}
-                placeholder="00:00:00:00"
-                onChange={(event) => {
-                  cancelManualDraftPreview();
-                  setManualOutTime(event.target.value);
-                  setManualInTime("");
-                  setManualDraftBaseFrames(null);
-                  setManualCutError("");
-                }}
-                disabled={busy}
-              />
-              <button onClick={setManualOutFromPlayhead} disabled={busy}>Set OUT</button>
-            </label>
-            <label>
-              <span>IN</span>
-              <input
-                aria-label="Manual cut IN preview time"
-                value={manualInTime}
-                placeholder={manualOutReady ? "00:00:00:00" : "Set OUT first"}
-                onChange={(event) => {
-                  cancelManualDraftPreview();
-                  const candidate = event.target.value;
-                  const resolved = resolveManualCutDraft(manualOutTime, candidate);
-                  setManualInTime(candidate);
-                  setManualDraftBaseFrames(resolved.cut
-                    ? { outFrame: resolved.cut.outFrame, inFrame: resolved.cut.inFrame }
-                    : null);
-                  setManualCutError("");
-                }}
-                disabled={busy || !manualOutReady}
-              />
-              <button onClick={setManualInFromPlayhead} disabled={busy || !manualOutReady}>Set IN</button>
-            </label>
-            <div className="manual-cut-preview-controls" aria-label="Manual cut preview duration">
-              <span>Preview join</span>
-              {([2, 4, 6] as const).map((seconds) => (
-                <button
-                  key={seconds}
-                  className={manualPreviewSeconds === seconds ? "active" : ""}
-                  onClick={() => playManualCutDraft(seconds)}
-                  disabled={busy || !manualOutReady || !manualInTime.trim()}
-                >{seconds}s</button>
-              ))}
-            </div>
-            <button
-              className="manual-cut-confirm"
-              onClick={() => void finishManualCut()}
-              disabled={busy || !manualOutTime.trim() || !manualInTime.trim()}
-            >Accept Manual Cut</button>
-          </div>
-          {manualCutError && <p className="manual-cut-error" role="alert">{manualCutError}</p>}
-        </div>
-        <div className="rendered-timeline-shell">
-          <div className="rendered-timeline-toolbar">
-            <span><strong>Cut timeline</strong> Drag playhead to seek · Ctrl + wheel to zoom · scrollbar to move</span>
-            <div className="rendered-timeline-zoom-controls" aria-label="Timeline zoom controls">
-              <button title="Zoom timeline out" onClick={() => changeTimelineZoom(timelineZoom / 1.5)} disabled={timelineZoom <= 1.001}>−</button>
-              <button title="Reset timeline zoom" onClick={() => changeTimelineZoom(1)}>{timelineZoom < 10 ? timelineZoom.toFixed(1) : timelineZoom.toFixed(0)}×</button>
-              <button title="Zoom timeline in" onClick={() => changeTimelineZoom(timelineZoom * 1.5)} disabled={timelineZoom >= maximumTimelineZoom() - 0.001}>+</button>
-            </div>
-          </div>
-          <div
-            className="rendered-timeline-viewport"
-            ref={timelineViewportRef}
-          >
-            <div
-              className="rendered-timeline"
-              ref={timelineContentRef}
-              aria-label="Rendered cut splice timeline"
-              style={{ width: `${timelineZoom * 100}%` }}
-            >
-              <div className="rendered-timeline-track" />
-              {manualOutReady && parsedManualOutSeconds !== null && (
-                <div
-                  className="manual-draft-boundary out"
-                  style={{ left: `${parsedManualOutSeconds / Math.max(preview.duration_seconds, 0.001) * 100}%` }}
-                  title={`Draft OUT ${formatPreviewTimecode(parsedManualOutSeconds, project.project.fps)}`}
-                ><span>OUT</span></div>
-              )}
-              {resolvedManualDraft && (
-                <>
-                  <div
-                    className="manual-draft-cut-range"
-                    style={{
-                      left: `${resolvedManualDraft.outSeconds / Math.max(preview.duration_seconds, 0.001) * 100}%`,
-                      width: `${(resolvedManualDraft.inSeconds - resolvedManualDraft.outSeconds) / Math.max(preview.duration_seconds, 0.001) * 100}%`,
-                    }}
-                  />
-                  <div
-                    className="manual-draft-boundary in"
-                    style={{ left: `${resolvedManualDraft.inSeconds / Math.max(preview.duration_seconds, 0.001) * 100}%` }}
-                    title={`Draft IN ${formatPreviewTimecode(resolvedManualDraft.inSeconds, project.project.fps)}`}
-                  ><span>IN</span></div>
-                </>
-              )}
-              <div
-                ref={timelinePlayheadRef}
-                className={["rendered-timeline-playhead", timelineScrubbing ? "scrubbing" : ""].join(" ")}
-                style={{ left: `${renderedPlayheadSeconds / Math.max(preview.duration_seconds, 0.001) * 100}%` }}
-                role="slider"
-                tabIndex={0}
-                aria-label="Preview playhead"
-                aria-valuemin={0}
-                aria-valuemax={preview.duration_seconds}
-                aria-valuenow={renderedPlayheadSeconds}
-                aria-valuetext={formatPreviewTimecode(renderedPlayheadSeconds, project.project.fps)}
-                title={`${formatPreviewTimecode(renderedPlayheadSeconds, project.project.fps)} · drag to scrub, release to hold`}
-                onPointerDown={beginTimelineScrub}
-                onPointerMove={moveTimelineScrub}
-                onPointerUp={finishTimelineScrub}
-                onPointerCancel={cancelTimelineScrub}
-                onLostPointerCapture={() => {
-                  timelineScrubbingRef.current = false;
-                  setTimelineScrubbing(false);
-                }}
-                onKeyDown={handleTimelinePlayheadKey}
-              >
-                <span />
-              </div>
-              {project.splices.map((splice, index) => {
-                const marker = previewMarkerByAnchor.get(splice.anchor_key);
-                const markerTime = marker?.preview_time_seconds ?? previewTimeAtSourceFrame(splice.left_out_frame);
-                if (markerTime === null) return null;
-                const pending = !marker;
-                return (
-                  <button
-                    key={splice.anchor_key}
-                    className={[
-                      selectedSplice?.anchor_key === splice.anchor_key ? "active" : "",
-                      splice.kind === "manual" ? "manual" : "",
-                      pending ? "pending" : "",
-                    ].join(" ")}
-                    style={{ left: `${Math.min(100, Math.max(0, markerTime / Math.max(preview.duration_seconds, 0.001) * 100))}%` }}
-                    title={`${splice.kind === "manual" ? "Manual cut" : `Splice ${index + 1}`} at ${formatPreviewTimecode(markerTime, project.project.fps)}${pending ? " · accepted, not yet in the working video" : ""}`}
-                    onClick={() => selectSplice(splice)}
-                  >
-                    <Scissors size={16} />
-                    <span>{splice.kind === "manual" ? "M" : index + 1}</span>
-                  </button>
-                );
-              })}
-              <div className="rendered-timeline-labels"><span>00:00</span><span>{formatTime(preview.duration_seconds)}</span></div>
-            </div>
-          </div>
-        </div>
+        ) : null}
 
         <section className="rendered-splice-controls">
           <div className="rendered-control-heading">
-            <h3>{resolvedManualDraft ? "Manual cut draft · not yet accepted" : selectedSplice ? `Splice ${selectedSpliceIndex + 1} of ${project.splices.length}` : "No splice selected"}</h3>
             {resolvedManualDraft ? (
-              <div className="rendered-control-actions">
-                <span>Preview join</span>
-                {([2, 4, 6] as const).map((seconds) => (
-                  <button
-                    key={seconds}
-                    className={manualPreviewSeconds === seconds ? "active" : ""}
-                    onClick={() => playManualCutDraft(seconds)}
-                    disabled={busy}
-                  >{seconds}s</button>
-                ))}
-              </div>
+              <h3 className="rendered-control-heading-label">Manual cut draft · not yet accepted</h3>
+            ) : project.splices.length > 0 ? (
+              <label className="splice-picker">
+                <span className="sr-only">Select splice</span>
+                <select
+                  value={selectedSplice?.anchor_key ?? ""}
+                  onChange={(event) => {
+                    const next = project.splices.find((splice) => splice.anchor_key === event.target.value);
+                    if (next) selectSplice(next);
+                  }}
+                  disabled={busy}
+                  aria-label="Select splice"
+                >
+                  {project.splices.map((splice, index) => (
+                    <option key={splice.anchor_key} value={splice.anchor_key}>
+                      {`Splice ${index + 1} of ${project.splices.length}${
+                        splice.kind === "manual" ? " · Manual" : splice.kind === "front_trim" ? " · Front trim" : ""
+                      }`}
+                    </option>
+                  ))}
+                </select>
+              </label>
             ) : (
-              <div className="rendered-control-actions">
-                <button onClick={() => selectedSplice && seekRenderedJoin(selectedSplice)} disabled={!selectedSplice}><RotateCcw size={15} /> Replay Join</button>
-                <button className={selectedSplice?.reviewed ? "reviewed" : ""} onClick={() => selectedSplice && reviewSpliceAndAdvance(selectedSplice)} disabled={!selectedSplice}>
-                  <Check size={15} /> {selectedSplice?.reviewed ? "Reviewed" : "Mark Reviewed"}
-                </button>
-                <button onClick={() => move(-1)} disabled={selectedSpliceIndex <= 0}><ChevronLeft size={15} /> Previous</button>
-                <button onClick={() => move(1)} disabled={selectedSpliceIndex < 0 || selectedSpliceIndex >= project.splices.length - 1}>Next <ChevronRight size={15} /></button>
-                {selectedSplice?.kind === "manual" && (
-                  <button className="danger" onClick={() => void updateSplice(() => removeManualCut(selectedSplice.manual_cut_id))} disabled={busy}><Trash2 size={15} /> Remove Cut</button>
-                )}
-              </div>
+              <h3 className="rendered-control-heading-label">No splice selected</h3>
             )}
           </div>
           {resolvedManualDraft && manualDraftFrames && manualDraftSegment ? (
             <div className="rendered-frame-grid">
               <CutFrameCard
                 title="Draft OUT frame"
-                frame={resolvedManualDraft.outFrame}
+                frame={manualDraftFrames.outFrame}
                 fps={project.project.fps}
-                adjustment={resolvedManualDraft.outFrame - manualDraftFrames.outFrame}
-                whisperFrame={manualDraftFrames.outFrame}
-                suggestedFrame={manualDraftFrames.outFrame}
+                adjustment={manualDraftFrames.outFrame - resolvedManualDraft.outFrame}
+                whisperFrame={resolvedManualDraft.outFrame}
+                suggestedFrame={resolvedManualDraft.outFrame}
                 minFrame={manualDraftSegment.source_start_frame}
-                maxFrame={resolvedManualDraft.inFrame - 2}
+                maxFrame={manualDraftFrames.inFrame - 2}
                 sourceLabel="Set"
                 onNudge={(delta) => nudgeManualDraft(delta, 0)}
               />
               <CutFrameCard
                 title="Draft IN frame"
-                frame={resolvedManualDraft.inFrame}
+                frame={manualDraftFrames.inFrame}
                 fps={project.project.fps}
-                adjustment={resolvedManualDraft.inFrame - manualDraftFrames.inFrame}
-                whisperFrame={manualDraftFrames.inFrame}
-                suggestedFrame={manualDraftFrames.inFrame}
-                minFrame={resolvedManualDraft.outFrame + 2}
+                adjustment={manualDraftFrames.inFrame - resolvedManualDraft.inFrame}
+                whisperFrame={resolvedManualDraft.inFrame}
+                suggestedFrame={resolvedManualDraft.inFrame}
+                minFrame={manualDraftFrames.outFrame + 2}
                 maxFrame={manualDraftSegment.source_end_frame}
                 sourceLabel="Set"
                 onNudge={(delta) => nudgeManualDraft(0, delta)}
@@ -3579,10 +3987,322 @@ function RenderedCutPreviewWorkspace({
               />
             </div>
           )}
-          <button className="refresh-rendered-preview" onClick={onRefresh} disabled={busy}>
-            <RotateCcw size={18} /> {busy ? "Rerendering Entire Preview..." : "Rerender Entire Preview"}
-          </button>
         </section>
+        <div className="rendered-timeline-shell">
+          <div className="rendered-timeline-toolbar">
+            <span className="rendered-timeline-toolbar-label">
+              <strong>Cut timeline</strong>
+            </span>
+            <div className="rendered-timeline-transport" aria-label="Cut transport">
+              <button
+                type="button"
+                className="rendered-timeline-play-toggle"
+                title={timelinePlaying ? "Pause" : isLive ? "Play cut" : "Play"}
+                aria-label={timelinePlaying ? "Pause" : isLive ? "Play cut" : "Play"}
+                disabled={busy}
+                onClick={() => {
+                  if (timelinePlaying) {
+                    videoRef.current?.pause();
+                    livePlaylistRef.current = null;
+                    return;
+                  }
+                  if (isLive) playLiveFromContinuous(renderedPlayheadSecondsRef.current);
+                  else void videoRef.current?.play().catch(() => undefined);
+                }}
+              >
+                {timelinePlaying ? <Pause size={15} /> : <Play size={15} />}
+              </button>
+              <div className="manual-cut-preview-controls timeline-join-preview" aria-label="Join preview duration">
+                {([2, 4, 6] as const).map((seconds) => (
+                  <button
+                    key={seconds}
+                    type="button"
+                    className={manualPreviewSeconds === seconds ? "active" : ""}
+                    onClick={() => playJoinPreview(seconds)}
+                    disabled={
+                      busy
+                      || !(
+                        selectedSplice
+                        || (manualOutReady && Boolean(manualInTime.trim()))
+                      )
+                    }
+                    title={`Preview ${seconds}s join (${seconds / 2}s before OUT, ${seconds / 2}s after IN)`}
+                  >{seconds}s</button>
+                ))}
+              </div>
+            </div>
+            <div className="rendered-timeline-zoom-controls" aria-label="Timeline zoom controls">
+              <button title="Zoom timeline out" onClick={() => changeTimelineZoom(timelineZoom / 1.5)} disabled={timelineZoom <= 1.001}>−</button>
+              <button title="Reset timeline zoom" onClick={() => changeTimelineZoom(1)}>{timelineZoom < 10 ? timelineZoom.toFixed(1) : timelineZoom.toFixed(0)}×</button>
+              <button title="Zoom timeline in" onClick={() => changeTimelineZoom(timelineZoom * 1.5)} disabled={timelineZoom >= maximumTimelineZoom() - 0.001}>+</button>
+            </div>
+          </div>
+          <div
+            className="rendered-timeline-viewport"
+            ref={timelineViewportRef}
+          >
+            <div
+              className="rendered-timeline"
+              ref={timelineContentRef}
+              aria-label="Rendered cut splice timeline"
+              style={{ width: `${timelineZoom * 100}%` }}
+              onPointerDown={beginTimelineAreaSeek}
+              onPointerMove={moveTimelineScrub}
+              onPointerUp={finishTimelineScrub}
+              onPointerCancel={cancelTimelineScrub}
+              onLostPointerCapture={() => {
+                timelineScrubbingRef.current = false;
+                setTimelineScrubbing(false);
+              }}
+            >
+              <div className="rendered-timeline-track" />
+              {isLive && timelineKeepRanges.map((range, index) => (
+                <div
+                  key={`keep-${index}`}
+                  className="timeline-keep-range"
+                  style={{
+                    left: timelinePct(range.start),
+                    width: `${Math.max(0, (range.end - range.start) / Math.max(timelineDurationSeconds, 0.001) * 100)}%`,
+                  }}
+                />
+              ))}
+              {project.splices.map((splice, index) => {
+                const marker = previewMarkerByAnchor.get(splice.anchor_key);
+                const pending = !marker;
+                const isFrontTrimCut = splice.kind === "front_trim";
+                const outTime = isLive
+                  ? sourceTimeForFrame(splice.left_out_frame)
+                  : (marker?.preview_time_seconds ?? previewTimeAtSourceFrame(splice.left_out_frame) ?? 0);
+                const inTime = isLive
+                  ? sourceTimeForFrame(splice.right_in_frame)
+                  : (marker?.preview_time_seconds ?? previewTimeAtSourceFrame(splice.right_in_frame) ?? outTime);
+                const rangeStart = Math.min(outTime, inTime);
+                const rangeEnd = Math.max(outTime, inTime);
+                const rangeWidth = Math.max(rangeEnd - rangeStart, 1 / fps);
+                const label = splice.kind === "manual"
+                  ? "Manual cut"
+                  : isFrontTrimCut
+                    ? "Front trim"
+                    : `Splice ${index + 1}`;
+                const removedSeconds = Math.max(0, (splice.right_in_frame - splice.left_out_frame) / fps);
+                return (
+                  <button
+                    key={splice.anchor_key}
+                    type="button"
+                    className={[
+                      "timeline-cut-markers",
+                      selectedSplice?.anchor_key === splice.anchor_key ? "active" : "",
+                      splice.kind === "manual" ? "manual" : "",
+                      pending ? "pending" : "",
+                      splice.reviewed ? "reviewed" : "",
+                      isFrontTrimCut ? "front-trim" : "",
+                    ].join(" ")}
+                    style={{
+                      left: timelinePct(rangeStart),
+                      width: `${Math.max(0.15, rangeWidth / Math.max(timelineDurationSeconds, 0.001) * 100)}%`,
+                    }}
+                    title={`${label} · remove ${formatTime(removedSeconds)} · OUT ${formatPreviewTimecode(outTime, fps)} → IN ${formatPreviewTimecode(inTime, fps)}${pending ? " · accepted, not yet in the working video" : ""}`}
+                    aria-label={`${label}, removes ${formatTime(removedSeconds)}`}
+                    onClick={() => selectSplice(splice)}
+                  >
+                    <span className="timeline-cut-range" aria-hidden="true" />
+                    {!isFrontTrimCut && (
+                      <span className="manual-draft-boundary out" aria-hidden="true" />
+                    )}
+                    <span className="manual-draft-boundary in" aria-hidden="true" />
+                  </button>
+                );
+              })}
+              {manualOutReady && parsedManualOutSeconds !== null && !resolvedManualDraft && (
+                <div
+                  className="manual-draft-boundary out"
+                  style={{ left: timelinePct(parsedManualOutSeconds) }}
+                  title={`Draft OUT ${formatPreviewTimecode(parsedManualOutSeconds, project.project.fps)}`}
+                />
+              )}
+              {resolvedManualDraft && manualDraftFrames && (
+                <>
+                  <div
+                    className="manual-draft-cut-range"
+                    style={{
+                      left: timelinePct(
+                        isLive
+                          ? sourceTimeForFrame(manualDraftFrames.outFrame)
+                          : resolvedManualDraft.outSeconds,
+                      ),
+                      width: `${Math.max(
+                        0.15,
+                        (
+                          (isLive
+                            ? sourceTimeForFrame(manualDraftFrames.inFrame) - sourceTimeForFrame(manualDraftFrames.outFrame)
+                            : resolvedManualDraft.inSeconds - resolvedManualDraft.outSeconds)
+                          / Math.max(timelineDurationSeconds, 0.001)
+                        ) * 100,
+                      )}%`,
+                    }}
+                  />
+                  <div
+                    className="manual-draft-boundary out"
+                    style={{
+                      left: timelinePct(
+                        isLive
+                          ? sourceTimeForFrame(manualDraftFrames.outFrame)
+                          : resolvedManualDraft.outSeconds,
+                      ),
+                    }}
+                    title={`Draft OUT ${formatPreviewTimecode(
+                      isLive ? sourceTimeForFrame(manualDraftFrames.outFrame) : resolvedManualDraft.outSeconds,
+                      project.project.fps,
+                    )}`}
+                  />
+                  <div
+                    className="manual-draft-boundary in"
+                    style={{
+                      left: timelinePct(
+                        isLive
+                          ? sourceTimeForFrame(manualDraftFrames.inFrame)
+                          : resolvedManualDraft.inSeconds,
+                      ),
+                    }}
+                    title={`Draft IN ${formatPreviewTimecode(
+                      isLive ? sourceTimeForFrame(manualDraftFrames.inFrame) : resolvedManualDraft.inSeconds,
+                      project.project.fps,
+                    )}`}
+                  />
+                </>
+              )}
+              <div
+                ref={timelinePlayheadRef}
+                className={["rendered-timeline-playhead", timelineScrubbing ? "scrubbing" : ""].join(" ")}
+                style={{ left: timelinePct(renderedPlayheadSeconds) }}
+                role="slider"
+                tabIndex={0}
+                aria-label="Preview playhead"
+                aria-valuemin={0}
+                aria-valuemax={timelineDurationSeconds}
+                aria-valuenow={renderedPlayheadSeconds}
+                aria-valuetext={formatPreviewTimecode(renderedPlayheadSeconds, project.project.fps)}
+                title={`${formatPreviewTimecode(renderedPlayheadSeconds, project.project.fps)} · drag to scrub, release to hold`}
+                onPointerDown={beginTimelineScrub}
+                onPointerMove={moveTimelineScrub}
+                onPointerUp={finishTimelineScrub}
+                onPointerCancel={cancelTimelineScrub}
+                onLostPointerCapture={() => {
+                  timelineScrubbingRef.current = false;
+                  setTimelineScrubbing(false);
+                }}
+                onKeyDown={handleTimelinePlayheadKey}
+              >
+                <span />
+              </div>
+            </div>
+          </div>
+          <div className="manual-cut-actions" aria-label="Manual cut actions">
+            <strong className="manual-cut-actions-label">Manual Cut</strong>
+            <button type="button" onClick={setManualOutFromPlayhead} disabled={busy}>
+              Set OUT
+            </button>
+            <button type="button" onClick={setManualInFromPlayhead} disabled={busy || !manualOutReady}>
+              Set IN
+            </button>
+            <button
+              type="button"
+              className="manual-cut-confirm"
+              onClick={() => void finishManualCut()}
+              disabled={busy || !manualOutTime.trim() || !manualInTime.trim()}
+            >
+              Accept
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void clearOrRemoveCut()}
+              disabled={busy || !canClearOrRemove}
+              title={
+                manualOutTime.trim() || manualInTime.trim() || manualDraftBaseFrames
+                  ? "Clear draft OUT/IN"
+                  : selectedSplice
+                    ? "Remove this cut and restore the removed section"
+                    : "Nothing to clear"
+              }
+            >
+              <Trash2 size={14} />
+              {manualOutTime.trim() || manualInTime.trim() || manualDraftBaseFrames
+                ? "Clear"
+                : "Remove"}
+            </button>
+          </div>
+          {manualCutError ? <p className="manual-cut-error" role="alert">{manualCutError}</p> : null}
+          <div
+            className="timeline-cut-clock"
+            title="Play position in the cut / total length after cuts (not source footage length)"
+            aria-label={`Cut time ${formatTime(cutPlayheadSeconds)} of ${formatTime(cutDurationSeconds)}`}
+          >
+            <span className="timeline-cut-clock-current">{formatTime(cutPlayheadSeconds)}</span>
+            <span className="timeline-cut-clock-sep" aria-hidden="true">/</span>
+            <span className="timeline-cut-clock-total">{formatTime(cutDurationSeconds)}</span>
+          </div>
+        </div>
+
+      </section>
+
+      {/* Right: large video preview only (no transport or edit chrome). */}
+      <section className="rendered-cut-video-panel" ref={cutVideoPanelRef} aria-label="Cut video preview">
+        <div className="rendered-cut-video">
+          <video
+            key={preview.preview_id}
+            ref={videoRef}
+            controls={false}
+            preload="metadata"
+            playsInline
+            src={
+              isLive
+                ? sourceVideoSrc
+                : renderedCutPreviewUrl(preview.preview_id)
+            }
+            onLoadedMetadata={() => {
+              if (selectedSplice) seekRenderedJoin(selectedSplice, false);
+              else if (isLive && preview.segments[0]) {
+                const first = preview.segments[0];
+                const startSource = first.source_start_frame / fps;
+                if (videoRef.current) {
+                  videoRef.current.currentTime = startSource;
+                }
+                positionTimelinePlayhead(startSource);
+                setRenderedPlayheadSeconds(startSource);
+              } else {
+                const currentTime = positionTimelinePlayhead(videoRef.current?.currentTime ?? 0);
+                setRenderedPlayheadSeconds(currentTime);
+              }
+            }}
+            onTimeUpdate={(event) => {
+              if (isLive) {
+                // Source-timeline playhead tracks the media clock (jumps across cut gaps).
+                commitPlayhead(event.currentTarget.currentTime);
+                return;
+              }
+              commitPlayhead(event.currentTarget.currentTime);
+            }}
+            onPlay={() => {
+              setTimelinePlaying(true);
+              if (isLive && !livePlaylistRef.current && !manualPreviewRef.current) {
+                // Native play without playlist: build from current source playhead.
+                playLiveFromContinuous(renderedPlayheadSecondsRef.current);
+                return;
+              }
+              startTimelinePlaybackMonitor();
+            }}
+            onPause={() => {
+              setTimelinePlaying(false);
+              stopTimelinePlaybackMonitor();
+              livePlaylistRef.current = null;
+            }}
+            onEnded={() => {
+              setTimelinePlaying(false);
+              stopTimelinePlaybackMonitor();
+            }}
+          />
+        </div>
       </section>
     </section>
   );
@@ -3787,23 +4507,23 @@ function CutFrameCard({
   title,
   frame,
   fps,
-  adjustment,
-  whisperFrame,
-  suggestedFrame,
   minFrame,
   maxFrame,
   onNudge,
-  sourceLabel = "Whisper",
 }: {
   title: string;
   frame: number;
   fps: number;
-  adjustment: number;
-  whisperFrame: number;
-  suggestedFrame: number;
+  /** Kept for call-site compatibility; adjustment chrome removed. */
+  adjustment?: number;
+  /** Kept for call-site compatibility; Whisper/source label chrome removed. */
+  whisperFrame?: number;
+  /** Kept for call-site compatibility; assisted-suggestion chrome removed. */
+  suggestedFrame?: number;
   minFrame?: number;
   maxFrame?: number;
   onNudge: (delta: number) => void;
+  /** Kept for call-site compatibility; Whisper/source label chrome removed. */
   sourceLabel?: string;
 }) {
   const allowedDelta = (requested: number) => {
@@ -3824,12 +4544,10 @@ function CutFrameCard({
   return (
     <div className="cut-frame-card">
       <div className="cut-frame-header">
-        <span>{title}<small>{sourceLabel} {formatFrameTimecode(whisperFrame, fps)} · frame {whisperFrame.toLocaleString()}</small></span>
-        <strong>{formatFrameTimecode(frame, fps)}<small>Frame {frame.toLocaleString()} · {formatSignedFrames(adjustment)}</small></strong>
+        <span className="cut-frame-title">{title}</span>
+        <span className="cut-frame-timecode">{formatFrameTimecode(frame, fps)}</span>
+        <span className="cut-frame-number">{frame.toLocaleString()}</span>
       </div>
-      {suggestedFrame !== whisperFrame && (
-        <div className="assisted-boundary-label">Assisted suggestion: {formatFrameTimecode(suggestedFrame, fps)} · frame {suggestedFrame.toLocaleString()} · +{suggestedFrame - whisperFrame}</div>
-      )}
       {(frame === minFrame || frame === maxFrame) && (
         <div className="cut-boundary-limit">Safety boundary reached at frame {frame.toLocaleString()}</div>
       )}
@@ -3881,11 +4599,6 @@ function parsePreviewTimecode(value: string, fps: number): number | null {
     return numeric[0] * 3600 + numeric[1] * 60 + numeric[2] + numeric[3] / roundedFps;
   }
   return null;
-}
-
-function formatSignedFrames(value: number) {
-  if (value === 0) return "0 frames";
-  return `${value > 0 ? "+" : ""}${value} frames`;
 }
 
 function SpliceMarker({

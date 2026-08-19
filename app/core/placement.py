@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import subprocess
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.core.assignment import (
     load_assignment_original,
@@ -38,6 +41,12 @@ REVIEWED_FILENAME = "placement-reviewed.json"
 LEDGER_FILENAME = "placement-edit-ledger.json"
 PREVIEW_DIRNAME = "working/placement-preview"
 PREVIEW_RECEIPT = "preview-receipt.json"
+# Full-episode Final encode workspace + published delivery (locked-cut audio remuxed).
+FINAL_DIRNAME = "working/placement-final"
+FINAL_PLAN_FILENAME = "visual-plan.final.json"
+FINAL_RECEIPT = "final-receipt.json"
+FINAL_JOB_FILENAME = "render-job.json"
+FINAL_OUTPUT_REL = "exports/final-video.mp4"
 
 SCHEMA_VERSION = 1
 SOURCE_ALGORITHM = "algorithm"
@@ -57,12 +66,16 @@ def ledger_path_for_project(project_root: Path) -> Path:
 
 
 def _working_masterbeater_beats(project_root: Path) -> list[dict[str, Any]]:
+    from app.core.masterbeater import sort_beats_by_timeline
+
     reviewed = load_masterbeater_reviewed(project_root)
     original = load_masterbeater_output(project_root)
     working = reviewed if reviewed is not None else original
     if working is None:
         return []
-    return [b for b in (working.get("beats") or []) if isinstance(b, dict) and b.get("id")]
+    return sort_beats_by_timeline(
+        [b for b in (working.get("beats") or []) if isinstance(b, dict) and b.get("id")]
+    )
 
 
 def _masterbeater_beat_by_id(project_root: Path, beat_id: str) -> dict[str, Any] | None:
@@ -215,6 +228,9 @@ def _default_meta(engine_id: str, *, index_among_type: int) -> dict[str, Any]:
     meta: dict[str, Any] = {}
     if "stepNumber" in keys:
         meta["stepNumber"] = index_among_type + 1
+    if "numberLabel" in keys:
+        # Free string so operators can choose "2" or "02".
+        meta["numberLabel"] = str(index_among_type + 1)
     if "showNumber" in keys:
         meta["showNumber"] = True
     if "exampleNumber" in keys:
@@ -442,6 +458,16 @@ def draft_lines_for_engine(
                     reveal_frame=start + max(1, span // 3),
                 )
             )
+        elif engine_id == "numbered-phrase-reveal":
+            # Optional title stays empty by default; phrase gets the beat words.
+            lines.append(empty_line("title", text="", reveal_frame=start))
+            lines.append(
+                empty_line(
+                    "text",
+                    text=words or "Phrase",
+                    reveal_frame=start + max(1, span // 4),
+                )
+            )
         elif engine_id == "ui-callout":
             lines.append(empty_line("label", text=words or "UI", reveal_frame=start))
         elif engine_id == "robot-cheer":
@@ -504,9 +530,12 @@ def draft_placement_for_beat(
         return None
     usage_id = str(usage_id).strip()
     usage = usages_by_id.get(usage_id) or {}
+    from app.core.visual_production import canonicalize_engine_id
+
     engine_id = str(usage.get("engineId") or resolve_engine_id(usage_id) or "").strip()
     if not engine_id:
         engine_id = usage_id
+    engine_id = canonicalize_engine_id(engine_id)
 
     try:
         get_engine_placement_spec(engine_id)
@@ -593,6 +622,14 @@ def build_placement_document(
                 "wordsText": row.get("wordsText"),
             }
         )
+    # Transcript time order — matches Masterbeater + Final cue sort.
+    clean.sort(
+        key=lambda r: (
+            int(r.get("startFrame") or 0),
+            int(r.get("endFrameExclusive") or 0),
+            str(r.get("beatId") or ""),
+        )
+    )
     locked_n = sum(1 for r in clean if r.get("locked"))
     return {
         "agent": "placement" if role == "original" else "placement-reviewed",
@@ -660,8 +697,9 @@ def run_placement_for_video_project(
             continue
         prior = prior_by_id.get(beat_id)
         if prior and prior.get("locked"):
-            # Locked beats are never overwritten by Place.
-            placements.append(dict(prior))
+            # Locked content is kept; still rewrite retired engine ids so Place can
+            # return interfaces without KeyError (speaker-side-panel → dependency-stack).
+            placements.append(normalize_placement_engine(dict(prior)))
             continue
 
         btype = str(beat.get("beatType") or "")
@@ -676,7 +714,7 @@ def run_placement_for_video_project(
             locked=False,
         )
         if drafted:
-            placements.append(drafted)
+            placements.append(normalize_placement_engine(drafted))
 
     if not placements:
         raise ValueError("No placements could be drafted (no assigned beats with usages).")
@@ -696,6 +734,16 @@ def run_placement_for_video_project(
         working_doc["reRun"] = True
         write_placement_reviewed(root, working_doc)
 
+    interfaces: dict[str, Any] = {}
+    for p in placements:
+        eid = str(p.get("engineId") or "").strip()
+        if not eid or eid in interfaces:
+            continue
+        try:
+            interfaces[eid] = placement_interface_summary(eid)
+        except KeyError:
+            interfaces[eid] = {"engineId": eid, "error": "unknown engine"}
+
     return {
         "ok": True,
         "firstRun": first_run,
@@ -707,11 +755,7 @@ def run_placement_for_video_project(
         "reviewedPath": str(reviewed_path_for_project(root)),
         "result": working_doc,
         "beats": working_doc.get("beats"),
-        "engineInterfaces": {
-            p["engineId"]: placement_interface_summary(str(p["engineId"]))
-            for p in placements
-            if p.get("engineId")
-        },
+        "engineInterfaces": interfaces,
     }
 
 
@@ -858,7 +902,7 @@ def save_placement_beat_for_video_project(
         row["locked"] = bool(payload["locked"])
 
     by_id[beat_id] = row
-    ordered = [by_id[str(r["beatId"])] for r in rows if str(r["beatId"]) in by_id]
+    ordered = list(by_id.values())
 
     working_doc = build_placement_document(ordered, project_root=root, role="reviewed")
     working_doc["basedOnOriginal"] = True
@@ -943,7 +987,7 @@ def placement_status_for_video_project(
     for b in beats:
         if not isinstance(b, dict) or not b.get("beatId"):
             continue
-        row = dict(b)
+        row = normalize_placement_engine(dict(b))
         eid = str(row.get("engineId") or "")
         if eid and isinstance(row.get("lines"), list):
             row["lines"] = _filter_lines_to_engine_slots(eid, list(row["lines"]))
@@ -956,7 +1000,7 @@ def placement_status_for_video_project(
         by_beat[str(row["beatId"])] = row
 
     interfaces: dict[str, Any] = {}
-    for b in beats:
+    for b in by_beat.values():
         if not isinstance(b, dict):
             continue
         eid = str(b.get("engineId") or "")
@@ -1048,6 +1092,9 @@ def _placement_preview_fingerprint(
     fps: float,
     beat_end_frame_exclusive: int | None = None,
 ) -> str:
+    # Same engine-compose recipe Final uses — one version, both surfaces.
+    from app.core.visual_production import ENGINE_COMPOSE_RECIPE
+
     payload = {
         "beatId": placement.get("beatId"),
         "engineId": placement.get("engineId"),
@@ -1065,25 +1112,9 @@ def _placement_preview_fingerprint(
         "motion": placement.get("motion") or {},
         "source": source_rel,
         "fps": round(float(fps), 3),
-        # Bump when default asset/layout recipe for an engine changes (invalidates cache).
-        # 3: no #main-audio in preview compositions (monotonic transport clock; the
-        #    studio plays speech via an app-owned audio element instead).
-        # 4: punchline-reveal redesign — kicker removed; end via endFrameExclusive; custom
-        #    placement images stage from assets/placement/.
-        # 5: stage/dock at beat start; Title reveal = image + caption only (not whole card).
-        # 6: same contract; force rebuild of Claude-era caches that delayed the whole stage.
-        # 7: preview range = full beat; placement endFrameExclusive only ends the graphic cue.
-        # 8: dependency-stack honors placement node revealFrames (no even redistrib).
-        # 9: kinetic-word-punctuation stamp (pink + phrase) lands together at phrase frame.
-        # 10: numbered-step-intro — title on same teal line as number; larger pink action.
-        # 11: step headline teal size down + gap between number and title.
-        # 12: problem-card-triptych honors card revealFrames (no even redistrib).
-        # 13: speaker-rise-callouts honor revealFrames; face-clear edge slots; up to 8.
-        # 14: rise callouts all pink; bottom slots raised (less stranded).
-        # 15–16: speaker-side-panel experiments (engine retired → dependency-stack).
-        # 17: speaker-side-panel removed from registry; alias to dependency-stack.
-        # 22: ui-callout label-only (no detail); bounds knobs unchanged.
-        "previewRecipe": 22,
+        # Shared with Final fingerprint. Bump ENGINE_COMPOSE_RECIPE in
+        # visual_production.py when engine draw/timeline/dock math changes.
+        "engineComposeRecipe": ENGINE_COMPOSE_RECIPE,
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
@@ -1236,6 +1267,35 @@ def _sanitize_engine_parameters_for_plan(engine_id: str, params: dict[str, Any])
         if side and side not in {"left", "right"}:
             out["side"] = "left"
 
+    if eid == "numbered-phrase-reveal":
+        # Schema wants string fields. Meta knobs often arrive as numbers (2) or null
+        # from the craft UI; without coercion every module oneOf branch fails and
+        # jsonschema best_match reports the misleading last branch (assetId required).
+        if "numberLabel" in out and out["numberLabel"] is not None:
+            out["numberLabel"] = str(out["numberLabel"])
+        elif "numberLabel" not in out or out.get("numberLabel") is None:
+            out["numberLabel"] = "1"
+        for key in ("title", "text"):
+            if key not in out or out[key] is None:
+                out[key] = ""
+            elif not isinstance(out[key], str):
+                out[key] = str(out[key])
+
+    if eid == "intro-credentials":
+        # Name + thankYou must be strings for schema oneOf; nodes list of strings.
+        for key in ("text", "thankYou"):
+            if key not in out or out[key] is None:
+                out[key] = ""
+            elif not isinstance(out[key], str):
+                out[key] = str(out[key])
+        nodes = out.get("nodes")
+        if nodes is None:
+            out["nodes"] = []
+        elif isinstance(nodes, list):
+            out["nodes"] = [str(v) for v in nodes if str(v).strip()]
+        else:
+            out["nodes"] = [str(nodes)] if str(nodes).strip() else []
+
     if eid == "tradeoff-meter":
         # Meta knobs arrive as strings from the craft UI ("0.8") — schema wants number.
         if "value" in out:
@@ -1300,19 +1360,29 @@ def _sanitize_engine_parameters_for_plan(engine_id: str, params: dict[str, Any])
 
 
 def normalize_placement_engine(placement: dict[str, Any]) -> dict[str, Any]:
-    """Rewrite retired engine ids on a placement row (e.g. speaker-side-panel → dependency-stack)."""
+    """Rewrite retired engine/usage ids on a placement row (e.g. speaker-side-panel → dependency-stack)."""
 
-    from app.core.visual_production import canonicalize_engine_id
+    from app.core.visual_production import RETIRED_ENGINE_ALIASES, canonicalize_engine_id
 
     if not isinstance(placement, dict):
         return placement
     raw = str(placement.get("engineId") or "").strip()
-    live = canonicalize_engine_id(raw)
-    if live == raw or not live:
+    raw_usage = str(placement.get("usageId") or "").strip()
+    live = canonicalize_engine_id(raw) if raw else ""
+    live_usage = RETIRED_ENGINE_ALIASES.get(raw_usage, raw_usage)
+    if (not live or live == raw) and live_usage == raw_usage:
         return placement
     out = dict(placement)
-    out["engineId"] = live
-    if raw == "speaker-side-panel" and live == "dependency-stack":
+    if live and live != raw:
+        out["engineId"] = live
+    if live_usage and live_usage != raw_usage:
+        out["usageId"] = live_usage
+        # Drop shelf name that belonged to the retired card.
+        if str(out.get("displayName") or "").strip().lower().startswith("speaker side panel"):
+            out["displayName"] = "Dependency Stack"
+    if (raw == "speaker-side-panel" or live_usage == "dependency-stack" and raw_usage == "speaker-side-panel") and (
+        live == "dependency-stack" or live_usage == "dependency-stack"
+    ):
         lines: list[dict[str, Any]] = []
         for line in placement.get("lines") or []:
             if not isinstance(line, dict):
@@ -1322,8 +1392,10 @@ def normalize_placement_engine(placement: dict[str, Any]) -> dict[str, Any]:
             if slot.startswith("items."):
                 row["slot"] = "nodes." + slot.split(".", 1)[1]
             lines.append(row)
-        out["lines"] = lines
-        # usageId may still name the old library card; engineId is authoritative for draw.
+        if lines or placement.get("lines"):
+            out["lines"] = lines
+        if not out.get("engineId") or out.get("engineId") == "speaker-side-panel":
+            out["engineId"] = "dependency-stack"
     return out
 
 
@@ -1656,4 +1728,547 @@ def build_placement_live_preview(
         "height": height,
         "workspace": str(runtime_root),
         "compositionEntry": str(runtime_root / "index.html"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Full-episode Final (all locked placements → one HyperFrames encode)
+# ---------------------------------------------------------------------------
+
+
+def final_workspace_for_project(project_root: Path) -> Path:
+    return Path(project_root).expanduser().resolve() / FINAL_DIRNAME
+
+
+def final_output_path_for_project(project_root: Path) -> Path:
+    return Path(project_root).expanduser().resolve() / FINAL_OUTPUT_REL
+
+
+def final_job_path_for_project(project_root: Path) -> Path:
+    return final_workspace_for_project(project_root) / FINAL_JOB_FILENAME
+
+
+def _working_placement_document(root: Path) -> dict[str, Any] | None:
+    try:
+        reviewed = load_placement_reviewed(root)
+        if reviewed is not None:
+            return reviewed
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+    try:
+        return load_placement_original(root)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def _placement_beats_ready_for_final(root: Path) -> list[dict[str, Any]]:
+    """Return ordered locked placement rows, or raise if Final is not ready."""
+
+    working = _working_placement_document(root)
+    if not working:
+        raise ValueError("No placements yet. Run Place and lock every assigned beat first.")
+    beats = [b for b in (working.get("beats") or []) if isinstance(b, dict) and b.get("beatId")]
+    if not beats:
+        raise ValueError("No placement beats to render.")
+    unlocked = [str(b.get("beatId")) for b in beats if not b.get("locked")]
+    if unlocked:
+        sample = ", ".join(unlocked[:6])
+        more = f" (+{len(unlocked) - 6} more)" if len(unlocked) > 6 else ""
+        raise ValueError(
+            f"Final requires every assigned placement locked. Still unlocked: {sample}{more}."
+        )
+    return beats
+
+
+def _cue_from_placement_for_final(
+    placement: dict[str, Any],
+    *,
+    fps: float,
+    full_duration: float,
+) -> dict[str, Any]:
+    """Absolute-timeline cue for full-episode package (graphic Ends = undock)."""
+
+    placement = normalize_placement_engine(placement)
+    cue_payload = build_cue_preview_payload(placement, fps=fps)
+    engine_id = str(cue_payload.get("moduleId") or placement.get("engineId") or "").strip()
+    cue_start = max(0.0, min(full_duration - 0.05, float(cue_payload["startSec"])))
+    cue_end = max(cue_start + 0.05, min(full_duration, float(cue_payload["endSec"])))
+    cue_params = dict(cue_payload.get("parameters") or {})
+    cue = {
+        "id": str(cue_payload.get("id") or f"cue-{placement.get('beatId') or 'beat'}"),
+        "kind": "module",
+        "moduleId": engine_id,
+        "startSec": cue_start,
+        "endSec": cue_end,
+        "enabled": True,
+        "parameters": cue_params,
+        "semanticItems": list(cue_payload.get("semanticItems") or []),
+    }
+    for item in cue["semanticItems"]:
+        if not isinstance(item, dict):
+            continue
+        spoken = float(item.get("spokenStartSec") or cue_start)
+        fully = float(item.get("fullyVisibleSec") or spoken)
+        spoken = max(cue_start, min(cue_end - 0.02, spoken))
+        fully = max(spoken, min(cue_end, fully))
+        item["spokenStartSec"] = spoken
+        item["fullyVisibleSec"] = fully
+    return cue
+
+
+def _merge_plan_assets(project_root: Path, cues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for cue in cues:
+        if not isinstance(cue, dict):
+            continue
+        engine_id = str(cue.get("moduleId") or "")
+        params = cue.get("parameters") if isinstance(cue.get("parameters"), dict) else {}
+        for asset in _stage_plan_assets_for_preview(project_root, engine_id=engine_id, params=params):
+            aid = str(asset.get("id") or "")
+            if aid:
+                by_id[aid] = asset
+    return list(by_id.values())
+
+
+def _final_fingerprint(
+    beats: list[dict[str, Any]],
+    *,
+    source_rel: str,
+    source_sha: str,
+    fps: float,
+    duration_sec: float,
+    quality: str,
+) -> str:
+    # Must include ENGINE_COMPOSE_RECIPE so Final cannot reuse an encode built
+    # with older engine/dock code while placement preview already rebuilt.
+    from app.core.visual_production import ENGINE_COMPOSE_RECIPE
+
+    payload = {
+        "sourceRel": source_rel,
+        "sourceSha256": source_sha,
+        "fps": round(float(fps), 4),
+        "durationSec": round(float(duration_sec), 4),
+        "quality": quality,
+        "engineComposeRecipe": ENGINE_COMPOSE_RECIPE,
+        "beats": [
+            {
+                "beatId": b.get("beatId"),
+                "engineId": b.get("engineId"),
+                "startFrame": b.get("startFrame"),
+                "endFrameExclusive": b.get("endFrameExclusive"),
+                "lines": b.get("lines"),
+                "meta": b.get("meta"),
+                "assets": b.get("assets"),
+                "motion": b.get("motion"),
+                "locked": b.get("locked"),
+            }
+            for b in beats
+        ],
+    }
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:20]
+
+
+def build_placement_final_plan(
+    manifest_path: Path,
+    manifest: dict,
+    *,
+    quality: str = "standard",
+) -> dict[str, Any]:
+    """Assemble a full-duration visual plan from all locked placements (no encode)."""
+
+    from app.core.file_utils import sha256_file
+    from app.core.visual_production import (
+        VISUAL_PLAN_VERSION,
+        probe_visual_source,
+        validate_visual_plan,
+    )
+
+    root = video_project_root(manifest_path)
+    beats = _placement_beats_ready_for_final(root)
+    source_path = preferred_stage_source(manifest_path, manifest)
+    if not source_path.is_file():
+        raise FileNotFoundError(
+            "No locked cut / stage source video for Final. Export the locked cut first."
+        )
+    try:
+        source_rel = source_path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as exc:
+        raise ValueError("Stage source must stay inside the video project.") from exc
+
+    meta_probe = probe_visual_source(source_path)
+    fps = float(meta_probe.get("fps") or 30.0) or 30.0
+    width = int(meta_probe.get("width") or 1920)
+    height = int(meta_probe.get("height") or 1080)
+    if width >= height:
+        width, height = 1920, 1080
+    full_duration = float(meta_probe.get("durationSec") or 0.0)
+    if full_duration <= 0:
+        raise RuntimeError("Could not probe locked-cut duration for Final.")
+
+    quality = str(quality or "standard").strip().lower() or "standard"
+    if quality not in {"draft", "standard", "high"}:
+        raise ValueError("Unknown Final quality. Use draft, standard, or high.")
+
+    cues: list[dict[str, Any]] = []
+    for row in beats:
+        placement = normalize_placement_engine(dict(row))
+        engine_id = str(placement.get("engineId") or "").strip()
+        if not engine_id:
+            raise ValueError(f"Placement {placement.get('beatId')!r} has no engineId.")
+        cues.append(
+            _cue_from_placement_for_final(placement, fps=fps, full_duration=full_duration)
+        )
+    # Stable draw order: earlier start first.
+    cues.sort(key=lambda c: (float(c.get("startSec") or 0.0), str(c.get("id") or "")))
+
+    plan_assets = _merge_plan_assets(root, cues)
+    source_sha = sha256_file(source_path)
+    fingerprint = _final_fingerprint(
+        beats,
+        source_rel=source_rel,
+        source_sha=source_sha,
+        fps=fps,
+        duration_sec=full_duration,
+        quality=quality,
+    )
+
+    now = datetime.now(timezone.utc).isoformat()
+    plan = {
+        "schemaVersion": VISUAL_PLAN_VERSION,
+        "project": {
+            "id": f"placement-final-{fingerprint}",
+            "name": "Placement final · full episode",
+            "createdAt": now,
+            "updatedAt": now,
+        },
+        "source": {
+            "video": source_rel,
+            "transcript": "",
+            "videoSha256": source_sha,
+        },
+        "composition": {
+            "width": width,
+            "height": height,
+            "fps": round(fps, 3),
+            "durationSec": full_duration,
+            "brandId": "vcg-white-editorial",
+        },
+        "assets": plan_assets,
+        "customCompositions": [],
+        "protectedFootage": [],
+        "cues": cues,
+        "revisions": {"activeRevision": None, "items": []},
+        "productionGates": {
+            "representativeApproval": None,
+            "fullReviewApproval": None,
+            "layoutInspection": None,
+            "deliveryReopen": None,
+        },
+        "reviews": [],
+        "reviewHistory": [],
+    }
+
+    work = final_workspace_for_project(root)
+    work.mkdir(parents=True, exist_ok=True)
+    plan_path = work / FINAL_PLAN_FILENAME
+    validate_visual_plan(plan, root)
+    plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    return {
+        "ok": True,
+        "planPath": str(plan_path),
+        "plan": plan,
+        "sourcePath": str(source_path),
+        "sourceRel": source_rel,
+        "sourceSha256": source_sha,
+        "fingerprint": fingerprint,
+        "cueCount": len(cues),
+        "placementCount": len(beats),
+        "durationSec": full_duration,
+        "fps": fps,
+        "width": width,
+        "height": height,
+        "quality": quality,
+        "outputPath": str(final_output_path_for_project(root)),
+    }
+
+
+class FinalRenderCanceled(RuntimeError):
+    """Raised when the operator cancels an in-flight placement Final."""
+
+
+def _placement_final_workers() -> str:
+    """Parallel Chrome capture workers for HyperFrames Final.
+
+    Default ``4`` matches HyperFrames guidance (sweet spot). Override with
+    ``PLACEMENT_FINAL_WORKERS`` (number or ``auto``).
+    """
+
+    raw = str(os.environ.get("PLACEMENT_FINAL_WORKERS") or "4").strip().lower()
+    if raw == "auto":
+        return "auto"
+    try:
+        count = int(raw)
+    except ValueError:
+        return "4"
+    return str(max(1, min(8, count)))
+
+
+def _placement_final_use_gpu() -> bool:
+    """NVENC/AMF/QSV encode when available. Disable with PLACEMENT_FINAL_GPU=0."""
+
+    raw = str(os.environ.get("PLACEMENT_FINAL_GPU") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def build_placement_final_render_command(
+    *,
+    node: str,
+    cli_js: Path,
+    runtime_root: Path,
+    output_path: Path,
+    quality: str,
+) -> list[str]:
+    """HyperFrames CLI argv for placement Final (shared engines, GPU + workers)."""
+
+    command = [
+        str(node),
+        str(cli_js),
+        "render",
+        str(runtime_root),
+        "--output",
+        str(output_path),
+        "--quality",
+        quality,
+        "--workers",
+        _placement_final_workers(),
+        "--skill",
+        "talking-head-recut",
+    ]
+    if _placement_final_use_gpu():
+        command.append("--gpu")
+    return command
+
+
+def render_placement_final_for_video_project(
+    manifest_path: Path,
+    manifest: dict,
+    *,
+    quality: str = "standard",
+    force: bool = True,
+    progress: Callable[[int, str], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+    on_process: Callable[[subprocess.Popen[str] | None], None] | None = None,
+) -> dict[str, Any]:
+    """Full-episode Final: HyperFrames encode of locked placements + locked-cut audio remux.
+
+    Does not re-normalize audio. Whatever audio is on the locked cut (including
+    optional Stage 5 normalize from the transcript editor) is stream-copied.
+
+    ``force`` defaults to True so an existing ``exports/final-video.mp4`` never
+    blocks a new export (receipt reuse is opt-in for identical fingerprints only).
+
+    ``cancel_check`` / ``on_process`` let the API surface cancel a running
+    HyperFrames tree without a parallel encode path.
+    """
+
+    from app.core.ffmpeg_locator import find_ffmpeg, find_ffprobe
+    from app.core.process_utils import hidden_subprocess_flags, terminate_process_tree
+    from app.core.settings import project_root
+    from app.core.visual_production import (
+        build_hyperframes_composition,
+        _hyperframes_progress_percent,
+        publish_verified_render,
+        remux_locked_audio,
+        verify_delivered_media,
+    )
+
+    progress = progress or (lambda _value, _message: None)
+    cancel_check = cancel_check or (lambda: False)
+    on_process = on_process or (lambda _proc: None)
+
+    def _raise_if_canceled() -> None:
+        if cancel_check():
+            raise FinalRenderCanceled("Final render canceled.")
+
+    root = video_project_root(manifest_path)
+    progress(2, "Assembling locked placements into a full-episode plan...")
+    _raise_if_canceled()
+    assembled = build_placement_final_plan(manifest_path, manifest, quality=quality)
+    plan_path = Path(assembled["planPath"])
+    source_path = Path(assembled["sourcePath"])
+    fingerprint = str(assembled["fingerprint"])
+    quality = str(assembled["quality"])
+    full_duration = float(assembled["durationSec"])
+    output_path = Path(assembled["outputPath"])
+
+    work = final_workspace_for_project(root)
+    receipt_path = work / FINAL_RECEIPT
+    # Optional reuse only: Stage 3 Final always force-rebuilds so an existing
+    # exports/final-video.mp4 cannot short-circuit a deliberate re-export.
+    if not force and output_path.is_file() and receipt_path.is_file():
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
+            receipt_out = Path(str(receipt.get("outputPath") or "")).expanduser()
+            try:
+                receipt_out_resolved = receipt_out.resolve()
+            except OSError:
+                receipt_out_resolved = receipt_out
+            output_ok = (
+                receipt_out_resolved == output_path.resolve()
+                or receipt_out.name == output_path.name
+            )
+            size_ok = output_path.stat().st_size > 0
+            if (
+                isinstance(receipt, dict)
+                and receipt.get("fingerprint") == fingerprint
+                and receipt.get("quality") == quality
+                and output_ok
+                and size_ok
+            ):
+                progress(100, "Final already published for this locked placement set.")
+                return {
+                    "ok": True,
+                    "reused": True,
+                    "outputPath": str(output_path),
+                    "fingerprint": fingerprint,
+                    "cueCount": assembled["cueCount"],
+                    "durationSec": full_duration,
+                    "quality": quality,
+                }
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    _raise_if_canceled()
+    progress(8, "Building full-episode HyperFrames composition...")
+    workspace = work / "hyperframes"
+    runtime_root, render_duration = build_hyperframes_composition(
+        plan_path,
+        start_sec=0.0,
+        end_sec=full_duration,
+        workspace_override=workspace,
+        progress=lambda pct, msg: progress(8 + int(max(0, min(100, pct)) * 0.28), msg),
+        include_source_audio=True,
+    )
+    if not (runtime_root / "index.html").is_file():
+        raise RuntimeError("HyperFrames Final composition was not written.")
+
+    _raise_if_canceled()
+    progress(40, "Rendering full-episode graphics (GPU encode when available)...")
+    node = shutil.which("node")
+    if not node:
+        raise RuntimeError("Node.js is required to render the placement Final.")
+    cli_js = project_root() / "node_modules" / "hyperframes" / "dist" / "cli.js"
+    if not cli_js.is_file():
+        raise RuntimeError("HyperFrames CLI not found. Run npm install.")
+
+    video_only = work / f".final-video-only-{uuid.uuid4().hex[:8]}.mp4"
+    verified_stage = work / f".final-verified-{uuid.uuid4().hex[:8]}.mp4"
+    env = os.environ.copy()
+    media_dirs = [str(find_ffmpeg().parent)]
+    if find_ffprobe() is not None:
+        media_dirs.append(str(find_ffprobe().parent))
+    env["PATH"] = os.pathsep.join(media_dirs + [env.get("PATH", "")])
+    # No --strict: OS font-local declarations and residual GSAP lint must not block
+    # episode delivery (library samples use the same non-strict render path). Engine
+    # timelines still avoid overlapping scaleX / bubble / flame tweens for clean motion.
+    # Same engines as placement preview; --gpu + workers only speed the encode/capture.
+    command = build_placement_final_render_command(
+        node=node,
+        cli_js=cli_js,
+        runtime_root=runtime_root,
+        output_path=video_only,
+        quality=quality,
+    )
+    process: subprocess.Popen[str] | None = None
+    published: Path | None = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(project_root()),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=hidden_subprocess_flags(),
+            env=env,
+        )
+        on_process(process)
+        captured: list[str] = []
+        assert process.stdout is not None
+        for line in process.stdout:
+            if cancel_check():
+                terminate_process_tree(process)
+                raise FinalRenderCanceled("Final render canceled.")
+            captured.append(line)
+            render_percent = _hyperframes_progress_percent(line)
+            if render_percent is not None:
+                value = 40 + round(render_percent * 0.5)
+                progress(min(90, value), "Rendering placement Final frames...")
+        return_code = process.wait()
+        on_process(None)
+        process = None
+        if cancel_check():
+            raise FinalRenderCanceled("Final render canceled.")
+        if return_code != 0 or not video_only.is_file() or video_only.stat().st_size == 0:
+            raise RuntimeError(
+                "HyperFrames Final render failed. " + ("".join(captured)[-1800:])
+            )
+
+        _raise_if_canceled()
+        progress(92, "Attaching locked-cut audio (stream copy, no re-normalize)...")
+        remux_locked_audio(video_only, source_path, verified_stage)
+        _raise_if_canceled()
+        progress(96, "Verifying video duration and locked-cut audio identity...")
+        plan = assembled["plan"]
+        verify_delivered_media(
+            verified_stage,
+            source_path,
+            plan["composition"],
+            full_length=True,
+        )
+        published = publish_verified_render(verified_stage, output_path)
+    except FinalRenderCanceled:
+        if process is not None:
+            terminate_process_tree(process)
+            on_process(None)
+        raise
+    finally:
+        if process is not None:
+            on_process(None)
+        video_only.unlink(missing_ok=True)
+        verified_stage.unlink(missing_ok=True)
+
+    if published is None:
+        raise RuntimeError("Final render did not produce an output path.")
+
+    receipt = {
+        "fingerprint": fingerprint,
+        "quality": quality,
+        "outputPath": str(published),
+        "sourcePath": str(source_path),
+        "sourceSha256": assembled["sourceSha256"],
+        "cueCount": assembled["cueCount"],
+        "placementCount": assembled["placementCount"],
+        "durationSec": full_duration,
+        "renderDurationSec": float(render_duration),
+        "builtAt": datetime.now(timezone.utc).isoformat(),
+        "audio": "locked-cut-stream-copy",
+        "gpu": _placement_final_use_gpu(),
+        "workers": _placement_final_workers(),
+    }
+    receipt_path.write_text(json.dumps(receipt, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    progress(100, "Final video ready.")
+    return {
+        "ok": True,
+        "reused": False,
+        "outputPath": str(published),
+        "fingerprint": fingerprint,
+        "cueCount": assembled["cueCount"],
+        "placementCount": assembled["placementCount"],
+        "durationSec": full_duration,
+        "quality": quality,
+        "receiptPath": str(receipt_path),
     }

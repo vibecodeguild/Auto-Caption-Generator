@@ -17,11 +17,12 @@ dist-*/
 *.spec~
 *.log
 screenshots/
-# Local scratch scripts (often contain absolute user paths).
+# Local scratch scripts (often contain absolute user paths and transcripts).
 tmp_*.py
 tmp_*.json
 /tmp_*.*
 .tmp_*.py
+.tmp-*
 # Local masterbeater / placement diagnostic dumps (paths + transcripts).
 .tmp_mb*
 _mb_*.txt

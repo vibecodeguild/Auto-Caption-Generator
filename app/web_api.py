@@ -44,7 +44,13 @@ from app.core.ffmpeg_runner import extract_audio
 from app.core.project_store import editor_project_document, load_editor_project, save_editor_project
 from app.core.repetition_detection import detect_repeated_word_ids
 from app.core.settings import COMPUTE_OPTIONS, MODEL_OPTIONS, PRESETS, CaptionPreset, CaptionStyle, WordTimestamp, default_style, exports_dir, project_root, temp_dir
-from app.core.splice_generation import DynamicSplice, InvalidCutPlanError, SplicePlan, generate_splices
+from app.core.splice_generation import (
+    DynamicSplice,
+    InvalidCutPlanError,
+    SplicePlan,
+    generate_splices,
+    reconcile_cut_plan_polish,
+)
 from app.core.splice_preview import source_splice_preview_segments
 from app.core.style_library import delete_user_style, is_built_in_style, load_style_library, save_user_style
 from app.core.story_assets import (
@@ -98,7 +104,10 @@ from app.core.assignment import (
 )
 from app.core.placement import (
     build_placement_live_preview,
+    final_job_path_for_project,
+    final_output_path_for_project,
     import_placement_image,
+    render_placement_final_for_video_project,
     run_placement_for_video_project,
     save_placement_beat_for_video_project,
 )
@@ -130,7 +139,7 @@ from app.core.creator_project import (
     verify_live_workflow_package_matches_lock,
 )
 from app.core.file_utils import sha256_file, validate_input_video
-from app.core.video_cutter import frame_intervals_to_seconds, run_cut
+from app.core.video_cutter import CutCanceled, frame_intervals_to_seconds, run_cut
 from app.core.visual_production import (
     active_visual_master,
     active_visual_revision,
@@ -217,6 +226,10 @@ class ApiState:
     placement_preview_entry: Path | None = None
     placement_preview_cache_key: str | None = None
     placement_preview_beat_id: str | None = None
+    placement_final_jobs: dict[str, PlacementFinalJob]
+    placement_final_start_lock: threading.Lock
+    export_cut_jobs: dict[str, ExportCutJob]
+    export_cut_start_lock: threading.Lock
     transcription_jobs: dict[str, TranscriptionJob]
     visual_plan_path: Path | None = None
     visual_plan: dict | None = None
@@ -251,6 +264,10 @@ class ApiState:
         self.placement_preview_entry = None
         self.placement_preview_cache_key = None
         self.placement_preview_beat_id = None
+        self.placement_final_jobs = {}
+        self.placement_final_start_lock = threading.Lock()
+        self.export_cut_jobs = {}
+        self.export_cut_start_lock = threading.Lock()
         self.transcription_jobs = {}
         self.visual_plan_path = None
         self.visual_plan = None
@@ -298,6 +315,304 @@ class TranscriptionJob:
                 "result": self.result,
                 "error": self.error,
             }
+
+
+class PlacementFinalJob:
+    """Background full-episode Final encode for Visual Package Stage 3."""
+
+    def __init__(self, job_id: str, project_root: Path, quality: str = "standard") -> None:
+        self.job_id = job_id
+        self.project_root = project_root.resolve()
+        self.quality = quality
+        self.status = "running"
+        self.value = 0
+        self.stage = "queued"
+        self.message = "Placement Final queued..."
+        self.output_path: str | None = None
+        self.error: str | None = None
+        self.cancel_requested = False
+        self.process: subprocess.Popen[str] | None = None
+        self.started_at = datetime.now(timezone.utc).isoformat()
+        self.updated_at = self.started_at
+        self.started_monotonic = time.monotonic()
+        self.lock = threading.Lock()
+        self._persist()
+
+    @property
+    def state_path(self) -> Path:
+        return final_job_path_for_project(self.project_root)
+
+    def _stage_for(self, value: int, message: str) -> str:
+        lowered = message.lower()
+        if self.status == "canceling":
+            return "canceling"
+        if value >= 100:
+            return "complete"
+        if "verif" in lowered:
+            return "verifying"
+        if "audio" in lowered:
+            return "audio"
+        if "render" in lowered and value >= 40:
+            return "rendering"
+        if "build" in lowered or "assembl" in lowered or "compos" in lowered:
+            return "preparing"
+        return "preparing"
+
+    def _snapshot_unlocked(self) -> dict:
+        elapsed = max(0.0, time.monotonic() - self.started_monotonic)
+        eta = None
+        if self.status == "running" and 0 < self.value < 100:
+            eta = max(0.0, elapsed * (100 - self.value) / self.value)
+        return {
+            "job_id": self.job_id,
+            "project_root": str(self.project_root),
+            "purpose": "placement-final",
+            "quality": self.quality,
+            "status": self.status,
+            "stage": self.stage,
+            "value": self.value,
+            "message": self.message,
+            "output_path": self.output_path,
+            "error": self.error,
+            "cancel_requested": self.cancel_requested,
+            "started_at": self.started_at,
+            "updated_at": self.updated_at,
+            "elapsed_seconds": round(elapsed, 1),
+            "eta_seconds": round(eta, 1) if eta is not None else None,
+        }
+
+    def _persist(self) -> None:
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot = self._snapshot_unlocked()
+            temporary = self.state_path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+            temporary.replace(self.state_path)
+        except OSError:
+            pass
+
+    def update(self, value: int, message: str) -> None:
+        with self.lock:
+            if self.status in {"complete", "failed", "canceled"}:
+                return
+            bounded_value = max(0, min(100, value))
+            if bounded_value == self.value and message == self.message:
+                return
+            self.value = bounded_value
+            self.message = message
+            if self.status != "canceling":
+                self.stage = self._stage_for(self.value, message)
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist()
+
+    def complete(self, output_path: Path) -> None:
+        with self.lock:
+            if self.cancel_requested or self.status in {"canceled", "canceling"}:
+                self.status = "canceled"
+                self.stage = "canceled"
+                self.message = "Final render canceled."
+                self.error = None
+                self.updated_at = datetime.now(timezone.utc).isoformat()
+                self._persist()
+                return
+            self.status = "complete"
+            self.value = 100
+            self.stage = "complete"
+            self.message = "Final video ready."
+            self.output_path = str(output_path)
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist()
+
+    def fail(self, error: str) -> None:
+        with self.lock:
+            if self.cancel_requested or self.status in {"canceled", "canceling"}:
+                self.status = "canceled"
+                self.stage = "canceled"
+                self.message = "Final render canceled."
+                self.error = None
+                self.updated_at = datetime.now(timezone.utc).isoformat()
+                self._persist()
+                return
+            self.status = "failed"
+            self.stage = "failed"
+            self.error = error
+            self.message = error
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist()
+
+    def is_cancel_requested(self) -> bool:
+        with self.lock:
+            return self.cancel_requested
+
+    def attach_process(self, process: subprocess.Popen[str] | None) -> None:
+        with self.lock:
+            self.process = process
+
+    def request_cancel(self) -> dict:
+        """Ask the worker to stop and kill the HyperFrames process tree if running."""
+
+        from app.core.process_utils import terminate_process_tree
+
+        with self.lock:
+            if self.status in {"complete", "failed", "canceled"}:
+                return self._snapshot_unlocked()
+            self.cancel_requested = True
+            self.status = "canceling"
+            self.stage = "canceling"
+            self.message = "Canceling Final render…"
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+            process = self.process
+            self._persist()
+        if process is not None:
+            terminate_process_tree(process)
+        with self.lock:
+            return self._snapshot_unlocked()
+
+    def mark_canceled(self) -> None:
+        with self.lock:
+            self.status = "canceled"
+            self.stage = "canceled"
+            self.message = "Final render canceled."
+            self.error = None
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist()
+
+    def snapshot(self, job_id: str | None = None) -> dict:
+        del job_id
+        with self.lock:
+            return self._snapshot_unlocked()
+
+
+class ExportCutJob:
+    """Background Stage 5 cut export (optional audio normalize) with cancel."""
+
+    def __init__(self, job_id: str, *, normalize_audio: bool) -> None:
+        self.job_id = job_id
+        self.normalize_audio = normalize_audio
+        self.status = "running"
+        self.value = 0
+        self.stage = "queued"
+        self.message = "Export queued..."
+        self.output_path: str | None = None
+        self.cut_output_path: str | None = None
+        self.normalized = False
+        self.error: str | None = None
+        self.cancel_requested = False
+        self.process: subprocess.Popen[str] | None = None
+        self.started_at = datetime.now(timezone.utc).isoformat()
+        self.updated_at = self.started_at
+        self.started_monotonic = time.monotonic()
+        self.lock = threading.Lock()
+
+    def _snapshot_unlocked(self) -> dict:
+        elapsed = max(0.0, time.monotonic() - self.started_monotonic)
+        eta = None
+        if self.status == "running" and 0 < self.value < 100:
+            eta = max(0.0, elapsed * (100 - self.value) / self.value)
+        return {
+            "job_id": self.job_id,
+            "purpose": "export-cut",
+            "normalize_audio": self.normalize_audio,
+            "status": self.status,
+            "stage": self.stage,
+            "value": self.value,
+            "message": self.message,
+            "output_path": self.output_path,
+            "cut_output_path": self.cut_output_path,
+            "normalized": self.normalized,
+            "error": self.error,
+            "cancel_requested": self.cancel_requested,
+            "started_at": self.started_at,
+            "updated_at": self.updated_at,
+            "elapsed_seconds": round(elapsed, 1),
+            "eta_seconds": round(eta, 1) if eta is not None else None,
+        }
+
+    def update(self, value: int, message: str, *, stage: str | None = None) -> None:
+        with self.lock:
+            if self.status in {"complete", "failed", "canceled"}:
+                return
+            self.value = max(0, min(100, value))
+            self.message = message
+            if stage:
+                self.stage = stage
+            elif self.status == "canceling":
+                self.stage = "canceling"
+            elif value >= 90:
+                self.stage = "finishing"
+            elif "normal" in message.lower():
+                self.stage = "normalizing"
+            elif "cut" in message.lower() or "export" in message.lower():
+                self.stage = "cutting"
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def complete(self, *, output_path: Path, cut_output_path: Path, normalized: bool) -> None:
+        with self.lock:
+            if self.cancel_requested:
+                self.status = "canceled"
+                self.stage = "canceled"
+                self.message = "Export canceled."
+                self.error = None
+            else:
+                self.status = "complete"
+                self.value = 100
+                self.stage = "complete"
+                self.message = "Export complete."
+                self.output_path = str(output_path)
+                self.cut_output_path = str(cut_output_path)
+                self.normalized = normalized
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def fail(self, error: str) -> None:
+        with self.lock:
+            if self.cancel_requested:
+                self.status = "canceled"
+                self.stage = "canceled"
+                self.message = "Export canceled."
+                self.error = None
+            else:
+                self.status = "failed"
+                self.stage = "failed"
+                self.error = error
+                self.message = error
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def is_cancel_requested(self) -> bool:
+        with self.lock:
+            return self.cancel_requested
+
+    def attach_process(self, process: subprocess.Popen[str] | None) -> None:
+        with self.lock:
+            self.process = process
+
+    def request_cancel(self) -> dict:
+        from app.core.process_utils import terminate_process_tree
+
+        with self.lock:
+            if self.status in {"complete", "failed", "canceled"}:
+                return self._snapshot_unlocked()
+            self.cancel_requested = True
+            self.status = "canceling"
+            self.stage = "canceling"
+            self.message = "Canceling export…"
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+            process = self.process
+        if process is not None:
+            terminate_process_tree(process)
+        with self.lock:
+            return self._snapshot_unlocked()
+
+    def mark_canceled(self) -> None:
+        with self.lock:
+            self.status = "canceled"
+            self.stage = "canceled"
+            self.message = "Export canceled."
+            self.error = None
+            self.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return self._snapshot_unlocked()
 
 
 class VisualRenderJob:
@@ -522,7 +837,8 @@ class EditorSettingsRequest(BaseModel):
 
 class ExportCutRequest(BaseModel):
     output_path: str | None = None
-    normalize_audio: bool = False
+    # Product default: normalize on export (UI also defaults the checkbox on).
+    normalize_audio: bool = True
     normalization_preset_id: str = "gentle"
     target_i: float = -14.0
     target_lra: float = 7.0
@@ -1037,6 +1353,8 @@ def visual_package_run_placement() -> dict:
         return run_placement_for_video_project(active[0], active[1])
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1194,6 +1512,207 @@ def visual_package_save_placement_beat(payload: dict = Body(...)) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _run_placement_final_job(
+    job: PlacementFinalJob,
+    manifest_path: Path,
+    manifest: dict,
+    quality: str,
+    force: bool,
+) -> None:
+    from app.core.placement import FinalRenderCanceled
+
+    try:
+        result = render_placement_final_for_video_project(
+            manifest_path,
+            manifest,
+            quality=quality,
+            force=force,
+            progress=job.update,
+            cancel_check=job.is_cancel_requested,
+            on_process=job.attach_process,
+        )
+        if job.is_cancel_requested():
+            job.mark_canceled()
+            return
+        job.complete(Path(str(result["outputPath"])))
+    except FinalRenderCanceled:
+        job.mark_canceled()
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+        if job.is_cancel_requested():
+            job.mark_canceled()
+        else:
+            job.fail(str(exc))
+    except Exception as exc:  # noqa: BLE001 — surface unexpected render failures to the job
+        if job.is_cancel_requested():
+            job.mark_canceled()
+        else:
+            job.fail(f"{type(exc).__name__}: {exc}")
+
+
+@app.post("/api/visual-package/placement/final")
+def visual_package_start_placement_final(payload: dict = Body(default={})) -> dict:
+    """Start full-episode Final encode when every assigned placement is locked.
+
+    Stream-copies locked-cut audio (no second normalize). Duplicate starts reconnect
+    to the in-flight job for this project. Existing final-video.mp4 is overwritten
+    (force defaults True) — receipt reuse never blocks Stage 3 Final.
+    """
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    manifest_path, manifest = active
+    root = video_project_root(manifest_path)
+    quality = str((payload or {}).get("quality") or "standard").strip().lower() or "standard"
+    if quality not in {"draft", "standard", "high"}:
+        raise HTTPException(status_code=400, detail="quality must be draft, standard, or high.")
+    # Stage 3 Final always force-rebuilds unless an explicit force:false is sent.
+    force_raw = (payload or {}).get("force")
+    force = True if force_raw is None else bool(force_raw)
+
+    with state.placement_final_start_lock:
+        running = next(
+            (
+                job
+                for job in state.placement_final_jobs.values()
+                if job.project_root == root.resolve()
+                and job.status in {"running", "canceling"}
+            ),
+            None,
+        )
+        if running is not None:
+            return {"ok": True, "reconnected": True, "job": running.snapshot()}
+
+        job_path = final_job_path_for_project(root)
+        if job_path.is_file():
+            try:
+                persisted = json.loads(job_path.read_text(encoding="utf-8"))
+                if persisted.get("status") in {"running", "canceling"}:
+                    persisted.update(
+                        {
+                            "status": "failed",
+                            "stage": "failed",
+                            "error": (
+                                "The application restarted before this Final completed. "
+                                "Start Final again."
+                            ),
+                            "message": (
+                                "The application restarted before this Final completed. "
+                                "Start Final again."
+                            ),
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                    job_path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        job_id = uuid.uuid4().hex
+        job = PlacementFinalJob(job_id, root, quality=quality)
+        state.placement_final_jobs[job_id] = job
+        thread = threading.Thread(
+            target=_run_placement_final_job,
+            args=(job, manifest_path, manifest, quality, force),
+            daemon=True,
+            name=f"placement-final-{job_id[:8]}",
+        )
+        thread.start()
+        return {"ok": True, "reconnected": False, "job": job.snapshot()}
+
+
+@app.get("/api/visual-package/placement/final/active")
+def visual_package_active_placement_final() -> dict:
+    """Return the active or last persisted Final job for the open project."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    root = video_project_root(active[0]).resolve()
+    running = next(
+        (
+            job
+            for job in reversed(list(state.placement_final_jobs.values()))
+            if job.project_root == root and job.status in {"running", "canceling"}
+        ),
+        None,
+    )
+    if running is not None:
+        return {"job": running.snapshot()}
+    latest = next(
+        (
+            job
+            for job in reversed(list(state.placement_final_jobs.values()))
+            if job.project_root == root
+        ),
+        None,
+    )
+    if latest is not None:
+        return {"job": latest.snapshot()}
+
+    job_path = final_job_path_for_project(root)
+    if not job_path.is_file():
+        return {"job": None}
+    try:
+        persisted = json.loads(job_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"job": None}
+    if persisted.get("status") in {"running", "canceling"}:
+        persisted.update(
+            {
+                "status": "failed",
+                "stage": "failed",
+                "error": "The application restarted before this Final completed. Start Final again.",
+                "message": "The application restarted before this Final completed. Start Final again.",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        try:
+            job_path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+    return {"job": persisted}
+
+
+@app.get("/api/visual-package/placement/final/jobs/{job_id}")
+def visual_package_placement_final_job(job_id: str) -> dict:
+    job = state.placement_final_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Placement Final job not found.")
+    return job.snapshot()
+
+
+@app.post("/api/visual-package/placement/final/jobs/{job_id}/cancel")
+def visual_package_cancel_placement_final(job_id: str) -> dict:
+    """Cancel an in-flight Final encode (kills HyperFrames/Chrome worker tree)."""
+
+    job = state.placement_final_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Placement Final job not found.")
+    snapshot = job.request_cancel()
+    return {"ok": True, "job": snapshot}
+
+
+@app.get("/api/visual-package/placement/final/jobs/{job_id}/video")
+def visual_package_placement_final_video(
+    job_id: str,
+    range_header: str | None = Header(default=None, alias="Range"),
+) -> Response:
+    job = state.placement_final_jobs.get(job_id)
+    if job is None:
+        # Fall back to published path when process restarted but file exists.
+        active = _active_video_project()
+        if active is None:
+            raise HTTPException(status_code=404, detail="Placement Final job not found.")
+        output = final_output_path_for_project(video_project_root(active[0]))
+        if not output.is_file():
+            raise HTTPException(status_code=404, detail="Placement Final job not found.")
+        return _range_response(output, range_header)
+    snapshot = job.snapshot()
+    if snapshot["status"] != "complete" or not snapshot.get("output_path"):
+        raise HTTPException(status_code=409, detail="Placement Final is not complete.")
+    return _range_response(Path(snapshot["output_path"]), range_header)
 
 
 @app.get("/api/visual-package/source-video")
@@ -1629,6 +2148,25 @@ def remove_manual_cut(cut_id: str) -> dict:
     return _project_response()
 
 
+@app.delete("/api/projects/current/splices/{anchor_key:path}")
+def remove_splice(anchor_key: str) -> dict:
+    """Undo a Stage 4 splice: drop a manual cut, or restore the deleted gap for a transcript cut."""
+
+    project = _require_project()
+    previous_edits = copy.deepcopy(state.edits)
+    try:
+        _remove_splice_edits(project, anchor_key)
+        generate_splices(project, state.edits)
+    except KeyError as exc:
+        state.edits = previous_edits
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidCutPlanError as exc:
+        state.edits = previous_edits
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _save_current_project_if_loaded(project)
+    return _project_response()
+
+
 @app.post("/api/projects/current/final-out-frame")
 def set_final_out_frame(payload: FinalOutFrameRequest) -> dict:
     project = _require_project()
@@ -1643,8 +2181,56 @@ def set_final_out_frame(payload: FinalOutFrameRequest) -> dict:
     return _project_response()
 
 
+def _live_cut_preview_payload(project: TranscriptProject) -> dict:
+    """EDL plan for CapCut-style Stage 4 playback (no FFmpeg bake)."""
+
+    try:
+        plan = generate_splices(project, state.edits)
+    except InvalidCutPlanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    frame_intervals = plan.export_intervals()
+    if not frame_intervals:
+        raise HTTPException(status_code=400, detail="No kept intervals to preview.")
+    segments = _rendered_preview_segments(plan, project)
+    duration = float(segments[-1]["preview_end_seconds"]) if segments else 0.0
+    # Fingerprint so the client remounts when the EDL changes.
+    import hashlib
+
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "segments": segments,
+                "splices": [
+                    (s.anchor_key, s.left_out_frame, s.right_in_frame) for s in plan.splices
+                ],
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "preview_id": f"live-{fingerprint}",
+        "mode": "live",
+        "duration_seconds": round(duration, 3),
+        "splices": _rendered_preview_splices(plan, project),
+        "segments": segments,
+    }
+
+
+@app.get("/api/projects/current/live-cut-preview")
+def live_cut_preview() -> dict:
+    """Instant cut timeline plan for Stage 4 — seek source ranges, no re-encode."""
+
+    project = _require_project()
+    source = Path(project.source).expanduser().resolve()
+    if not source.exists():
+        raise HTTPException(status_code=400, detail=f"Source video not found: {source}")
+    return _live_cut_preview_payload(project)
+
+
 @app.post("/api/projects/current/render-preview")
 def render_cut_preview() -> dict:
+    """Legacy full-bake draft (optional). Stage 4 product path is live-cut-preview."""
+
     project = _require_project()
     source = Path(project.source).expanduser().resolve()
     if not source.exists():
@@ -1683,6 +2269,7 @@ def render_cut_preview() -> dict:
     state.rendered_cut_preview_path = output_path
     return {
         "preview_id": preview_id,
+        "mode": "baked",
         "duration_seconds": round(sum(end - start for start, end in intervals), 3),
         "splices": _rendered_preview_splices(plan, project),
         "segments": _rendered_preview_segments(plan, project),
@@ -1713,24 +2300,23 @@ def project_document() -> dict:
     }
 
 
-@app.post("/api/projects/current/export")
-def export_cut(payload: ExportCutRequest) -> dict:
+def _execute_export_cut(job: ExportCutJob, payload: ExportCutRequest) -> None:
     project = _require_project()
     source = Path(project.source)
     if not source.exists():
-        raise HTTPException(status_code=400, detail=f"Source video not found: {source}")
+        raise RuntimeError(f"Source video not found: {source}")
     try:
         plan = generate_splices(project, state.edits)
     except InvalidCutPlanError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise RuntimeError(str(exc)) from exc
     intervals = plan.export_intervals()
     if not intervals:
-        raise HTTPException(status_code=400, detail="No kept intervals to export.")
+        raise RuntimeError("No kept intervals to export.")
     if payload.normalize_audio:
         _validate_audio_targets(payload)
         valid_preset_ids = {preset["id"] for preset in preset_options()}
         if payload.normalization_preset_id not in valid_preset_ids:
-            raise HTTPException(status_code=400, detail=f"Unknown audio preset: {payload.normalization_preset_id}")
+            raise RuntimeError(f"Unknown audio preset: {payload.normalization_preset_id}")
     project_locked_cut = _video_project_stage_path("lockedCut")
     requested_output = Path(payload.output_path).expanduser().resolve() if payload.output_path else None
     final_cut_path = requested_output or project_locked_cut or (exports_dir() / f"{source.stem}_cut.mp4")
@@ -1738,12 +2324,25 @@ def export_cut(payload: ExportCutRequest) -> dict:
     if payload.normalize_audio and project_locked_cut is not None and requested_output is None:
         output_path = video_project_root(state.video_project_path) / "working" / "cut-unmastered.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def cut_progress(fraction: float) -> None:
+        # Cut is 5–85% when normalizing, 5–95% otherwise.
+        top = 85 if payload.normalize_audio else 95
+        job.update(5 + int(max(0.0, min(1.0, fraction)) * (top - 5)), "Exporting cut with FFmpeg…")
+
+    job.update(5, "Exporting cut with FFmpeg…", stage="cutting")
     run_cut(
         ffmpeg=find_ffmpeg(),
         input_video=source,
         output_video=output_path,
         intervals=frame_intervals_to_seconds(intervals, project.fps),
+        progress_callback=cut_progress,
+        cancel_check=job.is_cancel_requested,
+        on_process=job.attach_process,
     )
+    if job.is_cancel_requested():
+        raise CutCanceled("Export canceled.")
+
     if not payload.normalize_audio:
         state.caption_video_path = output_path
         state.audio_video_path = output_path
@@ -1755,37 +2354,40 @@ def export_cut(payload: ExportCutRequest) -> dict:
             measurement=None,
         )
         _save_final_transcript(project, plan, output_path)
-        return {
-            "output_path": str(output_path),
-            "cut_output_path": str(output_path),
-            "normalized": False,
-        }
+        job.complete(output_path=output_path, cut_output_path=output_path, normalized=False)
+        return
 
-    normalized_output_path = final_cut_path if output_path != final_cut_path else output_path.with_name(f"{output_path.stem}_normalized{output_path.suffix}")
-    try:
-        measurement = analyze_audio(
-            ffmpeg=find_ffmpeg(),
-            input_video=output_path,
-            preset_id=payload.normalization_preset_id,
-            target_i=payload.target_i,
-            target_lra=payload.target_lra,
-            target_tp=payload.target_tp,
-        )
-        normalize_video_audio(
-            ffmpeg=find_ffmpeg(),
-            input_video=output_path,
-            output_video=normalized_output_path,
-            preset_id=payload.normalization_preset_id,
-            measurement=measurement,
-            target_i=payload.target_i,
-            target_lra=payload.target_lra,
-            target_tp=payload.target_tp,
-        )
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"The cut was exported successfully to {output_path}, but audio normalization failed: {exc}",
-        ) from exc
+    job.update(88, "Analyzing loudness for normalize…", stage="normalizing")
+    if job.is_cancel_requested():
+        raise CutCanceled("Export canceled.")
+    normalized_output_path = (
+        final_cut_path
+        if output_path != final_cut_path
+        else output_path.with_name(f"{output_path.stem}_normalized{output_path.suffix}")
+    )
+    measurement = analyze_audio(
+        ffmpeg=find_ffmpeg(),
+        input_video=output_path,
+        preset_id=payload.normalization_preset_id,
+        target_i=payload.target_i,
+        target_lra=payload.target_lra,
+        target_tp=payload.target_tp,
+    )
+    if job.is_cancel_requested():
+        raise CutCanceled("Export canceled.")
+    job.update(92, "Normalizing audio…", stage="normalizing")
+    normalize_video_audio(
+        ffmpeg=find_ffmpeg(),
+        input_video=output_path,
+        output_video=normalized_output_path,
+        preset_id=payload.normalization_preset_id,
+        measurement=measurement,
+        target_i=payload.target_i,
+        target_lra=payload.target_lra,
+        target_tp=payload.target_tp,
+    )
+    if job.is_cancel_requested():
+        raise CutCanceled("Export canceled.")
     state.caption_video_path = normalized_output_path
     state.audio_video_path = normalized_output_path
     _record_audio_delivery(
@@ -1796,11 +2398,83 @@ def export_cut(payload: ExportCutRequest) -> dict:
         measurement=measurement,
     )
     _save_final_transcript(project, plan, normalized_output_path)
-    return {
-        "output_path": str(normalized_output_path),
-        "cut_output_path": str(output_path),
-        "normalized": True,
-    }
+    job.complete(
+        output_path=normalized_output_path,
+        cut_output_path=output_path,
+        normalized=True,
+    )
+
+
+def _run_export_cut_job(job: ExportCutJob, payload: ExportCutRequest) -> None:
+    try:
+        _execute_export_cut(job, payload)
+        if job.is_cancel_requested():
+            job.mark_canceled()
+    except CutCanceled:
+        job.mark_canceled()
+    except Exception as exc:  # noqa: BLE001
+        if job.is_cancel_requested():
+            job.mark_canceled()
+        else:
+            job.fail(str(exc))
+
+
+@app.post("/api/projects/current/export")
+def export_cut(payload: ExportCutRequest) -> dict:
+    """Start Stage 5 cut export as a background job (cancelable)."""
+
+    _require_project()
+    if payload.normalize_audio:
+        try:
+            _validate_audio_targets(payload)
+        except HTTPException:
+            raise
+        valid_preset_ids = {preset["id"] for preset in preset_options()}
+        if payload.normalization_preset_id not in valid_preset_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown audio preset: {payload.normalization_preset_id}",
+            )
+
+    with state.export_cut_start_lock:
+        running = next(
+            (
+                job
+                for job in state.export_cut_jobs.values()
+                if job.status in {"running", "canceling"}
+            ),
+            None,
+        )
+        if running is not None:
+            return {"ok": True, "reconnected": True, "job": running.snapshot()}
+
+        job_id = uuid.uuid4().hex
+        job = ExportCutJob(job_id, normalize_audio=payload.normalize_audio)
+        state.export_cut_jobs[job_id] = job
+        thread = threading.Thread(
+            target=_run_export_cut_job,
+            args=(job, payload),
+            daemon=True,
+            name=f"export-cut-{job_id[:8]}",
+        )
+        thread.start()
+        return {"ok": True, "reconnected": False, "job": job.snapshot()}
+
+
+@app.get("/api/projects/current/export/jobs/{job_id}")
+def export_cut_job(job_id: str) -> dict:
+    job = state.export_cut_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Export job not found.")
+    return job.snapshot()
+
+
+@app.post("/api/projects/current/export/jobs/{job_id}/cancel")
+def cancel_export_cut_job(job_id: str) -> dict:
+    job = state.export_cut_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Export job not found.")
+    return {"ok": True, "job": job.request_cancel()}
 
 
 def _require_visual_plan() -> tuple[Path, dict]:
@@ -3983,7 +4657,15 @@ def _project_response(
     pause_analysis_summary: dict[str, int] | None = None,
 ) -> dict:
     project = _require_project()
-    plan = generate_splices(project, state.edits)
+    # Stage 3 delete/restore can strand Stage 4 manual cuts / final OUT. Drop those
+    # polish decisions so the editor never hard-locks after returning from Stage 4.
+    polish = reconcile_cut_plan_polish(project, state.edits)
+    if polish.get("changed"):
+        _save_current_project_if_loaded(project)
+    try:
+        plan = generate_splices(project, state.edits)
+    except InvalidCutPlanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     deleted_word_ids = _deleted_word_ids(project)
     deleted_silence_ids = _deleted_silence_ids()
     dead_space_candidate_count = sum(
@@ -4031,6 +4713,10 @@ def _project_response(
         "settings": asdict(state.edits.settings),
         "dead_space_candidate_count": dead_space_candidate_count,
         "pause_analysis_pending_count": pause_analysis_pending_count,
+        "cut_plan_reconciliation": {
+            "dropped_manual_cut_ids": list(polish.get("droppedManualCutIds") or []),
+            "cleared_final_out_frame": bool(polish.get("clearedFinalOutFrame")),
+        },
         "fine_tune_summary": fine_tune_summary,
         "pause_analysis_summary": pause_analysis_summary,
         "splices": [_splice_dict(splice, project.fps) for splice in plan.splices],
@@ -4080,6 +4766,57 @@ def _splice_dict(splice: DynamicSplice, fps: float) -> dict:
     data["preview_segments_4s"] = source_splice_preview_segments(splice, fps=fps, seconds=4)
     data["preview_segments_6s"] = source_splice_preview_segments(splice, fps=fps, seconds=6)
     return data
+
+
+def _remove_splice_edits(project: TranscriptProject, anchor_key: str) -> None:
+    """Drop the edit decisions that produce a single Stage 4 splice."""
+
+    if anchor_key.startswith("MANUAL:"):
+        state.edits.remove_manual_cut(anchor_key.removeprefix("MANUAL:"))
+        return
+
+    plan = generate_splices(project, state.edits)
+    splice = next((item for item in plan.splices if item.anchor_key == anchor_key), None)
+    if splice is None:
+        raise KeyError(f"Unknown splice: {anchor_key}")
+
+    deleted_words = _deleted_word_ids(project)
+    deleted_silences = _deleted_silence_ids()
+
+    if splice.kind == "front_trim":
+        right_index = project.word_index(splice.right_word_id)
+        if right_index > 0:
+            leading = project.words[:right_index]
+            if any(word.id in deleted_words for word in leading):
+                state.edits.restore_word_selection(leading[0].id, leading[-1].id)
+        right_word = project.word_by_id(splice.right_word_id)
+        for silence in project.silence_ranges:
+            if silence.id in deleted_silences and silence.end_frame < right_word.start_frame:
+                state.edits.restore_silence(silence.id)
+    else:
+        left_index = project.word_index(splice.left_word_id)
+        right_index = project.word_index(splice.right_word_id)
+        if right_index > left_index + 1:
+            middle = project.words[left_index + 1 : right_index]
+            if any(word.id in deleted_words for word in middle):
+                state.edits.restore_word_selection(middle[0].id, middle[-1].id)
+        left_word = project.word_by_id(splice.left_word_id)
+        right_word = project.word_by_id(splice.right_word_id)
+        restored_silences: set[str] = set()
+        for silence in project.silence_ranges:
+            if silence.id not in deleted_silences or silence.id in restored_silences:
+                continue
+            midpoint = (silence.start_frame + silence.end_frame) / 2
+            in_gap = left_word.end_frame < midpoint < right_word.start_frame
+            fully_between = (
+                silence.start_frame >= left_word.end_frame
+                and silence.end_frame <= right_word.start_frame
+            )
+            if in_gap or fully_between:
+                state.edits.restore_silence(silence.id)
+                restored_silences.add(silence.id)
+
+    state.edits.splice_adjustments.pop(anchor_key, None)
 
 
 def _partition_token_ids(project: TranscriptProject, token_ids: list[str]) -> tuple[list[str], list[str]]:

@@ -147,7 +147,7 @@ def beat_parameters(beat: dict, binding: EngineBinding) -> dict[str, Any]:
             "region": beat.get("uiRegion")
             or {"x": 0.12, "y": 0.2, "width": 0.38, "height": 0.2},
         }
-    if "prompt" in engine_id or engine_id == "windows-prompt-typing":
+    if "prompt" in engine_id or engine_id in {"windows-prompt-typing", "windows-prompt-overlay"}:
         return {"text": text or "prompt"}
     return {"text": text or "Emphasis"}
 

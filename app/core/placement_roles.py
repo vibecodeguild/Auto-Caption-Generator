@@ -24,6 +24,7 @@ from app.core.visual_production import (
     ENGINE_REGISTRY,
     MODULE_IDS,
     MODULE_PARAMETER_KEYS,
+    canonicalize_engine_id,
 )
 
 # --- Line unit ----------------------------------------------------------------
@@ -102,7 +103,9 @@ def assert_specs_cover_all_engines() -> None:
 
 
 def get_engine_placement_spec(engine_id: str) -> dict[str, Any]:
-    eid = str(engine_id or "").strip()
+    # Retired engines (e.g. speaker-side-panel → dependency-stack) resolve here so
+    # Place / status never KeyError on persisted episode drafts.
+    eid = canonicalize_engine_id(str(engine_id or "").strip())
     if eid not in ENGINE_REGISTRY:
         raise KeyError(f"No placement spec for engine {eid!r}")
     return _derived_spec(eid)
@@ -189,10 +192,11 @@ def lines_to_engine_parameters(
 def placement_interface_summary(engine_id: str) -> dict[str, Any]:
     """UI-facing summary for one engine."""
 
-    spec = get_engine_placement_spec(engine_id)
-    fixed, list_slot, list_min, list_max = list_fixed_and_list_slots(engine_id)
+    live_id = canonicalize_engine_id(str(engine_id or "").strip())
+    spec = get_engine_placement_spec(live_id)
+    fixed, list_slot, list_min, list_max = list_fixed_and_list_slots(live_id)
     return {
-        "engineId": engine_id,
+        "engineId": live_id,
         "fixedLineSlots": fixed,
         "listSlot": list_slot,
         "listMin": list_min,

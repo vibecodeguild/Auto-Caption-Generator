@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.core.edit_decisions import EditDecisionList
-from app.core.splice_generation import InvalidCutPlanError, generate_splices
+from app.core.splice_generation import InvalidCutPlanError, generate_splices, reconcile_cut_plan_polish
 from app.core.transcript_model import SilenceRange, TranscriptProject, TranscriptWord
 
 
@@ -231,3 +231,55 @@ def test_manual_cut_cannot_overlap_an_existing_cut() -> None:
 
     with pytest.raises(InvalidCutPlanError, match="cannot overlap"):
         generate_splices(_project(), edits)
+
+
+def test_reconcile_drops_manual_cut_stranded_by_later_transcript_split() -> None:
+    """Stage 4 manual cuts inside a continuous keep must not lock Stage 3 edits.
+
+    Example: place a cut in a pause, then delete that pause as dead space — the cut
+    no longer sits inside one kept section. Reconcile drops it so restore/delete work.
+    """
+
+    edits = EditDecisionList()
+    edits.add_manual_cut("manual_pause", 55, 60)
+    assert generate_splices(_project(), edits).export_intervals() == [(0, 55), (60, 90)]
+
+    edits.delete_silence("delete_s1", "s1")
+    with pytest.raises(InvalidCutPlanError, match="cannot overlap|must stay inside"):
+        generate_splices(_project(), edits)
+
+    report = reconcile_cut_plan_polish(_project(), edits)
+    assert report["changed"] is True
+    assert report["droppedManualCutIds"] == ["manual_pause"]
+    assert edits.manual_cuts == []
+    plan = generate_splices(_project(), edits)
+    assert [(item.start_word_id, item.end_word_id) for item in plan.kept_ranges] == [
+        ("w1", "w5"),
+        ("w6", "w7"),
+    ]
+
+
+def test_reconcile_keeps_manual_cuts_that_still_fit() -> None:
+    edits = EditDecisionList()
+    edits.add_manual_cut("manual_1", 20, 30)
+    edits.delete_words("delete_tail", "w7", "w7", reason="selection")
+
+    report = reconcile_cut_plan_polish(_project(), edits)
+    assert report["changed"] is False
+    assert edits.manual_cuts[0].id == "manual_1"
+    assert generate_splices(_project(), edits).export_intervals() == [(0, 20), (30, 79)]
+
+
+def test_reconcile_clears_final_out_that_reincludes_deleted_trailing_words() -> None:
+    edits = EditDecisionList()
+    edits.delete_words("delete_outro", "w7", "w7", reason="selection")
+    edits.set_final_out_frame(85)
+
+    with pytest.raises(InvalidCutPlanError, match="deleted trailing content"):
+        generate_splices(_project(), edits)
+
+    report = reconcile_cut_plan_polish(_project(), edits)
+    assert report["changed"] is True
+    assert report["clearedFinalOutFrame"] is True
+    assert edits.final_out_frame is None
+    assert generate_splices(_project(), edits).export_intervals() == [(0, 79)]

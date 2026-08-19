@@ -412,7 +412,7 @@ See §2. Summary after pushback lock-in:
 | `golden` = usage status only; production = golden usages | **Approved** |
 | Usage **has-a** engine (`engineId`) — **not** identity-coupled (OOP composition) | **Approved** |
 | Engine interface = content + **declared** timing channels only | **Approved** |
-| Placement supplies instance content + timing values (later; future Shane + Grok) | **Approved** |
+| Placement supplies instance content + timing values (later; future placement + engine work) | **Approved** |
 | Usage thin; no stored param schema; UI passthrough from engine | **Approved** |
 | Layout eligibility = creator-owned usage contract vs engine draw region | **Approved** |
 | Sample = exact production engine (no parallel renderer) | **Approved** |

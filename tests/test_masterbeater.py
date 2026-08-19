@@ -69,6 +69,17 @@ def test_extract_words_frame_first() -> None:
     assert words[0]["id"] == "w1"
     assert words[0]["startFrame"] == 0
     assert words[0]["endFrameExclusive"] == 15
+    assert words[0]["sentenceId"] == 0
+
+
+def test_extract_words_includes_sentence_id() -> None:
+    document = _sample_document()
+    document["project"]["words"][0]["sentence_id"] = 1
+    document["project"]["words"][1]["sentence_id"] = 1
+    document["project"]["words"][2]["sentence_id"] = 2
+    document["project"]["words"][3]["sentence_id"] = 2
+    words = extract_words(document)
+    assert [word["sentenceId"] for word in words] == [1, 1, 2, 2]
 
 
 def test_resolve_word_span_builds_frames_and_text() -> None:
@@ -247,6 +258,124 @@ def test_save_masterbeater_edits_writes_reviewed_not_original(tmp_path: Path) ->
     assert entry["wordText"] == "PowerPoint"
     assert entry["before"]["endWordId"] == "w4"
     assert entry["after"]["endWordId"] == "w3"
+
+
+def test_save_masterbeater_manual_first_without_agent_run(tmp_path: Path) -> None:
+    """Human can author Stage 1 without running Masterbeater; first save seeds baseline."""
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / ".vcg-private").write_text("private\n", encoding="utf-8")
+    transcript = root / "final-transcript.json"
+    document = _sample_document()
+    transcript.write_text(json.dumps(document), encoding="utf-8")
+    manifest_path = root / "manifest.json"
+    manifest = {
+        "paths": {
+            "finalTranscript": "final-transcript.json",
+            "lockedCut": "locked.mp4",
+            "sourceVideo": "source.mp4",
+        }
+    }
+    assert load_masterbeater_output(root) is None
+
+    first = save_masterbeater_edits_for_video_project(
+        manifest_path,
+        manifest,
+        {
+            "mode": "tutorial",
+            "beats": [
+                {
+                    "id": "b-manual-1",
+                    "beatType": "hook",
+                    "startWordId": "w1",
+                    "endWordId": "w2",
+                    "rationale": "Human placed.",
+                }
+            ],
+            "edit": {
+                "op": "addBeat",
+                "beatId": "b-manual-1",
+                "wordText": "Soul-crushing jobs",
+            },
+        },
+    )
+    assert first["ok"] is True
+    assert first["seededManualBaseline"] is True
+    assert first["manualSeed"] is True
+    assert first["beatCount"] == 1
+    assert (root / OUTPUT_FILENAME).is_file()
+    assert (root / REVIEWED_FILENAME).is_file()
+    original = load_masterbeater_output(root)
+    assert original is not None
+    assert original["agent"] == "masterbeater-manual"
+    assert original["manualSeed"] is True
+    assert original["beats"][0]["endWordId"] == "w2"
+    original_before = json.loads((root / OUTPUT_FILENAME).read_text(encoding="utf-8"))
+
+    # Second edit extends the beat; baseline original stays frozen.
+    second = save_masterbeater_edits_for_video_project(
+        manifest_path,
+        manifest,
+        {
+            "mode": "tutorial",
+            "beats": [
+                {
+                    "id": "b-manual-1",
+                    "beatType": "hook",
+                    "startWordId": "w1",
+                    "endWordId": "w4",
+                    "rationale": "Human placed.",
+                }
+            ],
+            "edit": {
+                "op": "addWord",
+                "beatId": "b-manual-1",
+                "wordId": "w4",
+            },
+        },
+    )
+    assert second["ok"] is True
+    assert second.get("seededManualBaseline") is False
+    assert second["beats"][0]["endWordId"] == "w4"
+    original_after = json.loads((root / OUTPUT_FILENAME).read_text(encoding="utf-8"))
+    assert original_after == original_before
+    reviewed = load_masterbeater_reviewed(root)
+    assert reviewed is not None
+    assert reviewed["beats"][0]["endWordId"] == "w4"
+    ledger = load_masterbeater_ledger(root)
+    assert ledger["entryCount"] == 2
+
+
+def test_normalize_sorts_beats_by_transcript_timeline() -> None:
+    """Split/merge used to append siblings at array end — store in time order."""
+    document = _sample_document()
+    result = normalize_masterbeater_result(
+        {
+            "mode": "tutorial",
+            "beats": [
+                {
+                    "id": "late",
+                    "beatType": "context",
+                    "startWordId": "w3",
+                    "endWordId": "w4",
+                    "rationale": "Later speech.",
+                },
+                {
+                    "id": "early",
+                    "beatType": "hook",
+                    "startWordId": "w1",
+                    "endWordId": "w2",
+                    "rationale": "Earlier speech.",
+                },
+            ],
+        },
+        project_root=Path("."),
+        transcript_path=Path("t.json"),
+        document=document,
+    )
+    ids = [b["id"] for b in result["beats"]]
+    assert ids == ["early", "late"]
+    assert result["beats"][0]["startFrame"] <= result["beats"][1]["startFrame"]
 
 
 def test_legacy_seconds_fallback_maps_to_words(tmp_path: Path) -> None:

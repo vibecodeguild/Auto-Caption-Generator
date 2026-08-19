@@ -2115,14 +2115,19 @@ label {
 
 .rendered-cut-workspace {
   display: grid;
-  grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);
+  /* Left controls · right large video (no chrome). */
+  grid-template-columns: minmax(420px, 0.95fr) minmax(480px, 1.2fr);
   gap: 10px;
   min-height: 0;
   overflow: hidden;
+  /* Video card defines height; left is synced in JS to match. */
+  align-items: start;
 }
 
 .rendered-cut-sidebar,
-.rendered-cut-main {
+.rendered-cut-main,
+.rendered-cut-controls,
+.rendered-cut-video-panel {
   min-height: 0;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -2135,14 +2140,44 @@ label {
   grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
+/* Left card: height matched to the video card (see ResizeObserver in page.tsx). */
+.rendered-cut-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-sizing: border-box;
+  min-height: 0;
+  padding: 16px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* Right card: height follows the video. */
+.rendered-cut-video-panel {
+  display: block;
+  align-self: start;
+  height: fit-content;
+  max-height: 100%;
+  overflow: hidden;
+  padding: 0;
+  background: #000;
+}
+
 .rendered-sidebar-heading,
 .rendered-sidebar-footer,
-.rendered-cut-heading,
-.rendered-control-heading {
+.rendered-cut-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.rendered-control-heading {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 2px 0 4px;
 }
 
 .rendered-sidebar-heading {
@@ -2151,10 +2186,52 @@ label {
 }
 
 .rendered-sidebar-heading h2,
-.rendered-cut-heading h2,
-.rendered-control-heading h3 {
+.rendered-cut-heading h2 {
   margin: 2px 0 0;
   font-family: Montserrat, "Segoe UI", Arial, sans-serif;
+}
+
+.rendered-control-heading-label {
+  margin: 0;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: left;
+}
+
+.splice-picker {
+  display: flex;
+  justify-content: flex-start;
+  min-width: 0;
+  width: 100%;
+}
+
+.splice-picker select {
+  width: auto;
+  max-width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 4px 10px;
+  font-family: inherit;
+  /* Match Manual cut / Cut timeline control labels */
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.2;
+  cursor: pointer;
+  text-align: left;
+}
+
+.splice-picker select:focus {
+  border-color: var(--teal);
+  outline: 2px solid rgba(16, 185, 189, 0.16);
+}
+
+.splice-picker select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .rendered-sidebar-heading strong {
@@ -2243,85 +2320,61 @@ label {
   overflow-y: auto;
 }
 
-.manual-cut-toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  background: #10121a;
-  padding: 9px 10px;
+.rendered-cut-controls .rendered-cut-heading {
+  flex: 0 0 auto;
 }
 
-.manual-cut-copy {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 4px 12px;
+.rendered-cut-controls .rendered-splice-controls {
+  flex: 0 0 auto;
 }
 
-.manual-cut-toolbar strong,
-.manual-cut-toolbar span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+/* Timeline card fills leftover left-panel height. Manual Cut stays under the
+   scrollbar; only the cut-time row pins to the card bottom. */
+.rendered-cut-controls .rendered-timeline-shell {
+  flex: 1 1 auto;
+  min-height: 220px;
 }
 
-.manual-cut-toolbar span {
-  color: var(--muted);
-  font-size: 11px;
+.rendered-cut-controls .rendered-timeline-shell .timeline-cut-clock {
+  margin-top: auto;
 }
 
-.manual-cut-toolbar button {
+/* One button language for the whole Stage 4 controls card. */
+.rendered-cut-controls button {
+  min-height: 30px;
+  padding: 4px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
   white-space: nowrap;
 }
 
-.manual-cut-time-fields {
+/* Compact manual cut row under the timeline scrollbar. */
+.manual-cut-actions {
   display: flex;
-  align-items: end;
-  flex-wrap: wrap;
-  justify-content: flex-start;
-  gap: 7px;
-}
-
-.manual-cut-time-fields label {
-  display: grid;
-  grid-template-columns: 34px 124px auto;
   align-items: center;
-  gap: 5px;
+  flex-wrap: wrap;
+  gap: 10px;
+  border-top: 1px solid var(--border-soft);
+  padding: 12px 12px;
+  background: #10121a;
 }
 
-.manual-cut-time-fields label > span {
+.manual-cut-actions-label {
+  margin-right: 2px;
   color: var(--text);
-  font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 10px;
-  font-weight: 900;
-}
-
-.manual-cut-time-fields input {
-  width: 124px;
-  min-height: 34px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #080a10;
-  color: var(--text);
-  padding: 6px 8px;
-  font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 11px;
-}
-
-.manual-cut-time-fields input:focus {
-  border-color: var(--teal);
-  outline: 2px solid rgba(16, 185, 189, 0.16);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .manual-cut-preview-controls {
   display: flex;
   align-items: center;
   gap: 4px;
-  min-height: 34px;
+  min-height: 30px;
   border-left: 1px solid var(--border-soft);
   padding-left: 8px;
 }
@@ -2329,16 +2382,12 @@ label {
 .manual-cut-preview-controls > span {
   color: var(--muted);
   margin-right: 2px;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
 .manual-cut-preview-controls button {
   min-width: 38px;
-  min-height: 30px;
-  padding: 3px 7px;
-  font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 10px;
 }
 
 .manual-cut-preview-controls button.active {
@@ -2348,17 +2397,23 @@ label {
 }
 
 .manual-cut-error {
-  grid-column: 1 / -1;
   margin: 0;
+  padding: 0 9px 8px;
   color: #ff8c8c;
   font-size: 11px;
   text-align: left;
+  background: #10121a;
 }
 
-.manual-cut-toolbar .manual-cut-confirm {
+.manual-cut-actions .manual-cut-confirm {
   border-color: var(--magenta);
   background: rgba(255, 0, 206, 0.12);
   color: #fff;
+}
+
+.manual-cut-actions .manual-cut-confirm:disabled {
+  border-color: var(--border);
+  background: transparent;
 }
 
 .rendered-cut-heading h2 {
@@ -2386,23 +2441,29 @@ label {
 }
 
 .rendered-cut-video {
-  display: grid;
-  min-height: 0;
+  display: block;
+  flex: 0 0 auto;
+  width: 100%;
+  height: auto;
   overflow: hidden;
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  background: #05060a;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+  line-height: 0;
 }
 
 .rendered-cut-video video {
+  display: block;
   width: 100%;
-  height: 100%;
-  min-height: 0;
-  object-fit: contain;
+  height: auto;
+  background: #000;
+  /* Display-only preview — transport lives on the left controls card. */
+  pointer-events: none;
 }
 
 .rendered-timeline-shell {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--border-soft);
@@ -2411,23 +2472,56 @@ label {
 }
 
 .rendered-timeline-toolbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
   border-bottom: 1px solid var(--border-soft);
-  padding: 6px 9px;
+  padding: 10px 12px;
   color: var(--muted);
   font-size: 10px;
 }
 
-.rendered-timeline-toolbar strong {
+.rendered-timeline-toolbar-label {
+  justify-self: start;
+  font-size: 14px; /* same visual weight as Manual cut heading */
+}
+
+/* Match Manual cut heading treatment. */
+.rendered-timeline-toolbar-label strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
   color: var(--text);
-  margin-right: 5px;
-  font-size: 11px;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.rendered-timeline-transport {
+  justify-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+}
+
+.rendered-timeline-transport .rendered-timeline-play-toggle {
+  flex: 1 1 auto;
+}
+
+.rendered-timeline-transport .timeline-join-preview {
+  flex: 0 0 auto;
+  border-left: 0;
+  padding-left: 0;
+  min-height: 30px;
 }
 
 .rendered-timeline-zoom-controls {
+  justify-self: end;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -2435,10 +2529,13 @@ label {
 
 .rendered-timeline-zoom-controls button {
   min-width: 30px;
-  min-height: 26px;
-  padding: 2px 7px;
-  font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 11px;
+}
+
+.rendered-timeline-play-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
 }
 
 .rendered-timeline-zoom-controls button:nth-child(2) {
@@ -2450,7 +2547,7 @@ label {
   min-width: 0;
   overflow-x: scroll;
   overflow-y: hidden;
-  padding: 0 8px;
+  padding: 8px 10px;
   scrollbar-color: var(--teal) #11141d;
   scrollbar-gutter: stable;
 }
@@ -2471,25 +2568,54 @@ label {
 }
 
 .rendered-timeline {
+  /* Vertical center for the bar / markers. */
+  --timeline-mid: 50%;
+  /* Markers + playhead fill most of the fixed card height (card size unchanged). */
+  --timeline-marker-height: 90%;
+  --timeline-bar-height: 8px; /* 2× prior 4px keep/cut bands */
+  --timeline-track-height: 4px; /* 2× prior 2px track */
   position: relative;
   box-sizing: border-box;
   min-width: 100%;
-  min-height: 74px;
-  padding-top: 26px;
+  min-height: 148px; /* 2× prior 74px — keep card size */
+  padding: 0;
   user-select: none;
+  cursor: pointer;
+  touch-action: none;
 }
 
 .rendered-timeline-track {
-  height: 2px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: var(--timeline-mid);
+  z-index: 0;
+  height: var(--timeline-track-height);
+  transform: translateY(-50%);
+  background: rgba(148, 163, 184, 0.28);
+}
+
+/* Kept source sections (live source-timeline). */
+.timeline-keep-range {
+  position: absolute;
+  top: var(--timeline-mid);
+  z-index: 1;
+  height: var(--timeline-bar-height);
+  min-width: 1px;
+  border-radius: 2px;
+  transform: translateY(-50%);
   background: linear-gradient(90deg, var(--teal), var(--magenta));
+  box-shadow: 0 0 4px rgba(16, 185, 189, 0.25);
+  pointer-events: none;
 }
 
 .manual-draft-cut-range {
   position: absolute;
-  top: 25px;
+  top: var(--timeline-mid);
   z-index: 1;
-  height: 4px;
+  height: var(--timeline-bar-height);
   min-width: 2px;
+  transform: translateY(-50%);
   background: rgba(240, 195, 94, 0.42);
   box-shadow: 0 0 5px rgba(240, 195, 94, 0.35);
   pointer-events: none;
@@ -2497,8 +2623,9 @@ label {
 
 .manual-draft-boundary {
   position: absolute;
-  top: 6px;
-  bottom: 4px;
+  top: 5%;
+  bottom: 5%;
+  height: auto;
   z-index: 3;
   width: 2px;
   transform: translateX(-1px);
@@ -2512,35 +2639,13 @@ label {
   box-shadow: 0 0 5px rgba(255, 0, 206, 0.65);
 }
 
-.manual-draft-boundary > span {
-  position: absolute;
-  top: -2px;
-  left: 50%;
-  min-width: 28px;
-  transform: translateX(-50%);
-  border: 1px solid currentColor;
-  border-radius: 7px;
-  background: #10252a;
-  color: var(--teal);
-  padding: 1px 4px;
-  font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 8px;
-  font-weight: 900;
-  line-height: 12px;
-  text-align: center;
-}
-
-.manual-draft-boundary.in > span {
-  background: #281124;
-  color: var(--magenta);
-}
-
 .rendered-timeline-playhead {
   position: absolute;
-  top: 5px;
-  bottom: 4px;
+  top: 5%;
+  bottom: 5%;
   z-index: 4;
-  width: 18px;
+  width: 28px;
+  height: auto;
   transform: translateX(-50%);
   cursor: ew-resize;
   touch-action: none;
@@ -2549,9 +2654,9 @@ label {
 .rendered-timeline-playhead::after {
   content: "";
   position: absolute;
-  top: 9px;
+  top: 20px;
   bottom: 0;
-  left: 8px;
+  left: 13px;
   width: 2px;
   border-radius: 1px;
   background: #fff;
@@ -2562,9 +2667,9 @@ label {
   position: absolute;
   top: 0;
   left: 4px;
-  width: 10px;
-  height: 10px;
-  border-radius: 3px 3px 5px 5px;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px 4px 8px 8px;
   background: #fff;
   clip-path: polygon(0 0, 100% 0, 100% 65%, 50% 100%, 0 65%);
 }
@@ -2584,66 +2689,189 @@ label {
   outline-offset: 2px;
 }
 
-.rendered-timeline > button {
+/* Accepted cuts: teal OUT → magenta IN with a proportional removed band.
+   Height fills 90% of the timeline card (top/bottom 5% inset). Override the
+   Stage 4 button min-height so markers can stretch with the container. */
+.rendered-cut-controls .timeline-cut-markers,
+.timeline-cut-markers {
   position: absolute;
-  top: 12px;
+  top: 5%;
+  bottom: 5%;
   z-index: 2;
-  display: grid;
-  justify-items: center;
-  gap: 1px;
-  width: 34px;
-  min-width: 34px;
-  min-height: 42px;
-  transform: translateX(-50%);
+  min-width: 3px;
+  height: auto;
+  min-height: 0;
   border: 0;
+  border-radius: 4px;
   background: transparent;
-  color: var(--muted);
   padding: 0;
-  font-size: 9px;
+  transform: none;
+  cursor: pointer;
 }
 
-.rendered-timeline > button.active {
-  color: var(--magenta);
-  filter: drop-shadow(0 0 5px rgba(255, 0, 206, 0.45));
+/* Same shade box on hover and while selected (global button:hover only applies on hover). */
+.timeline-cut-markers:hover:not(:disabled),
+.timeline-cut-markers.active {
+  border: 0;
+  border-color: transparent;
+  background: rgba(37, 41, 56, 0.88);
 }
 
-.rendered-timeline > button.manual {
-  color: #f0c35e;
+/* Top + bottom rails join OUT (left) to IN (right) so each cut pair reads as one unit. */
+.timeline-cut-markers::before,
+.timeline-cut-markers::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, var(--teal), rgba(255, 0, 206, 0.85));
+  opacity: 0.72;
 }
 
-.rendered-timeline > button.manual > span {
-  min-width: 18px;
-  border: 1px solid currentColor;
-  border-radius: 8px;
-  background: #282114;
-  padding: 1px 4px;
-  font-weight: 900;
+.timeline-cut-markers::before {
+  top: 0;
 }
 
-.rendered-timeline > button.pending > svg {
-  stroke-dasharray: 2 2;
+.timeline-cut-markers::after {
+  bottom: 0;
 }
 
-.rendered-timeline > button.manual.active {
-  color: var(--magenta);
+.timeline-cut-markers.manual::before,
+.timeline-cut-markers.manual::after {
+  background: linear-gradient(90deg, #f0c35e, rgba(255, 0, 206, 0.85));
 }
 
-.rendered-timeline-labels {
+.timeline-cut-markers.active::before,
+.timeline-cut-markers.active::after {
+  opacity: 1;
+  box-shadow: 0 0 4px rgba(16, 185, 189, 0.35);
+}
+
+.timeline-cut-markers .timeline-cut-range {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: var(--timeline-bar-height);
+  min-width: 2px;
+  border-radius: 2px;
+  transform: translateY(-50%);
+  background: rgba(255, 0, 206, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(255, 0, 206, 0.18);
+  pointer-events: none;
+}
+
+.timeline-cut-markers.manual .timeline-cut-range {
+  background: rgba(240, 195, 94, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(240, 195, 94, 0.28);
+}
+
+.timeline-cut-markers .manual-draft-boundary {
+  pointer-events: none;
+  top: 0;
+  bottom: 0;
+  transform: none;
+}
+
+.timeline-cut-markers .manual-draft-boundary.out {
+  left: 0;
+}
+
+.timeline-cut-markers .manual-draft-boundary.in {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* Front trim: only IN at the end of the leading removed band. */
+.timeline-cut-markers.front-trim .manual-draft-boundary.in {
+  left: auto;
+  right: 0;
+}
+
+.timeline-cut-markers.active .timeline-cut-range {
+  background: rgba(255, 0, 206, 0.38);
+  box-shadow: 0 0 6px rgba(255, 0, 206, 0.35);
+}
+
+.timeline-cut-markers.active.manual .timeline-cut-range {
+  background: rgba(240, 195, 94, 0.48);
+  box-shadow: 0 0 6px rgba(240, 195, 94, 0.4);
+}
+
+.timeline-cut-markers.active .manual-draft-boundary.out {
+  box-shadow: 0 0 8px rgba(16, 185, 189, 0.95);
+}
+
+.timeline-cut-markers.active .manual-draft-boundary.in {
+  box-shadow: 0 0 8px rgba(255, 0, 206, 0.95);
+}
+
+.timeline-cut-markers.manual .manual-draft-boundary.out {
+  background: #f0c35e;
+  box-shadow: 0 0 5px rgba(240, 195, 94, 0.65);
+}
+
+.timeline-cut-markers.pending {
+  opacity: 0.72;
+}
+
+.timeline-cut-markers.pending .timeline-cut-range {
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(255, 0, 206, 0.2),
+    rgba(255, 0, 206, 0.2) 4px,
+    rgba(255, 0, 206, 0.05) 4px,
+    rgba(255, 0, 206, 0.05) 8px
+  );
+}
+
+.timeline-cut-markers.reviewed .timeline-cut-range {
+  opacity: 0.8;
+}
+
+.timeline-cut-markers:focus-visible {
+  outline: 1px solid var(--magenta);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Cut-output clock: current / total after cuts — bottom row of the timeline
+   card (follows Manual Cut). Font matches Manual cut / Cut timeline labels. */
+.timeline-cut-clock {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border-soft);
+  background: #0b0d14;
+  padding: 12px 12px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.timeline-cut-clock-sep {
   color: var(--muted);
-  padding-top: 20px;
-  font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 10px;
+  font-weight: 800;
+}
+
+.timeline-cut-clock-total {
+  color: var(--muted);
 }
 
 .rendered-splice-controls {
   display: grid;
-  gap: 10px;
+  gap: 14px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: #10121a;
-  padding: 10px;
+  padding: 14px;
 }
 
 .rendered-control-actions {
@@ -2660,11 +2888,6 @@ label {
   font-weight: 800;
 }
 
-.rendered-control-actions button {
-  min-height: 32px;
-  padding: 5px 9px;
-}
-
 .rendered-control-actions button.reviewed {
   border-color: var(--teal);
   color: var(--teal);
@@ -2679,20 +2902,11 @@ label {
 .rendered-frame-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 12px;
 }
 
 .rendered-frame-grid.single {
   grid-template-columns: minmax(0, 1fr);
-}
-
-.refresh-rendered-preview {
-  width: 100%;
-  min-height: 44px;
-  border-color: var(--teal);
-  background: linear-gradient(90deg, #07989e, #10b9bd);
-  color: #fff;
-  font-size: 14px;
 }
 
 .caption-workspace {
@@ -3389,6 +3603,79 @@ label {
 .modal-action {
   justify-self: end;
   min-width: 96px;
+}
+
+.placement-final-progress-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.placement-final-progress-meta strong {
+  justify-self: auto;
+  color: var(--text);
+}
+
+.placement-final-progress-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.placement-final-progress-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.live-cut-transport {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+/* Stage 3 craft: edit freely, commit once (no per-keystroke autosave/preview race). */
+.visual-package-craft-commit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft, var(--border));
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.visual-package-craft-commit-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.visual-package-craft-commit-status.is-dirty {
+  color: #f0c14b;
+}
+
+.visual-package-craft-commit-status.is-busy {
+  color: var(--teal);
+}
+
+.visual-package-craft-commit-status.is-clean {
+  color: var(--muted);
+}
+
+.visual-package-craft-commit-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .progress-track {
@@ -4190,56 +4477,54 @@ label {
   background: #11131c;
 }
 
-.cut-frame-header span {
-  display: grid;
-  gap: 2px;
-}
-
-.cut-frame-header small {
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 500;
-}
-
 .cut-frame-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 10px 10px 8px;
 }
 
-.cut-frame-header span,
+.cut-frame-header .cut-frame-title {
+  justify-self: start;
+  color: var(--text);
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 15px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 .muted {
   color: var(--muted);
 }
 
-.cut-frame-header strong {
-  display: grid;
-  justify-items: end;
+.cut-frame-header .cut-frame-timecode,
+.cut-frame-header .cut-frame-number {
+  color: var(--text);
+  font-family: "JetBrains Mono", Consolas, monospace;
   font-size: 15px;
+  font-weight: 800;
   white-space: nowrap;
 }
 
-.cut-frame-header strong small {
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 500;
+.cut-frame-header .cut-frame-timecode {
+  justify-self: center;
+}
+
+.cut-frame-header .cut-frame-number {
+  justify-self: end;
 }
 
 .nudge-buttons {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  padding: 6px;
+  gap: 6px;
+  padding: 8px 10px 10px;
 }
 
 .nudge-buttons button {
   flex: 1 1 52px;
   min-width: 0;
-  min-height: 26px;
-  padding: 3px 5px;
-  font-size: 11px;
 }
 
 .review-playbar {
@@ -6436,10 +6721,19 @@ button.graphics-library-beat-help-row.is-selected .graphics-library-beat-help-ch
 }
 .visual-package-word-row {
   display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 8px;
+  user-select: none;
+}
+/* One sentence per row (transcript-editor style breaks), chips wrap within the line. */
+.visual-package-sentence {
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 6px;
-  user-select: none;
+  width: 100%;
 }
 .visual-package-word-unit {
   display: inline-flex;

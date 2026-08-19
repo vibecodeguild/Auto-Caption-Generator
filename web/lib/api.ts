@@ -694,6 +694,7 @@ export type VisualCueParameters = {
   startLabel?: string;
   targetLabel?: string;
   nodes?: string[];
+  thankYou?: string;
 
   accentColor?: string;
   side?: "left" | "right";
@@ -759,7 +760,7 @@ export type VisualSemanticItem = {
 export type VisualCue = {
   id: string;
   kind: "module" | "asset" | "composition";
-  moduleId?: "punchline-reveal" | "progress-scale" | "dependency-stack";
+  moduleId?: "punchline-reveal" | "progress-scale" | "dependency-stack" | "intro-credentials";
   assetId?: string;
   compositionId?: string;
   sceneId?: string;
@@ -1256,6 +1257,10 @@ export type MasterbeaterResult = {
   originalFile?: string;
   originalBeatCount?: number;
   basedOnOriginal?: boolean;
+  /** True when Stage 1 was human-seeded (no Masterbeater agent run). */
+  manualSeed?: boolean;
+  /** True only on the first save that created the baseline original. */
+  seededManualBaseline?: boolean;
   edited?: boolean;
   role?: string;
   ok?: boolean;
@@ -1275,6 +1280,8 @@ export type VisualPackageTranscriptWord = {
   endFrame?: number;
   startSec?: number;
   endSec?: number;
+  /** Transcript sentence group (same as editor sentence_id). 0 = unknown. */
+  sentenceId?: number;
 };
 
 export type ScenelayerPick = {
@@ -1625,6 +1632,62 @@ export function buildPlacementPreview(payload: {
   });
 }
 
+/** Full-episode Final encode job (locked placements + locked-cut audio remux). */
+export type PlacementFinalJob = {
+  job_id: string;
+  purpose?: string;
+  quality?: string;
+  status: "running" | "canceling" | "canceled" | "complete" | "failed" | string;
+  stage?: string;
+  value: number;
+  message?: string;
+  output_path?: string | null;
+  error?: string | null;
+  cancel_requested?: boolean;
+  started_at?: string;
+  updated_at?: string;
+  elapsed_seconds?: number;
+  eta_seconds?: number | null;
+};
+
+export function startPlacementFinal(payload?: {
+  quality?: "draft" | "standard" | "high";
+  /** When true (default), always re-encode even if final-video.mp4 already exists. */
+  force?: boolean;
+}) {
+  return request<{ ok?: boolean; reconnected?: boolean; job: PlacementFinalJob }>(
+    "/api/visual-package/placement/final",
+    {
+      method: "POST",
+      body: JSON.stringify({ force: true, ...(payload ?? {}) }),
+    },
+  );
+}
+
+export function getPlacementFinalJob(jobId: string) {
+  return request<PlacementFinalJob>(
+    `/api/visual-package/placement/final/jobs/${encodeURIComponent(jobId)}`,
+  );
+}
+
+export function cancelPlacementFinal(jobId: string) {
+  return request<{ ok?: boolean; job: PlacementFinalJob }>(
+    `/api/visual-package/placement/final/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export function getActivePlacementFinalJob() {
+  return request<{ job: PlacementFinalJob | null }>("/api/visual-package/placement/final/active");
+}
+
+export function placementFinalVideoUrl(jobId?: string | null) {
+  if (jobId) {
+    return `${API_BASE}/api/visual-package/placement/final/jobs/${encodeURIComponent(jobId)}/video`;
+  }
+  return `${API_BASE}/api/visual-package/placement/final/jobs/latest/video`;
+}
+
 export function placementPreviewCompositionUrl(cacheKey?: string | null) {
   const suffix = cacheKey ? `?revision=${encodeURIComponent(cacheKey)}` : "";
   return `${API_BASE}/api/visual-package/placement/preview/composition/index.html${suffix}`;
@@ -1769,6 +1832,8 @@ export type RenderedCutPreviewSplice = {
 
 export type RenderedCutPreviewResponse = {
   preview_id: string;
+  /** live = CapCut-style source EDL; baked = legacy full FFmpeg draft */
+  mode?: "live" | "baked" | string;
   duration_seconds: number;
   splices: RenderedCutPreviewSplice[];
   segments: Array<{
@@ -1779,6 +1844,12 @@ export type RenderedCutPreviewResponse = {
   }>;
 };
 
+/** Instant Stage 4 plan — no encode. Playback seeks source ranges. */
+export function liveCutPreview() {
+  return request<RenderedCutPreviewResponse>("/api/projects/current/live-cut-preview");
+}
+
+/** Optional legacy full-bake draft MP4 (not the product Stage 4 path). */
 export function renderCutPreview() {
   return request<RenderedCutPreviewResponse>("/api/projects/current/render-preview", {
     method: "POST",
@@ -1804,6 +1875,14 @@ export function removeManualCut(cutId: string) {
   return request<EditorProjectResponse>(`/api/projects/current/manual-cuts/${encodeURIComponent(cutId)}`, {
     method: "DELETE",
   });
+}
+
+/** Undo a Stage 4 splice (manual cut removal or restore deleted gap for transcript cuts). */
+export function removeSplice(anchorKey: string) {
+  return request<EditorProjectResponse>(
+    `/api/projects/current/splices/${encodeURIComponent(anchorKey)}`,
+    { method: "DELETE" },
+  );
 }
 
 export function setFinalOutFrame(frame: number | null) {
@@ -1839,11 +1918,45 @@ export type ExportCutResponse = {
   normalized: boolean;
 };
 
+export type ExportCutJob = {
+  job_id: string;
+  purpose?: string;
+  normalize_audio?: boolean;
+  status: "running" | "canceling" | "canceled" | "complete" | "failed" | string;
+  stage?: string;
+  value: number;
+  message?: string;
+  output_path?: string | null;
+  cut_output_path?: string | null;
+  normalized?: boolean;
+  error?: string | null;
+  cancel_requested?: boolean;
+  elapsed_seconds?: number;
+  eta_seconds?: number | null;
+};
+
+/** Start cancelable Stage 5 export job (returns job; poll until complete). */
 export function exportCut(payload: ExportCutRequest = {}) {
-  return request<ExportCutResponse>("/api/projects/current/export", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+  return request<{ ok?: boolean; reconnected?: boolean; job: ExportCutJob }>(
+    "/api/projects/current/export",
+    {
+      method: "POST",
+      body: JSON.stringify({ normalize_audio: true, ...payload }),
+    },
+  );
+}
+
+export function getExportCutJob(jobId: string) {
+  return request<ExportCutJob>(
+    `/api/projects/current/export/jobs/${encodeURIComponent(jobId)}`,
+  );
+}
+
+export function cancelExportCut(jobId: string) {
+  return request<{ ok?: boolean; job: ExportCutJob }>(
+    `/api/projects/current/export/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST", body: "{}" },
+  );
 }
 
 export function sourceVideoUrl() {

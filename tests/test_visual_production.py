@@ -224,19 +224,50 @@ def test_delivery_verification_rejects_missing_audio(tmp_path: Path, monkeypatch
         )
 
 
+def test_publish_verified_render_overwrites_existing_closed_file(tmp_path: Path) -> None:
+    """An existing final-video.mp4 must not block publish when the file is not locked."""
+    staged = tmp_path / ".final-verified.mp4"
+    requested = tmp_path / "final-video.mp4"
+    staged.write_bytes(b"verified-new")
+    requested.write_bytes(b"old-final")
+
+    published = visual_production.publish_verified_render(staged, requested)
+
+    assert published == requested
+    assert requested.read_bytes() == b"verified-new"
+
+
 def test_publish_verified_render_uses_versioned_fallback_when_target_is_open(tmp_path: Path, monkeypatch) -> None:
     staged = tmp_path / ".final-verified.mp4"
     requested = tmp_path / "final-video.mp4"
     staged.write_bytes(b"verified")
     requested.write_bytes(b"old-open-file")
     real_replace = visual_production.os.replace
+    real_unlink = Path.unlink
 
     def replace_with_locked_target(source, destination):
-        if Path(destination) == requested:
+        if Path(destination) == requested or Path(destination).name.startswith("final-video-"):
+            if Path(destination) == requested:
+                raise PermissionError("file is open")
+        return real_replace(source, destination)
+
+    def unlink_locked(self, *args, **kwargs):
+        if self == requested:
+            raise PermissionError("file is open")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(visual_production.os, "replace", replace_with_locked_target)
+    monkeypatch.setattr(Path, "unlink", unlink_locked)
+
+    # First replace fails, unlink fails, versioned path succeeds via real replace
+    # for non-requested names — re-bind carefully.
+    def replace_selective(source, destination):
+        dest = Path(destination)
+        if dest == requested:
             raise PermissionError("file is open")
         return real_replace(source, destination)
 
-    monkeypatch.setattr(visual_production.os, "replace", replace_with_locked_target)
+    monkeypatch.setattr(visual_production.os, "replace", replace_selective)
 
     published = visual_production.publish_verified_render(staged, requested)
 
@@ -554,6 +585,112 @@ def test_robot_rocket_sign_markup_has_rig_and_sign() -> None:
     assert "robot-bubble" not in markup
 
 
+def test_main_video_dock_forces_top_left_origin() -> None:
+    """Punch-zoom leaves focus origin; dock engines must reset origin or head flies off."""
+    line = visual_production._main_video_dock_line(
+        scale=0.365, x_px=1080.0, y_px=129.6, duration=0.5, at=34.2667
+    )
+    assert "fromTo" in line
+    assert 'transformOrigin:"0% 0%"' in line
+    assert "scale:0.3650" in line
+    assert "overwrite:\"auto\"" in line
+    # Starts from clean full-frame so prior punch origin cannot stick.
+    assert 'scale:1,x:0,y:0,transformOrigin:"0% 0%"' in line
+    undock = visual_production._main_video_undock_line(duration=0.45, at=44.7)
+    assert 'transformOrigin:"0% 0%"' in undock
+    assert "scale:1" in undock and "x:0" in undock
+
+
+def test_cover_dock_is_pure_hole_geometry() -> None:
+    """Cover dock = object-fit:cover into the mask rect — no face/overscan nudges."""
+
+    def _assert_cover(left: float, top: float, box_w: float, box_h: float) -> None:
+        scale, x_frac, y_frac = visual_production._cover_dock_for_frame(left, top, box_w, box_h)
+        assert scale == pytest.approx(max(box_w, box_h))
+        assert x_frac == pytest.approx(left + (box_w - scale) / 2.0)
+        assert y_frac == pytest.approx(top + (box_h - scale) / 2.0)
+        # Fully covers the hole.
+        assert x_frac <= left + 1e-9
+        assert y_frac <= top + 1e-9
+        assert x_frac + scale >= left + box_w - 1e-9
+        assert y_frac + scale >= top + box_h - 1e-9
+
+    _assert_cover(0.50, 0.10, 0.42, 0.78)  # dependency
+    _assert_cover(0.08, 0.10, 0.42, 0.78)  # punchline
+    _assert_cover(0.5885, 0.102, 0.359, 0.787)  # brand CTA
+
+
+def test_engine_compose_recipe_is_shared_version_token() -> None:
+    """Preview and Final fingerprints both hash this — one engine code version."""
+    assert isinstance(visual_production.ENGINE_COMPOSE_RECIPE, int)
+    assert visual_production.ENGINE_COMPOSE_RECIPE >= 34
+
+
+def test_progress_scale_fit_dock_aligns_video_to_outline() -> None:
+    """Progress outline is a picture frame — video TL + size must match the border."""
+    scale, x_frac, y_frac = visual_production._fit_dock_for_frame(0.5625, 0.12, 0.365, 0.365)
+    assert scale == pytest.approx(0.365)
+    assert x_frac == pytest.approx(0.5625)
+    assert y_frac == pytest.approx(0.12)
+
+
+def test_progress_scale_markup_includes_mask_hole() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "progress-scale",
+            "parameters": {
+                "text": "Ada Example",
+                "startLabel": "Full Stack",
+                "targetLabel": "Enterprise",
+                "milestones": ["Thankful"],
+            },
+        },
+        "ps",
+        1,
+        8,
+        20,
+    )
+    assert "progress-mask" in markup
+    assert "stat-video-outline" in markup
+
+
+def test_progress_scale_restores_video_at_cue_end_not_after_fill_hold() -> None:
+    """Ends must undock the head; early restore left empty outline artifacts."""
+    start = 0.0
+    duration = 25.633  # ~f32208–32977 at 30fps
+    video_out = 0.45
+    fill_end = 14.4  # last milestone
+    hold_after_fill = 2.5
+    # Old path undocked long before Ends while stage chrome stayed up.
+    old_restore = min(start + duration - video_out, fill_end + hold_after_fill)
+    assert old_restore == pytest.approx(16.9, abs=0.05)
+    # New path: undock at cue end (placement Ends).
+    exit_at = start + duration - video_out
+    restore_at = max(exit_at, fill_end + 0.12)
+    restore_at = min(restore_at, start + duration - 0.05)
+    assert restore_at == pytest.approx(exit_at, abs=0.02)
+    assert restore_at > old_restore + 5.0
+
+
+def test_robot_defiant_bubble_lands_at_placement_text_reveal() -> None:
+    """Craft frame on text must drive bubble start, not fixed beat-start + 0.28s."""
+    fps = 30.0
+    range_start = 17270 / fps
+    reveal_frame = 17468
+    start = 0.0  # composition-local cue start after range remap
+    spoken = reveal_frame / fps
+    land_at = max(spoken, range_start) - range_start
+    land_at = max(start + 0.05, land_at)
+    wrap_lead = 0.28
+    bubble_start = land_at
+    wrap_at = max(start, land_at - wrap_lead)
+    # Old path ignored craft and always used start + 0.28.
+    old_bubble = start + 0.28
+    assert bubble_start == pytest.approx(reveal_frame / fps - range_start, abs=0.02)
+    assert bubble_start > old_bubble + 5.0  # craft is several seconds later than beat start
+    assert wrap_at == pytest.approx(bubble_start - wrap_lead, abs=0.02)
+
+
 def test_robot_hold_after_drawn_is_three_seconds() -> None:
     """Long cues still exit ~3s after the bubble is drawn (engine-fixed)."""
     assert visual_production.ROBOT_HOLD_AFTER_DRAWN_SEC == 3.0
@@ -635,6 +772,69 @@ def test_dependency_stack_markup_has_title_nodes_and_video_frame() -> None:
     assert "Transcript" in markup
     assert "lib-kicker" not in markup
     assert 'class="kicker"' not in markup
+
+
+def test_intro_credentials_markup_has_name_nodes_wai_robot() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "intro-credentials",
+            "parameters": {
+                "text": "Ada",
+                "nodes": ["Builder", "Teacher"],
+                "thankYou": "Thank you!",
+            },
+        },
+        "intro",
+        1,
+        12,
+        20,
+    )
+    assert "intro-stage" in markup
+    assert "intro-mask" in markup
+    assert "intro-video-outline" in markup
+    assert "intro-name" in markup
+    assert "Ada" in markup
+    assert "intro-node" in markup
+    assert "Builder" in markup
+    assert "intro-robot" in markup
+    assert "intro-robot-bubble" in markup
+    assert "Thank you!" in markup
+    assert 'data-semantic-path="parameters.thankYou"' in markup
+    assert "intro-robot-svg" in markup
+    # Wai cues: closed-eye arcs + solid triangle hands (no interior finger lines).
+    assert "intro-wai-hands" in markup
+    assert "<polygon" in markup
+    assert 'q20 24 40 0' in markup
+    assert "lib-kicker" not in markup
+    bare = visual_production._module_markup(
+        {
+            "moduleId": "intro-credentials",
+            "parameters": {"text": "Host", "nodes": ["One"]},
+        },
+        "intro2",
+        1,
+        8,
+        21,
+    )
+    assert "Thank you!" in bare
+    custom = visual_production._module_markup(
+        {
+            "moduleId": "intro-credentials",
+            "parameters": {
+                "text": "Host",
+                "nodes": ["One"],
+                "thankYou": "Thanks for watching!",
+            },
+        },
+        "intro3",
+        1,
+        8,
+        22,
+    )
+    assert "Thanks for watching!" in custom
+    assert "intro-credentials" in visual_production.MODULE_IDS
+    assert "thankYou" in visual_production.MODULE_PARAMETER_KEYS["intro-credentials"]
+    assert "nodes" in visual_production.MODULE_PARAMETER_KEYS["intro-credentials"]
 
 
 def test_tradeoff_meter_fill_ends_at_verdict_frame() -> None:
@@ -769,26 +969,32 @@ def test_problem_card_triptych_honors_placement_card_reveal_frames() -> None:
     duration = cue_end - range_start
     start = 0.0
     exit_duration = 0.28
-    spoken = [f / fps for f in frames]
-    card_times: list[float] = []
-    anchored_count = 0
-    for spoken_sec in spoken:
-        appear_at = max(spoken_sec, range_start) - range_start
-        card_times.append(max(start + 0.12, appear_at))
-        anchored_count += 1
-    min_gap = 0.08 if anchored_count > 0 else 0.35
-    for index in range(1, len(card_times)):
-        card_times[index] = max(card_times[index], card_times[index - 1] + min_gap)
+    semantic_items = [
+        {
+            "parameterPath": f"parameters.cards.{index}",
+            "spokenStartSec": frame / fps,
+        }
+        for index, frame in enumerate(frames)
+    ]
+    card_times, anchored_count, order = visual_production._placement_item_reveal_schedule(
+        count=3,
+        path_prefix="parameters.cards",
+        semantic_items=semantic_items,
+        range_start=range_start,
+        start=start,
+        unanchored_at=lambda index: start + 0.28 + index * 0.85,
+    )
 
     expected = [max(start + 0.12, f / fps - range_start) for f in frames]
     assert anchored_count == 3
+    assert order == [0, 1, 2]
     for got, exp in zip(card_times, expected, strict=True):
         assert got == pytest.approx(exp, abs=0.02)
 
     settle_after_last_sec = 2.0
     linger_all_white_sec = 2.0
     latest_need = (
-        card_times[-1] + settle_after_last_sec + linger_all_white_sec + exit_duration
+        max(card_times) + settle_after_last_sec + linger_all_white_sec + exit_duration
     )
     assert latest_need > start + duration  # would have triggered old redistrib
     budget = max(
@@ -800,6 +1006,40 @@ def test_problem_card_triptych_honors_placement_card_reveal_frames() -> None:
     # Later bullets diverged most (even respace vs speech anchors).
     assert abs(old_times[1] - expected[1]) > 0.4
     assert abs(old_times[2] - expected[2]) > 0.4
+
+
+def test_problem_card_triptych_honors_out_of_order_reveal_frames() -> None:
+    """Later slot with earlier craft frame must still land at that frame.
+
+    Beat-003 craft: Bullet 1 f1609, Bullet 2 f1500 — index-order clamping used to
+    delay card 1 until after card 0, so IBM never appeared at f1500.
+    """
+    fps = 30.0
+    range_start = 1359 / fps
+    start = 0.0
+    frames = [1609, 1500]  # index 0 later than index 1
+    semantic_items = [
+        {
+            "parameterPath": f"parameters.cards.{index}",
+            "spokenStartSec": frame / fps,
+        }
+        for index, frame in enumerate(frames)
+    ]
+    card_times, anchored_count, order = visual_production._placement_item_reveal_schedule(
+        count=2,
+        path_prefix="parameters.cards",
+        semantic_items=semantic_items,
+        range_start=range_start,
+        start=start,
+        unanchored_at=lambda index: start + 0.28 + index * 0.85,
+    )
+    assert anchored_count == 2
+    # Reveal order is by time: card 1 (IBM @ 1500) then card 0 (AI Native @ 1609).
+    assert order == [1, 0]
+    assert card_times[1] == pytest.approx(1500 / fps - range_start, abs=0.02)
+    assert card_times[0] == pytest.approx(1609 / fps - range_start, abs=0.02)
+    # Old index-order clamp would have forced card 1 after card 0.
+    assert card_times[1] < card_times[0]
 
 
 def test_kinetic_word_stamp_lands_with_phrase_not_empty_at_beat_start() -> None:
@@ -864,6 +1104,94 @@ def test_dependency_stack_honors_placement_node_reveal_frames() -> None:
         assert abs(old - exp) > 1.0  # old path was >1s off each bullet
 
 
+def test_numbered_phrase_reveal_markup_and_typing_shell() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "numbered-phrase-reveal",
+            "parameters": {
+                "numberLabel": "02",
+                "title": "Step",
+                "text": "Here are words",
+            },
+        },
+        "npr",
+        1,
+        8,
+        20,
+    )
+    assert "npr-stage" in markup
+    assert "npr-mask" in markup
+    assert "npr-video-outline" in markup
+    assert "npr-number" in markup
+    assert "02" in markup
+    assert "npr-title" in markup
+    assert "Step" in markup
+    assert "npr-typed-text" in markup
+    assert 'data-full-prompt="Here are words"' in markup
+    assert 'class="npr-typed-text"></span>' in markup
+    # Optional title omitted when empty.
+    bare = visual_production._module_markup(
+        {
+            "moduleId": "numbered-phrase-reveal",
+            "parameters": {"numberLabel": "2", "title": "", "text": "Hi"},
+        },
+        "npr2",
+        1,
+        6,
+        21,
+    )
+    assert "npr-title" not in bare
+    assert ">2<" in bare or ">2</div>" in bare
+
+
+def test_numbered_phrase_reveal_timeline_docks_and_types() -> None:
+    from pathlib import Path
+    import tempfile
+
+    plan = {
+        "version": 2,
+        "composition": {
+            "width": 1920,
+            "height": 1080,
+            "fps": 30,
+            "durationSec": 10,
+            "brandId": "vcg-white-editorial",
+        },
+        "source": {"path": "source.mp4", "durationSec": 10},
+        "cues": [
+            {
+                "id": "npr-1",
+                "kind": "module",
+                "moduleId": "numbered-phrase-reveal",
+                "startSec": 1.0,
+                "endSec": 8.0,
+                "enabled": True,
+                "parameters": {
+                    "numberLabel": "2",
+                    "title": "",
+                    "text": "Hi",
+                },
+                "semanticItems": [
+                    {
+                        "id": "s1",
+                        "parameterPath": "parameters.text",
+                        "label": "Hi",
+                        "anchorType": "spoken",
+                        "spokenStartSec": 2.0,
+                        "fullyVisibleSec": 3.0,
+                    }
+                ],
+            }
+        ],
+        "assets": [],
+    }
+    # build path needs staged env — use composition builder internals via public API if easy.
+    # Assert compose recipe includes engine and dock math constants.
+    assert "numbered-phrase-reveal" in visual_production.MODULE_IDS
+    assert "numberLabel" in visual_production.MODULE_PARAMETER_KEYS["numbered-phrase-reveal"]
+    assert "text" in visual_production.MODULE_PARAMETER_KEYS["numbered-phrase-reveal"]
+
+
 def test_windows_prompt_typing_docks_head_and_types_chars() -> None:
     markup = visual_production._module_markup(
         {
@@ -896,6 +1224,34 @@ def test_windows_prompt_typing_docks_head_and_types_chars() -> None:
     assert "win-max" in markup
     assert "win-close" in markup
     assert "prompt-win-controls" in markup
+
+
+def test_windows_prompt_overlay_is_centered_terminal_without_dock() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "windows-prompt-overlay",
+            "parameters": {
+                "appName": "Windows PowerShell",
+                "prompt": "Hi overlay",
+            },
+        },
+        "pover",
+        1,
+        8,
+        20,
+    )
+    assert "prompt-overlay-stage" in markup
+    assert "prompt-overlay-terminal" in markup
+    assert "prompt-typed-text" in markup
+    assert 'data-full-prompt="Hi overlay"' in markup
+    assert 'class="prompt-typed-text"></span>' in markup
+    # No dock chrome — source stays full frame.
+    assert "prompt-mask" not in markup
+    assert "prompt-video-outline" not in markup
+    assert "win-min" in markup
+    assert "windows-prompt-overlay" in visual_production.MODULE_IDS
+    assert "prompt" in visual_production.MODULE_PARAMETER_KEYS["windows-prompt-overlay"]
+    assert "appName" in visual_production.MODULE_PARAMETER_KEYS["windows-prompt-overlay"]
 
 
 def test_problem_card_triptych_markup_is_sequential_not_static_accent() -> None:

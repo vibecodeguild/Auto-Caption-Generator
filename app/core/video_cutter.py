@@ -72,6 +72,10 @@ def build_cut_command(
     ]
 
 
+class CutCanceled(RuntimeError):
+    """Raised when the operator cancels an in-flight FFmpeg cut."""
+
+
 def run_cut(
     *,
     ffmpeg: Path,
@@ -81,7 +85,11 @@ def run_cut(
     crf: int = 18,
     preset: str = "veryfast",
     progress_callback: ProgressCallback | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+    on_process: Callable[[subprocess.Popen[str] | None], None] | None = None,
 ) -> None:
+    from app.core.process_utils import terminate_process_tree
+
     total_duration = sum(end - start for start, end in intervals)
     command = build_cut_command(
         ffmpeg=ffmpeg,
@@ -91,6 +99,8 @@ def run_cut(
         crf=crf,
         preset=preset,
     )
+    cancel_check = cancel_check or (lambda: False)
+    on_process = on_process or (lambda _proc: None)
     with tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace") as stderr_file:
         process = subprocess.Popen(
             command,
@@ -99,16 +109,25 @@ def run_cut(
             text=True,
             creationflags=hidden_subprocess_flags(),
         )
-        assert process.stdout is not None
-        for line in process.stdout:
-            if progress_callback and line.startswith("out_time_ms="):
-                try:
-                    seconds = int(line.split("=", 1)[1].strip()) / 1_000_000
-                except ValueError:
-                    continue
-                progress_callback(min(1.0, seconds / total_duration) if total_duration else 0.0)
-        process.wait()
-        if process.returncode != 0:
-            stderr_file.seek(0)
-            stderr = stderr_file.read()
-            raise RuntimeError(stderr.strip() or f"ffmpeg exited {process.returncode}")
+        on_process(process)
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                if cancel_check():
+                    terminate_process_tree(process)
+                    raise CutCanceled("Cut export canceled.")
+                if progress_callback and line.startswith("out_time_ms="):
+                    try:
+                        seconds = int(line.split("=", 1)[1].strip()) / 1_000_000
+                    except ValueError:
+                        continue
+                    progress_callback(min(1.0, seconds / total_duration) if total_duration else 0.0)
+            process.wait()
+            if cancel_check():
+                raise CutCanceled("Cut export canceled.")
+            if process.returncode != 0:
+                stderr_file.seek(0)
+                stderr = stderr_file.read()
+                raise RuntimeError(stderr.strip() or f"ffmpeg exited {process.returncode}")
+        finally:
+            on_process(None)

@@ -49,10 +49,16 @@ MODULE_OVERLAY_FOOTPRINTS: dict[str, dict[str, float]] = {
     "progress-scale": {"width": 1.0, "height": 1.0},
     # Full stage: title + stack left, tall right video dock.
     "dependency-stack": {"width": 1.0, "height": 1.0},
+    # Full stage: tall left dock (host), right name + experience + Wai robot.
+    "intro-credentials": {"width": 1.0, "height": 1.0},
     # Numbered example card — left ~40% width, mid height band.
     "numbered-example-card": {"width": 0.40, "height": 0.34},
     # Full stage: right video dock + left terminal (same footprint as dependency-stack).
     "windows-prompt-typing": {"width": 1.0, "height": 1.0},
+    # Overlay terminal only (centered); does not reframe source.
+    "windows-prompt-overlay": {"width": 0.52, "height": 0.62},
+    # Full white stage: left number + upper-right docked head + bottom typed phrase.
+    "numbered-phrase-reveal": {"width": 1.0, "height": 1.0},
     # Link chip / badges — compact.
 
 

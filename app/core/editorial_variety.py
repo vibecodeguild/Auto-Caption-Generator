@@ -28,6 +28,7 @@ MIN_GRAPHICS_FOR_SHARE_CAPS = 6
 SAFE_REMAP_CANDIDATES: tuple[str, ...] = (
     "kinetic-word-punctuation",
     "numbered-step-intro",
+    "numbered-phrase-reveal",
     "windows-prompt-typing",
     "brand-cta-lockup",
     "source-punch-zoom",
