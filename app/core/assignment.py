@@ -56,6 +56,8 @@ def ledger_path_for_project(project_root: Path) -> Path:
 def list_golden_usages(*, library_root: Path | None = None) -> list[dict[str, Any]]:
     """Golden usages with display fields for assignment (beatTypes + poster)."""
 
+    from app.core.visual_production import MODULE_IDS, RETIRED_ENGINE_ALIASES, canonicalize_engine_id
+
     root = (library_root or default_graphics_library_root()).resolve()
     try:
         document = load_graphics_library(root)
@@ -71,7 +73,13 @@ def list_golden_usages(*, library_root: Path | None = None) -> list[dict[str, An
         usage_id = str(entry.get("id") or "").strip()
         if not usage_id:
             continue
+        # Retired shelf cards (e.g. speaker-side-panel) are not production-selectable.
+        if usage_id in RETIRED_ENGINE_ALIASES:
+            continue
         view = entry_public_view(entry, root)
+        engine_id = canonicalize_engine_id(str(view.get("engineId") or usage_id).strip())
+        if engine_id not in MODULE_IDS:
+            continue
         layouts = [
             str(item)
             for item in (view.get("allowedLayouts") or entry.get("allowedLayouts") or [])
@@ -81,7 +89,7 @@ def list_golden_usages(*, library_root: Path | None = None) -> list[dict[str, An
             {
                 "id": usage_id,
                 "displayName": str(view.get("displayName") or usage_id),
-                "engineId": str(view.get("engineId") or usage_id),
+                "engineId": engine_id,
                 "beatTypes": normalize_beat_types(view.get("beatTypes")),
                 "allowedLayouts": layouts,
                 "posterUrl": view.get("posterUrl"),

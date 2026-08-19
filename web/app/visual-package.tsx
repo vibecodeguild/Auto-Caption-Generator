@@ -19,6 +19,9 @@ import { ChevronDown, ChevronUp, Loader2, Lock, LockOpen, Pause, Play, RefreshCw
 import {
   assignmentPosterUrl,
   buildPlacementPreview,
+  cancelPlacementFinal,
+  getActivePlacementFinalJob,
+  getPlacementFinalJob,
   getVisualPackageStatus,
   importPlacementImageDialog,
   placementPreviewCompositionUrl,
@@ -31,6 +34,7 @@ import {
   saveMasterbeaterBeats,
   savePlacementBeat,
   saveScenelayerOverride,
+  startPlacementFinal,
   visualPackageSourceVideoUrl,
   visualRuntimePlayerUrl,
   type AssignmentEligibleUsage,
@@ -40,6 +44,7 @@ import {
   type MasterbeaterEditEvent,
   type MasterbeaterResult,
   type PlacementBeat,
+  type PlacementFinalJob,
   type PlacementLine,
   type PlacementPreview,
   type PlacementStatus,
@@ -277,7 +282,7 @@ function removeWordRangeFromBeat(
     if (left) next.push(left);
     if (right) next.push(right);
   }
-  return next;
+  return sortBeatsByTimeline(next);
 }
 
 function removeWordFromBeat(
@@ -392,6 +397,19 @@ function newManualBeatId(beats: MasterbeaterBeat[], suffix: string): string {
   return `${base}-${n}`;
 }
 
+/** Transcript time order for navigation + Place (matches server normalize). */
+function sortBeatsByTimeline(beats: MasterbeaterBeat[]): MasterbeaterBeat[] {
+  return [...beats].sort((a, b) => {
+    const aStart = Number(a.startFrame) || 0;
+    const bStart = Number(b.startFrame) || 0;
+    if (aStart !== bStart) return aStart - bStart;
+    const aEnd = Number(a.endFrameExclusive ?? (a.endFrame != null ? a.endFrame + 1 : aStart + 1)) || 0;
+    const bEnd = Number(b.endFrameExclusive ?? (b.endFrame != null ? b.endFrame + 1 : bStart + 1)) || 0;
+    if (aEnd !== bEnd) return aEnd - bEnd;
+    return String(a.id || "").localeCompare(String(b.id || ""));
+  });
+}
+
 function changeBeatType(
   beats: MasterbeaterBeat[],
   beatId: string,
@@ -428,7 +446,7 @@ function addBeatFromRange(
   };
   const rebound = rebindBeat(draft, words, words[startIndex].id, words[endIndex].id);
   if (!rebound) return { error: "Could not bind new beat to transcript words." };
-  return { beats: [...beats, rebound], beat: rebound };
+  return { beats: sortBeatsByTimeline([...beats, rebound]), beat: rebound };
 }
 
 function findAdjacentBeats(
@@ -473,9 +491,9 @@ function mergeBeatWithNeighbor(
   const dropId = side === "prev" ? current.beat.id : neighbor.id;
   const rebound = rebindBeat(keep, words, words[mergeStart].id, words[mergeEnd].id);
   if (!rebound) return { error: "Could not rebind merged beat." };
-  const nextBeats = beats
-    .filter((beat) => beat.id !== dropId && beat.id !== keep.id)
-    .concat(rebound);
+  const nextBeats = sortBeatsByTimeline(
+    beats.filter((beat) => beat.id !== dropId && beat.id !== keep.id).concat(rebound),
+  );
   return { beats: nextBeats, keptId: rebound.id };
 }
 
@@ -511,7 +529,9 @@ function splitBeatAfter(
   };
   const right = rebindBeat(rightDraft, words, words[afterIndex + 1].id, words[end].id);
   if (!left || !right) return { error: "Could not rebind split beats." };
-  const nextBeats = beats.filter((item) => item.id !== beatId).concat(left, right);
+  const nextBeats = sortBeatsByTimeline(
+    beats.filter((item) => item.id !== beatId).concat(left, right),
+  );
   return { beats: nextBeats, leftId: left.id, rightId: right.id };
 }
 
@@ -875,6 +895,54 @@ function WordChip({
   );
 }
 
+function endsSentenceText(text: string): boolean {
+  // Match transcript-editor feel: break after terminal punctuation (incl. quotes).
+  return /[.!?]["')\]]*$/.test(String(text || "").trim());
+}
+
+/**
+ * Group words into sentence rows — same boundary model as the transcript editor
+ * (sentence_id), with punctuation fallback when ids are missing.
+ */
+function groupWordsBySentence(
+  words: VisualPackageTranscriptWord[],
+): { key: string; words: VisualPackageTranscriptWord[] }[] {
+  if (!words.length) return [];
+  const hasSentenceIds = words.some((word) => Number(word.sentenceId || 0) > 0);
+  if (hasSentenceIds) {
+    const groups: { key: string; words: VisualPackageTranscriptWord[] }[] = [];
+    let current: VisualPackageTranscriptWord[] = [];
+    let currentId: number | null = null;
+    for (const word of words) {
+      const sid = Number(word.sentenceId || 0);
+      if (current.length && sid !== currentId) {
+        groups.push({ key: `s-${currentId}-${current[0].id}`, words: current });
+        current = [];
+      }
+      currentId = sid;
+      current.push(word);
+    }
+    if (current.length) {
+      groups.push({ key: `s-${currentId}-${current[0].id}`, words: current });
+    }
+    return groups;
+  }
+  // Fallback: start a new row after terminal punctuation.
+  const groups: { key: string; words: VisualPackageTranscriptWord[] }[] = [];
+  let current: VisualPackageTranscriptWord[] = [];
+  for (const word of words) {
+    current.push(word);
+    if (endsSentenceText(word.text)) {
+      groups.push({ key: `p-${current[0].id}`, words: current });
+      current = [];
+    }
+  }
+  if (current.length) {
+    groups.push({ key: `p-${current[0].id}`, words: current });
+  }
+  return groups;
+}
+
 export default function VisualPackageWorkspace({
   hasVideoProject,
   projectName,
@@ -889,6 +957,10 @@ export default function VisualPackageWorkspace({
   /** Optimistic local beats while auto-save is in flight. */
   const [draftBeats, setDraftBeats] = useState<MasterbeaterBeat[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [placementFinalJob, setPlacementFinalJob] = useState<PlacementFinalJob | null>(null);
+  /** Keep the Final progress modal open after complete/fail until the user dismisses it. */
+  const [finalModalOpen, setFinalModalOpen] = useState(false);
+  const [finalCanceling, setFinalCanceling] = useState(false);
   const [autoSaveState, setAutoSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [message, setMessage] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("all");
@@ -1046,18 +1118,20 @@ export default function VisualPackageWorkspace({
   const serverBeats = result?.beats ?? [];
   const beats = draftBeats ?? serverBeats;
   const filteredBeats = useMemo(() => {
-    return beats.filter((beat) => {
-      if (typeFilter !== "all" && beat.beatType !== typeFilter) return false;
-      if (layoutFilter !== "all") {
-        const layoutId = scenelayerByBeat[beat.id]?.layoutId || "";
-        if (layoutFilter === "__unset__") {
-          if (layoutId) return false;
-        } else if (layoutId !== layoutFilter) {
-          return false;
+    return sortBeatsByTimeline(
+      beats.filter((beat) => {
+        if (typeFilter !== "all" && beat.beatType !== typeFilter) return false;
+        if (layoutFilter !== "all") {
+          const layoutId = scenelayerByBeat[beat.id]?.layoutId || "";
+          if (layoutFilter === "__unset__") {
+            if (layoutId) return false;
+          } else if (layoutId !== layoutFilter) {
+            return false;
+          }
         }
-      }
-      return true;
-    });
+        return true;
+      }),
+    );
   }, [beats, typeFilter, layoutFilter, scenelayerByBeat]);
 
   /**
@@ -1068,7 +1142,7 @@ export default function VisualPackageWorkspace({
     const placed = beats.filter(
       (b) => placementByBeat[b.id] || assignmentByBeat[b.id]?.usageId,
     );
-    return placed.length ? placed : beats;
+    return sortBeatsByTimeline(placed.length ? placed : beats);
   }, [beats, placementByBeat, assignmentByBeat]);
 
   const typeCounts = useMemo(() => {
@@ -1146,8 +1220,9 @@ export default function VisualPackageWorkspace({
         );
         setAutoSaveState("saved");
         const wordLabel = edit.wordText ? ` “${edit.wordText}”` : "";
+        const seedNote = saved.seededManualBaseline ? " · seeded project baseline" : "";
         setMessage(
-          `Auto-saved${wordLabel} · working copy + ledger (${saved.ledgerEntryCount ?? "?"} edits). Original suggestion kept.`,
+          `Auto-saved${wordLabel}${seedNote} · working copy + ledger (${saved.ledgerEntryCount ?? "?"} edits).`,
         );
       } catch (error) {
         if (gen !== autoSaveGen.current) return;
@@ -1936,23 +2011,9 @@ export default function VisualPackageWorkspace({
   }, []);
 
   const selectedPlacement = selectedId ? placementByBeat[selectedId] : undefined;
-  // Include assets/meta/motion — image + span end changes must rebuild preview, not
-  // only line/frame edits (those alone left a stale HyperFrames cache on screen).
-  const selectedPlacementKey = selectedPlacement
-    ? [
-        selectedPlacement.beatId,
-        selectedPlacement.locked ? "1" : "0",
-        selectedPlacement.engineId || "",
-        selectedPlacement.startFrame ?? "",
-        selectedPlacement.endFrameExclusive ?? "",
-        JSON.stringify(selectedPlacement.lines || []),
-        JSON.stringify(selectedPlacement.meta || {}),
-        JSON.stringify(selectedPlacement.assets || {}),
-        JSON.stringify(selectedPlacement.motion || {}),
-      ].join("|")
-    : "";
 
-  // Build live Tier B when Stage 3 selects a placed beat (or its saved craft changes).
+  // Build live Tier B when Stage 3 opens a beat — not on every craft keystroke.
+  // Craft edits stay local until "Save & update preview"; that path rebuilds once.
   useEffect(() => {
     if (!stage3) {
       setPlacementPreview(null);
@@ -1977,17 +2038,17 @@ export default function VisualPackageWorkspace({
       return;
     }
     setPlaying(false);
-    // Always send the full craft bag + force so engine-code fixes (previewRecipe)
-    // and image / end-frame edits cannot leave an old GSAP timeline on screen.
     void refreshPlacementPreview(selectedId, {
       lines: selectedPlacement.lines,
       meta: (selectedPlacement.meta || {}) as Record<string, unknown>,
       assets: (selectedPlacement.assets || {}) as Record<string, unknown>,
-      force: true,
+      motion: (selectedPlacement.motion || {}) as Record<string, unknown>,
+      endFrameExclusive: selectedPlacement.endFrameExclusive,
+      force: false,
     });
-    // selectedPlacementKey captures craft changes without object identity thrash.
+    // Only when the selected beat changes — not when autosaved craft echoes back.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage3, selectedId, selectedPlacementKey, refreshPlacementPreview]);
+  }, [stage3, selectedId, refreshPlacementPreview]);
 
   // Simple HF player wiring — mount once per cacheKey. No native loop: the live
   // preview plays a beat ONCE per click (loop wraps re-seek media mid-flight and
@@ -2218,7 +2279,7 @@ export default function VisualPackageWorkspace({
   const onScenelayer = async () => {
     if (!hasVideoProject || busy) return;
     if (!status?.outputExists && !status?.reviewedExists) {
-      setMessage("Finish Stage 1 Masterbeater beats before Scenelayer.");
+      setMessage("Place at least one Stage 1 beat (manual or Masterbeater) before Scenelayer.");
       return;
     }
     setBusy(true);
@@ -2247,7 +2308,7 @@ export default function VisualPackageWorkspace({
   const onAssign = async () => {
     if (!hasVideoProject || busy) return;
     if (!status?.outputExists && !status?.reviewedExists) {
-      setMessage("Finish Stage 1 Masterbeater beats before Assign.");
+      setMessage("Place at least one Stage 1 beat (manual or Masterbeater) before Assign.");
       return;
     }
     setBusy(true);
@@ -2353,7 +2414,137 @@ export default function VisualPackageWorkspace({
     }
   };
 
-  /** Saves run through a queue (never dropped) so rapid autosaves serialize safely. */
+  const finalRunning =
+    placementFinalJob?.status === "running" || placementFinalJob?.status === "canceling";
+
+  /** Full-episode Final: locked placements → HyperFrames encode + locked-cut audio remux. */
+  const onFinal = async () => {
+    if (!hasVideoProject || busy || finalRunning) return;
+    if (!placement?.finalRenderReady) {
+      setMessage(
+        `Lock remaining beats (${placement?.unlockedCount ?? "?"} unlocked) before Final.`,
+      );
+      return;
+    }
+    setBusy(true);
+    setFinalCanceling(false);
+    setFinalModalOpen(true);
+    setMessage("Starting full-episode Final (graphics + locked-cut audio)…");
+    try {
+      const started = await startPlacementFinal({ quality: "standard", force: true });
+      const job = started.job;
+      setPlacementFinalJob(job);
+      setFinalModalOpen(true);
+      if (started.reconnected) {
+        setMessage(
+          `Final already running · ${Math.round(job.value)}% · ${job.message || "rendering"}`,
+        );
+      } else {
+        setMessage(job.message || "Final render started…");
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not start Final.");
+      setPlacementFinalJob(null);
+      setFinalModalOpen(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onCancelFinal = async () => {
+    if (!placementFinalJob?.job_id || finalCanceling) return;
+    if (placementFinalJob.status !== "running" && placementFinalJob.status !== "canceling") {
+      return;
+    }
+    setFinalCanceling(true);
+    setMessage("Canceling Final render…");
+    try {
+      const result = await cancelPlacementFinal(placementFinalJob.job_id);
+      setPlacementFinalJob(result.job);
+      setMessage(result.job.message || "Canceling Final render…");
+    } catch (error) {
+      setFinalCanceling(false);
+      setMessage(error instanceof Error ? error.message : "Could not cancel Final.");
+    }
+  };
+
+  // Poll active Final job; reconnect after refresh / reload.
+  useEffect(() => {
+    if (!hasVideoProject) {
+      setPlacementFinalJob(null);
+      setFinalModalOpen(false);
+      return;
+    }
+    let cancelled = false;
+    const hydrate = async () => {
+      try {
+        const active = await getActivePlacementFinalJob();
+        if (!cancelled && active.job) {
+          setPlacementFinalJob(active.job);
+          if (active.job.status === "running" || active.job.status === "canceling") {
+            setFinalModalOpen(true);
+          }
+        }
+      } catch {
+        /* no open job is fine */
+      }
+    };
+    void hydrate();
+    return () => {
+      cancelled = true;
+    };
+  }, [hasVideoProject, projectName]);
+
+  useEffect(() => {
+    if (
+      !placementFinalJob ||
+      !placementFinalJob.job_id ||
+      (placementFinalJob.status !== "running" && placementFinalJob.status !== "canceling")
+    ) {
+      return;
+    }
+    let cancelled = false;
+    const jobId = placementFinalJob.job_id;
+    const tick = async () => {
+      try {
+        const next = await getPlacementFinalJob(jobId);
+        if (cancelled) return;
+        setPlacementFinalJob(next);
+        if (next.status === "running" || next.status === "canceling") {
+          setMessage(
+            `Final ${Math.round(next.value)}% · ${next.message || next.stage || "rendering"}`,
+          );
+        } else if (next.status === "complete") {
+          setFinalCanceling(false);
+          setMessage(
+            next.output_path
+              ? `Final ready · ${next.output_path}`
+              : "Final video ready (exports/final-video.mp4).",
+          );
+        } else if (next.status === "canceled") {
+          setFinalCanceling(false);
+          setMessage("Final render canceled.");
+        } else if (next.status === "failed") {
+          setFinalCanceling(false);
+          setMessage(next.error || next.message || "Final render failed.");
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setMessage(error instanceof Error ? error.message : "Lost Final job status.");
+        }
+      }
+    };
+    const handle = window.setInterval(() => {
+      void tick();
+    }, 1500);
+    void tick();
+    return () => {
+      cancelled = true;
+      window.clearInterval(handle);
+    };
+  }, [placementFinalJob?.job_id, placementFinalJob?.status]);
+
+  /** Saves serialize so rapid commits never race. Preview rebuilds only after a real save. */
   const placementSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const onSavePlacement = useCallback(
     (beatId: string, patch: {
@@ -2365,7 +2556,8 @@ export default function VisualPackageWorkspace({
       locked?: boolean;
       detail?: string;
     }) => {
-      const quiet = Boolean(patch.detail?.endsWith("(auto)"));
+      const quiet = Boolean(patch.detail?.includes("(auto)") || patch.detail?.includes("leave"));
+      const updatePreview = patch.detail !== "unlock" && patch.detail !== "lock-only";
       const run = async () => {
         setBusy(true);
         try {
@@ -2377,22 +2569,24 @@ export default function VisualPackageWorkspace({
             } else if (patch.locked === false) {
               setMessage(`Unlocked ${beatId}.`);
             } else {
-              setMessage(`Saved placement on ${beatId}.`);
+              setMessage(`Saved placement on ${beatId} · updating preview…`);
             }
             if (data.finalRenderReady) {
               setMessage((m) => `${m} All beats locked — Final is ready.`);
             }
           }
-          // Refresh live Tier B from saved rows. Autosaves reuse the fingerprint
-          // cache (no force) — only lock/unlock forces a rebuild.
-          void refreshPlacementPreview(beatId, {
-            lines: patch.lines,
-            meta: patch.meta,
-            assets: patch.assets,
-            motion: patch.motion,
-            endFrameExclusive: patch.endFrameExclusive,
-            force: patch.locked !== undefined,
-          });
+          // One forced rebuild after an explicit craft commit (or lock with lines).
+          // No longer rebuilds on every keystroke / autosave race.
+          if (updatePreview) {
+            await refreshPlacementPreview(beatId, {
+              lines: patch.lines,
+              meta: patch.meta,
+              assets: patch.assets,
+              motion: patch.motion,
+              endFrameExclusive: patch.endFrameExclusive,
+              force: true,
+            });
+          }
         } catch (error) {
           setMessage(error instanceof Error ? error.message : "Could not save placement.");
         } finally {
@@ -2431,9 +2625,9 @@ export default function VisualPackageWorkspace({
         <span className="workflow-status">
           {!hasVideoProject
             ? "Open a private project"
-            : status?.outputExists
+            : status?.outputExists || status?.reviewedExists
               ? `${status.beatCount || 0} beats · review below`
-              : "Load masterbeater-beats.json (Grok) or Refresh"}
+              : "Manual beats or Masterbeater · then Refresh"}
         </span>
       </PackageWorkflowStage>
       <PackageWorkflowStage stage={2} activeStage={activeStage} setActiveStage={setActiveStage}>
@@ -2518,28 +2712,34 @@ export default function VisualPackageWorkspace({
         <button
           className="workflow-action emphasized"
           type="button"
-          disabled={busy || !placement?.finalRenderReady}
+          disabled={busy || finalRunning || !placement?.finalRenderReady}
           title={
-            placement?.finalRenderReady
-              ? "All beats locked — full episode render (coming next)"
-              : "Lock every assigned beat before final render"
+            finalRunning
+              ? `Final render in progress · ${Math.round(placementFinalJob?.value ?? 0)}%`
+              : placement?.finalRenderReady
+                ? "Full episode render: all locked graphics on the locked cut (audio stream-copied)"
+                : "Lock every assigned beat before final render"
           }
-          onClick={() => {
-            setMessage(
-              placement?.finalRenderReady
-                ? "All beats locked. Full episode render will wire to the engine path next — placement data is ready."
-                : `Lock remaining beats (${placement?.unlockedCount ?? "?"} unlocked).`,
-            );
-          }}
+          onClick={() => void onFinal()}
         >
-          Final
+          {finalRunning ? (
+            <>
+              <Loader2 size={15} className="spin" /> Final {Math.round(placementFinalJob?.value ?? 0)}%
+            </>
+          ) : (
+            "Final"
+          )}
         </button>
         <span className="workflow-status">
           {!hasVideoProject
             ? "Open a private project"
-            : placement?.originalExists
-              ? `${placement.lockedCount ?? 0}/${placement.placementCount ?? 0} locked`
-              : "Place → edit lines → lock"}
+            : finalRunning
+              ? `Final ${Math.round(placementFinalJob?.value ?? 0)}%`
+              : placementFinalJob?.status === "complete"
+                ? "Final ready"
+                : placement?.originalExists
+                  ? `${placement.lockedCount ?? 0}/${placement.placementCount ?? 0} locked`
+                  : "Place → edit lines → lock"}
         </span>
       </PackageWorkflowStage>
     </nav>
@@ -2557,7 +2757,8 @@ export default function VisualPackageWorkspace({
     );
   }
 
-  const hasBeats = Boolean(result && (result.beatCount || beats.length));
+  // Drafts count: manual Stage 1 works before any server result exists.
+  const hasBeats = beats.length > 0 || Boolean(result?.beatCount);
   const hasTranscript = transcriptWords.length > 0;
 
   /** Stage 3 header: jump to any placed beat (row under title + lock). */
@@ -2695,13 +2896,20 @@ export default function VisualPackageWorkspace({
             type="button"
             className="workflow-action visual-package-placement-lock visual-package-transport-lock"
             disabled={busy}
-            onClick={() =>
+            onClick={() => {
+              const row = placementByBeat[selected.id];
+              // Flush any unsaved craft with the lock so stack edits aren't dropped.
               void onSavePlacement(selected.id, {
-                lines: draftPlacementLines ?? placementByBeat[selected.id].lines ?? [],
+                lines: draftPlacementLines ?? row.lines ?? [],
+                meta: (row.meta || {}) as Record<string, unknown>,
+                assets: (row.assets || {}) as Record<string, unknown>,
+                motion: (draftPlacementMotion || row.motion || {}) as Record<string, unknown>,
+                endFrameExclusive:
+                  draftPlacementEndFrame ?? row.endFrameExclusive,
                 locked: true,
                 detail: "lock",
-              })
-            }
+              });
+            }}
           >
             Lock
           </button>
@@ -3472,10 +3680,16 @@ export default function VisualPackageWorkspace({
               role="list"
               aria-label="Transcript with inline beat cards"
             >
-              {!hasBeats ? (
+              {!hasBeats && hasTranscript ? (
                 <p className="visual-package-empty">
-                  Transcript loaded, but no <code>masterbeater-beats.json</code> yet. Run Masterbeater,
-                  then Refresh.
+                  Select transcript words in the yellow gaps, choose a beat type, then{" "}
+                  <strong>New beat</strong>. Masterbeater is optional — auto-save writes the project
+                  working copy as you place beats.
+                </p>
+              ) : null}
+              {!hasBeats && !hasTranscript ? (
+                <p className="visual-package-empty">
+                  No transcript words loaded. Finish the locked cut / final transcript first, then Refresh.
                 </p>
               ) : null}
 
@@ -3498,43 +3712,51 @@ export default function VisualPackageWorkspace({
                   return (
                     <div key={item.key} className="visual-package-gap-words" role="listitem">
                       <div className="visual-package-word-row" aria-label="Unbeaten transcript words">
-                        {item.words.map((word) => {
-                          const index = wordIndexById.get(word.id) ?? -1;
-                          const isSelected = selectionCoversIndex(membershipSel, index);
-                          const isEdge =
-                            Boolean(arrows) &&
-                            membershipSel != null &&
-                            index === membershipSel.endIndex;
-                          const trailing =
-                            isEdge && arrows ? (
-                              <MembershipArrows
-                                upTitle={arrows.upTitle}
-                                downTitle={arrows.downTitle}
-                                onUp={arrows.onUp}
-                                onDown={arrows.onDown}
-                              />
-                            ) : null;
-                          return (
-                            <WordChip
-                              key={word.id}
-                              word={word}
-                              variant="gap"
-                              selected={isSelected}
-                              selectionEdge={Boolean(trailing)}
-                              title="Click to select/unselect · drag or Shift-click a phrase · then ↑/↓"
-                              trailing={trailing}
-                              onPointerDownWord={(event) =>
-                                onWordPointerDown("gap", undefined, index, event)
-                              }
-                              onPointerEnterWord={(event) =>
-                                onWordPointerEnter("gap", undefined, index, event)
-                              }
-                              onClickWord={(event) =>
-                                onWordSelectClick("gap", undefined, word.id, event)
-                              }
-                            />
-                          );
-                        })}
+                        {groupWordsBySentence(item.words).map((sentence) => (
+                          <div
+                            key={sentence.key}
+                            className="visual-package-sentence"
+                            data-sentence={sentence.key}
+                          >
+                            {sentence.words.map((word) => {
+                              const index = wordIndexById.get(word.id) ?? -1;
+                              const isSelected = selectionCoversIndex(membershipSel, index);
+                              const isEdge =
+                                Boolean(arrows) &&
+                                membershipSel != null &&
+                                index === membershipSel.endIndex;
+                              const trailing =
+                                isEdge && arrows ? (
+                                  <MembershipArrows
+                                    upTitle={arrows.upTitle}
+                                    downTitle={arrows.downTitle}
+                                    onUp={arrows.onUp}
+                                    onDown={arrows.onDown}
+                                  />
+                                ) : null;
+                              return (
+                                <WordChip
+                                  key={word.id}
+                                  word={word}
+                                  variant="gap"
+                                  selected={isSelected}
+                                  selectionEdge={Boolean(trailing)}
+                                  title="Click to select/unselect · drag or Shift-click a phrase · then ↑/↓"
+                                  trailing={trailing}
+                                  onPointerDownWord={(event) =>
+                                    onWordPointerDown("gap", undefined, index, event)
+                                  }
+                                  onPointerEnterWord={(event) =>
+                                    onWordPointerEnter("gap", undefined, index, event)
+                                  }
+                                  onClickWord={(event) =>
+                                    onWordSelectClick("gap", undefined, word.id, event)
+                                  }
+                                />
+                              );
+                            })}
+                          </div>
+                        ))}
                       </div>
                     </div>
                   );
@@ -3633,59 +3855,67 @@ export default function VisualPackageWorkspace({
                           aria-label={`Words in ${item.beat.beatType} beat`}
                         >
                           {item.words.length ? (
-                            item.words.map((word) => {
-                              const index = wordIndexById.get(word.id) ?? -1;
-                              const isSelected =
-                                selInBeat && selectionCoversIndex(membershipSel, index);
-                              const isEdge =
-                                Boolean(arrows) &&
-                                membershipSel != null &&
-                                index === membershipSel.endIndex;
-                              const trailing =
-                                isEdge && arrows ? (
-                                  <MembershipArrows
-                                    upTitle={arrows.upTitle}
-                                    downTitle={arrows.downTitle}
-                                    onUp={arrows.onUp}
-                                    onDown={arrows.onDown}
-                                  />
-                                ) : null;
-                              return (
-                                <WordChip
-                                  key={word.id}
-                                  word={word}
-                                  variant="in-beat"
-                                  selected={isSelected}
-                                  selectionEdge={Boolean(trailing)}
-                                  title={
-                                    stage3
-                                      ? "Stage 3 — placement on the left; lock status on the right"
-                                      : stage2
-                                        ? "Stage 2 — layout + graphic on the right"
-                                        : "Click to select/unselect · drag or Shift-click a phrase · ↑/↓ to transcript"
-                                  }
-                                  trailing={trailing}
-                                  onPointerDownWord={
-                                    stage2
-                                      ? undefined
-                                      : (event) =>
-                                          onWordPointerDown("beat", item.beat.id, index, event)
-                                  }
-                                  onPointerEnterWord={
-                                    stage2
-                                      ? undefined
-                                      : (event) =>
-                                          onWordPointerEnter("beat", item.beat.id, index, event)
-                                  }
-                                  onClickWord={
-                                    stage2
-                                      ? undefined
-                                      : (event) =>
-                                          onWordSelectClick("beat", item.beat.id, word.id, event)
-                                  }
-                                />
-                              );
-                            })
+                            groupWordsBySentence(item.words).map((sentence) => (
+                              <div
+                                key={sentence.key}
+                                className="visual-package-sentence"
+                                data-sentence={sentence.key}
+                              >
+                                {sentence.words.map((word) => {
+                                  const index = wordIndexById.get(word.id) ?? -1;
+                                  const isSelected =
+                                    selInBeat && selectionCoversIndex(membershipSel, index);
+                                  const isEdge =
+                                    Boolean(arrows) &&
+                                    membershipSel != null &&
+                                    index === membershipSel.endIndex;
+                                  const trailing =
+                                    isEdge && arrows ? (
+                                      <MembershipArrows
+                                        upTitle={arrows.upTitle}
+                                        downTitle={arrows.downTitle}
+                                        onUp={arrows.onUp}
+                                        onDown={arrows.onDown}
+                                      />
+                                    ) : null;
+                                  return (
+                                    <WordChip
+                                      key={word.id}
+                                      word={word}
+                                      variant="in-beat"
+                                      selected={isSelected}
+                                      selectionEdge={Boolean(trailing)}
+                                      title={
+                                        stage3
+                                          ? "Stage 3 — placement on the left; lock status on the right"
+                                          : stage2
+                                            ? "Stage 2 — layout + graphic on the right"
+                                            : "Click to select/unselect · drag or Shift-click a phrase · ↑/↓ to transcript"
+                                      }
+                                      trailing={trailing}
+                                      onPointerDownWord={
+                                        stage2
+                                          ? undefined
+                                          : (event) =>
+                                              onWordPointerDown("beat", item.beat.id, index, event)
+                                      }
+                                      onPointerEnterWord={
+                                        stage2
+                                          ? undefined
+                                          : (event) =>
+                                              onWordPointerEnter("beat", item.beat.id, index, event)
+                                      }
+                                      onClickWord={
+                                        stage2
+                                          ? undefined
+                                          : (event) =>
+                                              onWordSelectClick("beat", item.beat.id, word.id, event)
+                                      }
+                                    />
+                                  );
+                                })}
+                              </div>
+                            ))
                           ) : (
                             item.beat.wordsText || item.beat.span || item.beat.label || "—"
                           )}
@@ -3756,10 +3986,109 @@ export default function VisualPackageWorkspace({
         </section>
       )}
 
+      {finalModalOpen && placementFinalJob ? (
+        <PlacementFinalProgressModal
+          job={placementFinalJob}
+          canceling={finalCanceling || placementFinalJob.status === "canceling"}
+          onCancel={() => void onCancelFinal()}
+          onClose={() => {
+            setFinalModalOpen(false);
+            setFinalCanceling(false);
+          }}
+        />
+      ) : null}
+
       {/* Status/error footer: fixed slot at the very bottom so appearing and
           disappearing messages never shift the controls above. */}
       <div className="visual-package-message-footer" aria-live="polite">
         {message ? <p className="visual-package-message">{message}</p> : null}
+      </div>
+    </div>
+  );
+}
+
+function formatFinalDuration(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "—";
+  const total = Math.round(seconds);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  if (m <= 0) return `${s}s`;
+  return `${m}m ${s.toString().padStart(2, "0")}s`;
+}
+
+function PlacementFinalProgressModal({
+  job,
+  canceling,
+  onCancel,
+  onClose,
+}: {
+  job: PlacementFinalJob;
+  canceling: boolean;
+  onCancel: () => void;
+  onClose: () => void;
+}) {
+  const running = job.status === "running";
+  const isCanceling = job.status === "canceling" || canceling;
+  const failed = job.status === "failed";
+  const canceled = job.status === "canceled";
+  const complete = job.status === "complete";
+  const active = running || isCanceling;
+  const clamped = Math.max(0, Math.min(100, Math.round(job.value || 0)));
+  const title = isCanceling
+    ? "Canceling Final…"
+    : running
+      ? "Exporting Final video"
+      : failed
+        ? "Final export failed"
+        : canceled
+          ? "Final export canceled"
+          : "Final video ready";
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="placement-final-title">
+      <div className={failed ? "progress-modal failed" : "progress-modal"}>
+        <span className="eyebrow">Placement Final</span>
+        <h2 id="placement-final-title">{title}</h2>
+        <p>{job.message || (active ? "Rendering full-episode graphics…" : "Done.")}</p>
+        {job.output_path ? <p className="modal-path">{job.output_path}</p> : null}
+        <div className={active && clamped < 2 ? "progress-track indeterminate" : "progress-track"}>
+          <div
+            className="progress-bar"
+            style={active && clamped < 2 ? undefined : { width: `${complete ? 100 : clamped}%` }}
+          />
+        </div>
+        <div className="placement-final-progress-meta">
+          <strong>{active ? `${clamped}%` : complete ? "100%" : failed || canceled ? "—" : `${clamped}%`}</strong>
+          <span>
+            Elapsed {formatFinalDuration(job.elapsed_seconds)}
+            {active && job.eta_seconds != null ? ` · ETA ~${formatFinalDuration(job.eta_seconds)}` : ""}
+          </span>
+        </div>
+        <p className="placement-final-progress-hint">
+          {active
+            ? "Same HyperFrames engines as placement preview · GPU encode + parallel capture when available"
+            : complete
+              ? "Published to exports/final-video.mp4 (locked-cut audio stream-copied)"
+              : canceled
+                ? "No final video was published. You can start Final again when ready."
+                : "Check the message above, then try again."}
+        </p>
+        <div className="placement-final-progress-actions">
+          {active ? (
+            <button
+              type="button"
+              className="modal-action"
+              onClick={onCancel}
+              disabled={isCanceling}
+            >
+              {isCanceling ? "Canceling…" : "Cancel"}
+            </button>
+          ) : (
+            <button type="button" className="modal-action" onClick={onClose}>
+              {failed ? "Close" : canceled ? "Close" : "Done"}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -3989,19 +4318,29 @@ function PlacementEditorPanel({
   const [motionDraft, setMotionDraft] = useState<Record<string, unknown>>({});
   /** Graphic end frame (placement endFrameExclusive). Default = beat end. */
   const [endFrameDraft, setEndFrameDraft] = useState<number | null>(null);
-  const previewTimer = useRef<number | null>(null);
-  const autosaveTimer = useRef<number | null>(null);
   /** Canonical fingerprint of the lines we last sent to the server (echo detection). */
   const lastSentLines = useRef<string>("");
-  /** Last end frame we autosaved — skip clobber when server echoes our write. */
+  /** Last end frame we saved — skip clobber when server echoes our write. */
   const lastSentEndFrame = useRef<number | null>(null);
   const lastSentMotion = useRef<string>("");
+  const lastSentMeta = useRef<string>("");
+  const lastSentAssets = useRef<string>("");
   /** Beat the draft currently mirrors — a change always forces a full re-sync. */
   const prevBeatId = useRef<string | null>(null);
+  /** Latest draft for flush-on-leave (beat switch must not drop unsaved stack edits). */
+  const draftSnapshotRef = useRef<{
+    beatId: string;
+    lines: PlacementLine[];
+    meta: Record<string, unknown>;
+    assets: Record<string, unknown>;
+    motion: Record<string, unknown>;
+    endFrameExclusive?: number;
+    dirty: boolean;
+  } | null>(null);
   const locked = Boolean(placement?.locked);
   /** Only re-sync draft from server when beat/lock/server lines actually change — not object identity. */
   const serverLinesKey = placement
-    ? `${placement.beatId}|${placement.locked ? "1" : "0"}|${JSON.stringify(placement.lines || [])}|${placement.endFrameExclusive ?? ""}|${JSON.stringify(placement.motion || {})}`
+    ? `${placement.beatId}|${placement.locked ? "1" : "0"}|${JSON.stringify(placement.lines || [])}|${placement.endFrameExclusive ?? ""}|${JSON.stringify(placement.motion || {})}|${JSON.stringify(placement.meta || {})}|${JSON.stringify(placement.assets || {})}`
     : "";
 
   useEffect(() => {
@@ -4016,6 +4355,8 @@ function PlacementEditorPanel({
       lastSentLines.current = "";
       lastSentEndFrame.current = null;
       lastSentMotion.current = "";
+      lastSentMeta.current = "";
+      lastSentAssets.current = "";
       prevBeatId.current = null;
       return;
     }
@@ -4025,6 +4366,8 @@ function PlacementEditorPanel({
       lastSentLines.current = "";
       lastSentEndFrame.current = null;
       lastSentMotion.current = "";
+      lastSentMeta.current = "";
+      lastSentAssets.current = "";
       // Punch-zoom has no copy lines — arm Zoom in by default.
       setArmedKind(
         placement.engineId === "source-punch-zoom" ? "zoomIn" : "line",
@@ -4050,13 +4393,17 @@ function PlacementEditorPanel({
       }
     }
     const serverMotionKey = JSON.stringify(serverMotion);
-    // Our own autosave echoing back must not clobber newer draft edits or
+    const serverMetaKey = JSON.stringify(placement.meta || {});
+    const serverAssetsKey = JSON.stringify(placement.assets || {});
+    // Our own save echoing back must not clobber newer draft edits or
     // reset the armed line — only real external changes (beat switch, re-Place,
     // unlock reset) re-sync the draft.
     const linesEcho = !beatChanged && linesFingerprint(incoming) === lastSentLines.current;
     const endEcho = !beatChanged && lastSentEndFrame.current != null && serverEnd === lastSentEndFrame.current;
     const motionEcho = !beatChanged && lastSentMotion.current !== "" && serverMotionKey === lastSentMotion.current;
-    if (linesEcho && endEcho && motionEcho) return;
+    const metaEcho = !beatChanged && lastSentMeta.current !== "" && serverMetaKey === lastSentMeta.current;
+    const assetsEcho = !beatChanged && lastSentAssets.current !== "" && serverAssetsKey === lastSentAssets.current;
+    if (linesEcho && endEcho && motionEcho && metaEcho && assetsEcho) return;
     if (!linesEcho) {
       setDraftLines(incoming);
       if (beatChanged) setArmedIndex(0);
@@ -4067,25 +4414,15 @@ function PlacementEditorPanel({
     if (!motionEcho || beatChanged) {
       setMotionDraft(serverMotion);
     }
-    setMetaDraft({ ...(placement.meta || {}) });
-    setAssetsDraft({ ...(placement.assets || {}) });
+    if (!metaEcho || beatChanged) {
+      setMetaDraft({ ...(placement.meta || {}) });
+    }
+    if (!assetsEcho || beatChanged) {
+      setAssetsDraft({ ...(placement.assets || {}) });
+    }
     // serverLinesKey captures content; avoid placement.lines identity thrash mid-edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverLinesKey]);
-
-  useEffect(() => {
-    return () => {
-      if (previewTimer.current != null) window.clearTimeout(previewTimer.current);
-    };
-  }, []);
-
-  // Locking cancels any pending autosave — never write lines to a locked beat.
-  useEffect(() => {
-    if (locked && autosaveTimer.current != null) {
-      window.clearTimeout(autosaveTimer.current);
-      autosaveTimer.current = null;
-    }
-  }, [locked]);
 
   useEffect(() => {
     onLinesChange?.(draftLines);
@@ -4114,9 +4451,9 @@ function PlacementEditorPanel({
   const hasZoomIn = motionKeys.includes("zoomInFrame");
   const hasZoomOut = motionKeys.includes("zoomOutFrame");
 
-  const schedulePreview = useCallback(
+  const craftPayload = useCallback(
     (
-      lines: PlacementLine[],
+      lines: PlacementLine[] = draftLines,
       knobs?: {
         meta?: Record<string, unknown>;
         assets?: Record<string, unknown>;
@@ -4124,9 +4461,7 @@ function PlacementEditorPanel({
         endFrameExclusive?: number;
       },
     ) => {
-      if (locked) return;
       const meta = normalizeKnobBag(knobs?.meta ?? metaDraft);
-      // Drop retired holdSec if it still sits in older placement meta bags.
       delete meta.holdSec;
       const assets = normalizeKnobBag(knobs?.assets ?? assetsDraft);
       const motion = normalizeKnobBag(knobs?.motion ?? motionDraft);
@@ -4135,65 +4470,106 @@ function PlacementEditorPanel({
         endFrameDraft ??
         placement?.endFrameExclusive ??
         undefined;
-      if (previewTimer.current != null) window.clearTimeout(previewTimer.current);
-      previewTimer.current = window.setTimeout(() => {
-        onDraftPreview(lines, {
-          meta,
-          assets,
-          motion,
-          endFrameExclusive: endFrame,
-        });
-      }, 450);
-      // Autosave the working copy shortly after the edit settles. The timeout
-      // closure captures this beat's onSave binding, so a save still in flight
-      // when the user steps to another beat lands on the right beat.
-      if (autosaveTimer.current != null) window.clearTimeout(autosaveTimer.current);
-      autosaveTimer.current = window.setTimeout(() => {
-        lastSentLines.current = linesFingerprint(lines);
-        if (endFrame != null) lastSentEndFrame.current = endFrame;
-        lastSentMotion.current = JSON.stringify(motion);
-        onSave({
-          lines,
-          meta,
-          assets,
-          motion,
-          endFrameExclusive: endFrame,
-          detail: "edit lines (auto)",
-        });
-      }, 700);
+      return { lines, meta, assets, motion, endFrameExclusive: endFrame };
     },
-    [
-      locked,
-      onDraftPreview,
-      onSave,
-      metaDraft,
-      assetsDraft,
-      motionDraft,
-      endFrameDraft,
-      placement?.endFrameExclusive,
-    ],
+    [draftLines, metaDraft, assetsDraft, motionDraft, endFrameDraft, placement?.endFrameExclusive],
   );
 
-  /** Knob edits (meta/assets/motion) share the same debounce + autosave path as lines. */
+  const isDirty = useMemo(() => {
+    if (!placement || locked) return false;
+    const serverLines = (placement.lines || []).map((line) => ({
+      slot: line.slot,
+      text: line.text || "",
+      revealFrame: line.revealFrame ?? 0,
+    }));
+    if (linesFingerprint(draftLines) !== linesFingerprint(serverLines)) return true;
+    const serverEnd = Number(placement.endFrameExclusive ?? 0) || 0;
+    const draftEnd = Number(endFrameDraft ?? 0) || 0;
+    if (draftEnd !== serverEnd) return true;
+    const payload = craftPayload();
+    if (JSON.stringify(payload.motion) !== JSON.stringify(placement.motion || {})) return true;
+    if (JSON.stringify(payload.meta) !== JSON.stringify(placement.meta || {})) return true;
+    if (JSON.stringify(payload.assets) !== JSON.stringify(placement.assets || {})) return true;
+    return false;
+  }, [placement, locked, draftLines, endFrameDraft, craftPayload]);
+
+  /** Explicit commit: one save + one preview rebuild. No per-keystroke races. */
+  const commitCraft = useCallback(
+    (detail = "save craft") => {
+      if (locked || !placement) return;
+      const payload = craftPayload();
+      lastSentLines.current = linesFingerprint(payload.lines);
+      if (payload.endFrameExclusive != null) {
+        lastSentEndFrame.current = payload.endFrameExclusive;
+      }
+      lastSentMotion.current = JSON.stringify(payload.motion);
+      lastSentMeta.current = JSON.stringify(payload.meta);
+      lastSentAssets.current = JSON.stringify(payload.assets);
+      onSave({
+        lines: payload.lines,
+        meta: payload.meta,
+        assets: payload.assets,
+        motion: payload.motion,
+        endFrameExclusive: payload.endFrameExclusive,
+        detail,
+      });
+    },
+    [locked, placement, craftPayload, onSave],
+  );
+
+  // Keep snapshot current so beat-switch flush can save without losing edits.
+  useEffect(() => {
+    if (!placement || locked) {
+      draftSnapshotRef.current = null;
+      return;
+    }
+    const payload = craftPayload();
+    draftSnapshotRef.current = {
+      beatId: placement.beatId,
+      lines: payload.lines,
+      meta: payload.meta,
+      assets: payload.assets,
+      motion: payload.motion,
+      endFrameExclusive: payload.endFrameExclusive,
+      dirty: isDirty,
+    };
+  }, [placement, locked, craftPayload, isDirty]);
+
+  // Leaving a beat with unsaved craft: flush once so Dependency Stack edits aren't dropped.
+  useEffect(() => {
+    return () => {
+      const snap = draftSnapshotRef.current;
+      if (!snap?.dirty || !snap.beatId) return;
+      lastSentLines.current = linesFingerprint(snap.lines);
+      if (snap.endFrameExclusive != null) lastSentEndFrame.current = snap.endFrameExclusive;
+      lastSentMotion.current = JSON.stringify(snap.motion);
+      lastSentMeta.current = JSON.stringify(snap.meta);
+      lastSentAssets.current = JSON.stringify(snap.assets);
+      onSave({
+        lines: snap.lines,
+        meta: snap.meta,
+        assets: snap.assets,
+        motion: snap.motion,
+        endFrameExclusive: snap.endFrameExclusive,
+        detail: "flush on leave (auto)",
+      });
+    };
+    // Only when the placed beat identity changes / panel unmounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [placement?.beatId]);
+
+  /** Knob edits stay local until Save & update preview. */
   const updateKnobs = useCallback(
     (patch: {
       meta?: Record<string, unknown>;
       assets?: Record<string, unknown>;
       motion?: Record<string, unknown>;
     }) => {
-      const nextMeta = patch.meta ?? metaDraft;
-      const nextAssets = patch.assets ?? assetsDraft;
-      const nextMotion = patch.motion ?? motionDraft;
       if (patch.meta) setMetaDraft(patch.meta);
       if (patch.assets) setAssetsDraft(patch.assets);
       if (patch.motion) setMotionDraft(patch.motion);
-      schedulePreview(draftLines, {
-        meta: nextMeta,
-        assets: nextAssets,
-        motion: nextMotion,
-      });
     },
-    [metaDraft, assetsDraft, motionDraft, draftLines, schedulePreview],
+    [],
   );
 
   /** Placement span end — when the graphic undocks back to full talking-head. */
@@ -4216,19 +4592,10 @@ function PlacementEditorPanel({
       if (locked) return;
       const next = Math.max(minEndFrame, Math.min(beatEndFrame, Math.round(raw)));
       setEndFrameDraft(next);
-      schedulePreview(draftLines, { endFrameExclusive: next });
       // Seek to the last frame still inside the graphic (end is exclusive).
       onSeekReveal(Math.max(spanStartFrame, next - 1));
     },
-    [
-      locked,
-      minEndFrame,
-      beatEndFrame,
-      draftLines,
-      schedulePreview,
-      onSeekReveal,
-      spanStartFrame,
-    ],
+    [locked, minEndFrame, beatEndFrame, onSeekReveal, spanStartFrame],
   );
 
   const setMotionFrame = useCallback(
@@ -4250,26 +4617,13 @@ function PlacementEditorPanel({
         }
       }
       setMotionDraft(updated);
-      schedulePreview(draftLines, { motion: updated });
       onSeekReveal(next);
     },
-    [
-      locked,
-      spanStartFrame,
-      beatEndFrame,
-      motionDraft,
-      draftLines,
-      schedulePreview,
-      onSeekReveal,
-    ],
+    [locked, spanStartFrame, beatEndFrame, motionDraft, onSeekReveal],
   );
 
   const updateLine = (index: number, patch: Partial<PlacementLine>) => {
-    setDraftLines((prev) => {
-      const next = prev.map((line, i) => (i === index ? { ...line, ...patch } : line));
-      schedulePreview(next);
-      return next;
-    });
+    setDraftLines((prev) => prev.map((line, i) => (i === index ? { ...line, ...patch } : line)));
   };
 
   const armLine = (index: number) => {
@@ -4379,16 +4733,34 @@ function PlacementEditorPanel({
     }
   };
 
-  const setRevealFromWord = (word: VisualPackageTranscriptWord) => {
+  const wordStartFrame = (word: VisualPackageTranscriptWord) =>
+    word.startFrame != null && Number.isFinite(word.startFrame)
+      ? Math.round(word.startFrame)
+      : Math.round((word.startSec ?? 0) * fps);
+
+  const setTimingFromWord = (word: VisualPackageTranscriptWord) => {
     if (locked) return;
-    // Word chips always set the armed *line* reveal (not Ends).
+    // Word chips drive whatever timing target is armed (line reveal, Ends, zoom).
+    if (armedKind === "end") {
+      // Ends is exclusive: undock as this word starts (graphic no longer covers it).
+      setArmedFrame(wordStartFrame(word));
+      return;
+    }
+    if (armedKind === "zoomIn" || armedKind === "zoomOut") {
+      setArmedFrame(wordStartFrame(word));
+      return;
+    }
     if (armedKind !== "line" || !armed) return;
-    const frame =
-      word.startFrame != null && Number.isFinite(word.startFrame)
-        ? Math.round(word.startFrame)
-        : Math.round((word.startSec ?? 0) * fps);
-    setArmedFrame(frame);
+    setArmedFrame(wordStartFrame(word));
   };
+
+  /** Chips are live whenever a timing target is armed (not only copy lines). */
+  const wordChipsEnabled =
+    !editDisabled &&
+    (armedKind === "end" ||
+      armedKind === "zoomIn" ||
+      armedKind === "zoomOut" ||
+      (armedKind === "line" && Boolean(armed)));
 
   const addListLine = () => {
     if (!listSlot || locked) return;
@@ -4406,7 +4778,6 @@ function PlacementEditorPanel({
         },
       ];
       setArmedIndex(next.length - 1);
-      schedulePreview(next);
       return next;
     });
   };
@@ -4425,7 +4796,6 @@ function PlacementEditorPanel({
         return re;
       });
       setArmedIndex((current) => Math.max(0, Math.min(current, next.length - 1)));
-      schedulePreview(next);
       return next;
     });
   };
@@ -4499,6 +4869,40 @@ function PlacementEditorPanel({
       {/* Transport pinned directly under the header — fixed position across beats,
           no matter how many line rows the engine below it has. */}
       {transportSlot}
+
+      {selected && placement && !locked ? (
+        <div className="visual-package-craft-commit" role="status">
+          <span
+            className={[
+              "visual-package-craft-commit-status",
+              isDirty ? "is-dirty" : previewBusy ? "is-busy" : "is-clean",
+            ].join(" ")}
+          >
+            {previewBusy
+              ? "Updating preview…"
+              : isDirty
+                ? "Unsaved edits — preview still shows last save"
+                : livePreviewReady
+                  ? "Saved · preview matches craft"
+                  : "Saved"}
+          </span>
+          <button
+            type="button"
+            className="workflow-action emphasized visual-package-craft-commit-btn"
+            disabled={busy || previewBusy || !isDirty}
+            title="Save lines, knobs, and timing, then rebuild the live HyperFrames preview once"
+            onClick={() => commitCraft("save craft")}
+          >
+            {previewBusy ? (
+              <>
+                <Loader2 size={14} className="spin" /> Updating…
+              </>
+            ) : (
+              "Save & update preview"
+            )}
+          </button>
+        </div>
+      ) : null}
 
       {!hasPlacements ? (
         <p className="visual-package-layout-review-hint">
@@ -4927,25 +5331,37 @@ function PlacementEditorPanel({
             </span>
           ) : (
             beatWords.map((word) => {
-              const frame =
-                word.startFrame != null && Number.isFinite(word.startFrame)
-                  ? Math.round(word.startFrame)
-                  : Math.round((word.startSec ?? 0) * fps);
-              const isReveal =
-                armedKind === "line" &&
-                armed != null &&
-                Math.abs((armed.revealFrame || 0) - frame) <= 1;
+              const frame = wordStartFrame(word);
+              const isMark =
+                (armedKind === "line" &&
+                  armed != null &&
+                  Math.abs((armed.revealFrame || 0) - frame) <= 1) ||
+                (armedKind === "end" &&
+                  endFrameDraft != null &&
+                  Math.abs(endFrameDraft - frame) <= 1) ||
+                (armedKind === "zoomIn" &&
+                  Math.abs(Number(motionDraft.zoomInFrame ?? NaN) - frame) <= 1) ||
+                (armedKind === "zoomOut" &&
+                  Math.abs(Number(motionDraft.zoomOutFrame ?? NaN) - frame) <= 1);
+              const chipTitle =
+                armedKind === "end"
+                  ? `Set Ends (undock) · f ${frame} · ${frameToClock(frame, fps)}`
+                  : armedKind === "zoomIn"
+                    ? `Set zoom-in · f ${frame} · ${frameToClock(frame, fps)}`
+                    : armedKind === "zoomOut"
+                      ? `Set zoom-out · f ${frame} · ${frameToClock(frame, fps)}`
+                      : `Set reveal · f ${frame} · ${frameToClock(frame, fps)}`;
               return (
                 <button
                   key={word.id}
                   type="button"
                   className={[
                     "visual-package-placement-word-chip",
-                    isReveal ? "is-reveal" : "",
+                    isMark ? "is-reveal" : "",
                   ].join(" ")}
-                  disabled={editDisabled || armedKind !== "line" || !armed}
-                  title={`Set reveal · f ${frame} · ${frameToClock(frame, fps)}`}
-                  onClick={() => setRevealFromWord(word)}
+                  disabled={!wordChipsEnabled}
+                  title={chipTitle}
+                  onClick={() => setTimingFromWord(word)}
                 >
                   {word.text}
                 </button>

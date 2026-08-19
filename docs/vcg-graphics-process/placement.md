@@ -119,6 +119,7 @@ Adapters map slots → existing `parameters.*` (engines keep draw names until cl
 | robot-roast | `text` | — | — | — | — |
 | robot-rocket-sign | `text` | — | — | — | — |
 | dependency-stack | `text` + `nodes.*` | **nodes** max **6** | — | — | — |
+| intro-credentials | `text` (name), `thankYou?` + `nodes.*` | **nodes** max **6** | — | — | — |
 | ~~speaker-side-panel~~ | *retired* → use **dependency-stack** | — | — | — | — |
 | numbered-example-card | `titleLines.*` | **titleLines** max 8 | example #s | — | tags / accent |
 | speaker-rise-callouts | `thesis` + `callouts.*` | **callouts** max 8 | accent index | — | — |
@@ -127,6 +128,8 @@ Adapters map slots → existing `parameters.*` (engines keep draw names until cl
 | numbered-step-intro | `title`, `action` | — | `stepNumber`, `showNumber?` | — | `side` |
 | ui-callout | `label` | — | `x`, `y`, `width`, `height` (normalized 0–1; upper-left + size → `targetBounds`) | — | `pointer`, `accentColor?` |
 | windows-prompt-typing | `prompt` | — | `appName?` | — | `side` |
+| windows-prompt-overlay | `prompt` | — | `appName?` | — | — |
+| numbered-phrase-reveal | `title?`, `text` | — | `numberLabel` (free string) | — | — |
 | brand-cta-lockup | *(none — join line + link brand-fixed)* | — | — | — | — |
 | tradeoff-meter | `leftLabel`, `rightLabel`, `verdict` | — | `value` | — | `side` |
 | source-punch-zoom | *(none)* | — | — | — | `focusX`/`focusY`/`zoom`/`settleSec`/`motion`; **`zoomInFrame`/`zoomOutFrame`** (absolute frames when zoom-in / zoom-out *start*; default beat start / near beat end) |
@@ -134,7 +137,8 @@ Adapters map slots → existing `parameters.*` (engines keep draw names until cl
 **No `kicker` slot** anywhere. Adapters never fill kicker.
 
 **Video-docking engines** (move `#main-video`, not only overlay text): include at least  
-dependency-stack, progress-scale, windows-prompt-typing, punchline-reveal (joke card), source-punch-zoom, brand-cta-lockup.  
+dependency-stack, intro-credentials, progress-scale, windows-prompt-typing, numbered-phrase-reveal, punchline-reveal (joke card), source-punch-zoom, brand-cta-lockup.  
+(`windows-prompt-overlay` is overlay-only — no video dock; still uses Tier B composition for typing.)  
 Live preview **must** use real composition (Tier B), not a text-only sticker.
 
 **Engine identity:** one engine id = one look. No dual modes.  
@@ -164,6 +168,7 @@ None require FFmpeg for the placement loop.
 Engines that need the **full runtime** (not a static CSS opacity cheat) still stay in-browser:
 
 - windows-prompt-typing (letter typing)  
+- windows-prompt-overlay (letter typing, no dock)  
 - robots / rocket (multi-phase / SVG)  
 - source-punch-zoom (video zoom)  
 - video-dock family (stack, side-panel, progress, prompt, joke punchline, CTA)
@@ -222,6 +227,8 @@ List engines: **Add line** / remove within `list_max` (dependency-stack **6** no
 | **Re-Place** | Overwrites **unlocked** only; **never** locked |
 | **Final** | Enabled only when every **assigned** placement has `locked: true` |
 | **Final output** | One full re-render of locked cut with all locked placements (same engines as library samples) |
+| **Final audio** | Stream-copy from the locked cut (no second normalize). Optional loudness pass is Stage 5 export only. |
+| **Final path** | `exports/final-video.mp4` under the private video project |
 
 Unassigned beats (no golden) do not require a placement lock.
 
@@ -249,7 +256,7 @@ For each assigned unlocked beat:
 | HTTP | `POST …/placement/run`, `PUT …/placement/beat`, `POST …/placement/preview` | **BUILT** |
 | Stage 3 UI studio | `web/app/visual-package.tsx` | **BUILT** — images/6 layout: craft left (primary), live preview right; word chips + ±1/5/10; no transcript wall |
 | Live composition preview | HyperFrames single-beat workspace + player scrub | **BUILT** — Tier B hyperframes-player; rebuild on select/edit |
-| Final full render from placements | Engine package path | **Not built** (gate ready) |
+| Final full render from placements | `render_placement_final_for_video_project` + `POST …/placement/final` | **BUILT** — full HyperFrames encode; locked-cut audio stream-copied (no re-normalize) → `exports/final-video.mp4` |
 
 ---
 

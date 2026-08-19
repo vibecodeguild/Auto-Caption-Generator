@@ -54,18 +54,91 @@ class SplicePlan:
 
 
 def generate_splices(project: TranscriptProject, edits: EditDecisionList) -> SplicePlan:
-    deleted_word_indexes = _deleted_word_indexes(project, edits)
-    boundaries = _deleted_boundaries(project, edits, deleted_word_indexes)
-    kept_groups = _kept_word_groups(project.words, deleted_word_indexes, boundaries)
-    kept_ranges = _build_kept_ranges(kept_groups)
-    transcript_splices = _build_splices(project, kept_ranges, boundaries, edits)
-    kept_ranges = _apply_splice_adjustments(kept_ranges, transcript_splices)
+    kept_ranges, transcript_splices = _transcript_kept_ranges(project, edits)
     kept_ranges = _apply_manual_cuts(project, kept_ranges, edits.manual_cuts)
     kept_ranges = _apply_final_out_frame(project, kept_ranges, edits.final_out_frame)
     splices = _finalize_splices(project, kept_ranges, transcript_splices, edits.manual_cuts)
     plan = SplicePlan(kept_ranges=kept_ranges, splices=splices)
     validate_cut_plan(plan)
     return plan
+
+
+def reconcile_cut_plan_polish(project: TranscriptProject, edits: EditDecisionList) -> dict[str, object]:
+    """Drop Stage 4 polish that no longer fits the current Stage 3 keep/delete plan.
+
+    Manual cuts and a custom final OUT are refinements on top of transcript edits.
+    When the user returns to Stage 3 and changes deletes/restores, those refinements
+    can land outside every kept section. That must not hard-block the editor — Stage 3
+    is authority; incompatible Stage 4 polish is removed so splice generation can proceed.
+    """
+
+    kept_ranges, _transcript_splices = _transcript_kept_ranges(project, edits)
+    working_ranges = list(kept_ranges)
+    kept_manual_ids: set[str] = set()
+    dropped_manual_ids: list[str] = []
+
+    for cut in sorted(edits.manual_cuts, key=lambda item: (item.out_frame, item.in_frame, item.id)):
+        if cut.out_frame < 0 or cut.in_frame < cut.out_frame + 2:
+            dropped_manual_ids.append(cut.id)
+            continue
+        containing = next(
+            (
+                item
+                for item in working_ranges
+                if item.adjusted_start_frame <= cut.out_frame and cut.in_frame <= item.adjusted_end_frame
+            ),
+            None,
+        )
+        if containing is None:
+            dropped_manual_ids.append(cut.id)
+            continue
+        cut_index = working_ranges.index(containing)
+        left = replace(
+            containing,
+            id=f"{containing.id}__{cut.id}_left",
+            end_word_id=_nearest_word_id(project, cut.out_frame, prefer_left=True, fallback=containing.end_word_id),
+            adjusted_end_frame=cut.out_frame,
+        )
+        right = replace(
+            containing,
+            id=f"{containing.id}__{cut.id}_right",
+            start_word_id=_nearest_word_id(project, cut.in_frame, prefer_left=False, fallback=containing.start_word_id),
+            adjusted_start_frame=cut.in_frame,
+        )
+        working_ranges[cut_index : cut_index + 1] = [left, right]
+        kept_manual_ids.add(cut.id)
+
+    if dropped_manual_ids:
+        edits.manual_cuts = [cut for cut in edits.manual_cuts if cut.id in kept_manual_ids]
+
+    cleared_final_out = False
+    if edits.final_out_frame is not None:
+        try:
+            trial = _apply_final_out_frame(project, list(working_ranges), edits.final_out_frame)
+            validate_cut_plan(SplicePlan(kept_ranges=trial, splices=[]))
+        except InvalidCutPlanError:
+            edits.final_out_frame = None
+            cleared_final_out = True
+
+    return {
+        "changed": bool(dropped_manual_ids) or cleared_final_out,
+        "droppedManualCutIds": dropped_manual_ids,
+        "clearedFinalOutFrame": cleared_final_out,
+    }
+
+
+def _transcript_kept_ranges(
+    project: TranscriptProject, edits: EditDecisionList
+) -> tuple[list[KeptRange], list[DynamicSplice]]:
+    """Kept source ranges + transcript splices before manual cuts / final OUT."""
+
+    deleted_word_indexes = _deleted_word_indexes(project, edits)
+    boundaries = _deleted_boundaries(project, edits, deleted_word_indexes)
+    kept_groups = _kept_word_groups(project.words, deleted_word_indexes, boundaries)
+    kept_ranges = _build_kept_ranges(kept_groups)
+    transcript_splices = _build_splices(project, kept_ranges, boundaries, edits)
+    kept_ranges = _apply_splice_adjustments(kept_ranges, transcript_splices)
+    return kept_ranges, transcript_splices
 
 
 def validate_cut_plan(plan: SplicePlan) -> None:

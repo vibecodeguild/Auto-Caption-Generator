@@ -975,6 +975,32 @@ def test_render_cut_preview_uses_complete_plan_and_returns_splice_timeline(tmp_p
     assert media_response.content == b"rendered preview"
 
 
+def test_restore_after_stage4_still_works_when_manual_cut_is_stranded() -> None:
+    """Returning to Stage 3 after Stage 4 must not 500 if a manual cut no longer fits."""
+
+    state.project = _project()
+    state.edits = EditDecisionList()
+    state.project_path = None
+    client = TestClient(app)
+
+    # Pause s1 is frames 21-44 between w3 and w4. A manual cut inside that pause
+    # is valid while the timeline is one continuous keep.
+    added = client.post("/api/projects/current/manual-cuts", json={"out_frame": 25, "in_frame": 35})
+    assert added.status_code == 200
+    assert any(splice["kind"] == "manual" for splice in added.json()["splices"])
+
+    # Delete the pause that held the manual cut — strands the Stage 4 polish.
+    deleted = client.post("/api/projects/current/delete", json={"token_ids": ["s1"]})
+    assert deleted.status_code == 200
+    assert deleted.json()["cut_plan_reconciliation"]["dropped_manual_cut_ids"]
+    assert all(splice["kind"] != "manual" for splice in deleted.json()["splices"])
+
+    # Stage 3 restore must succeed (and not 500) once polish was reconciled.
+    restored = client.post("/api/projects/current/restore", json={"token_ids": ["s1"]})
+    assert restored.status_code == 200
+    assert "s1" not in restored.json()["deleted_silence_ids"]
+
+
 def test_manual_cut_api_adds_adjusts_reviews_and_removes_source_frame_cut() -> None:
     state.project = _project()
     state.edits = EditDecisionList()
@@ -1006,6 +1032,33 @@ def test_manual_cut_api_adds_adjusts_reviews_and_removes_source_frame_cut() -> N
     removed = client.delete(f"/api/projects/current/manual-cuts/{manual['manual_cut_id']}")
     assert removed.status_code == 200
     assert all(splice["kind"] != "manual" for splice in removed.json()["splices"])
+
+    # Unified splice remove also works for manual cuts via anchor key.
+    readded = client.post("/api/projects/current/manual-cuts", json={"out_frame": 22, "in_frame": 30})
+    manual_again = next(splice for splice in readded.json()["splices"] if splice["kind"] == "manual")
+    removed_by_anchor = client.delete(f"/api/projects/current/splices/{manual_again['anchor_key']}")
+    assert removed_by_anchor.status_code == 200
+    assert all(splice["kind"] != "manual" for splice in removed_by_anchor.json()["splices"])
+
+
+def test_remove_transcript_splice_restores_deleted_gap() -> None:
+    state.project = _project()
+    state.edits = EditDecisionList()
+    state.edits.delete_word_selection("w3", "w3")
+    state.project_path = None
+    client = TestClient(app)
+
+    opened = client.get("/api/projects/current").json()
+    assert opened["splices"]
+    assert "w3" in opened["deleted_word_ids"]
+    anchor_key = opened["splices"][0]["anchor_key"]
+
+    removed = client.delete(f"/api/projects/current/splices/{anchor_key}")
+
+    assert removed.status_code == 200
+    body = removed.json()
+    assert "w3" not in body["deleted_word_ids"]
+    assert body["splices"] == [] or all(splice["anchor_key"] != anchor_key for splice in body["splices"])
 
 
 def test_final_out_frame_is_saved_and_used_by_render_preview(tmp_path: Path, monkeypatch) -> None:

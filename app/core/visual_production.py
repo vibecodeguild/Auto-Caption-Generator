@@ -20,6 +20,12 @@ from app.core.settings import project_root
 
 
 VISUAL_PLAN_VERSION = 2
+# Bump when any engine draw / timeline / shared dock math changes. Placement
+# live preview and full-episode Final BOTH hash this into their fingerprints so
+# neither surface can serve a stale composition after engine code changes.
+# Preview and Final call the same build_hyperframes_composition path — there is
+# no Final-only framing recipe.
+ENGINE_COMPOSE_RECIPE = 43
 # The speaker modes a graphic may declare. Full-frame takeovers are deliberately absent.
 SPEAKER_SAFETY_MODES = {
     "full-frame-speaker",
@@ -105,6 +111,23 @@ ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
             "notes": (
                 "Title + stack nodes. Each node lands at its line revealFrame "
                 "(placement anchors are not redistributed)."
+            ),
+        },
+    },
+    # Intro: talking head docks LEFT; right panel has name + experience + large Wai robot.
+    "intro-credentials": {
+        "placement": {
+            "fixed_line_slots": ["text", "thankYou"],
+            "list_slot": "nodes",
+            "list_min": 0,
+            "list_max": 6,
+            "meta_keys": [],
+            "asset_keys": [],
+            "motion_keys": [],
+            "notes": (
+                "Name (text) + experience nodes on the RIGHT. Talking head cover-docks "
+                "LEFT (host container left). thankYou times the large Wai robot entrance "
+                "(default 'Thank you!' if empty). Ends undocks."
             ),
         },
     },
@@ -275,6 +298,43 @@ ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
             "asset_keys": [],
             "motion_keys": ["side"],
             "notes": "Prompt is one timed line (typing channel).",
+        },
+    },
+    # Same Windows terminal typing as windows-prompt-typing, but overlay only:
+    # source video stays full-frame (no dock/mask); terminal centered horizontally.
+    "windows-prompt-overlay": {
+        "placement": {
+            "fixed_line_slots": ["prompt"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": ["appName"],
+            "asset_keys": [],
+            "motion_keys": [],
+            "notes": (
+                "Overlay-only Windows terminal: source footage unchanged. "
+                "Terminal is centered horizontally; prompt types like CLI."
+            ),
+        },
+    },
+    # Full white stage: optional title + teal number left, black-border video
+    # frame upper-right (head cover-docks in), magenta phrase types at bottom.
+    "numbered-phrase-reveal": {
+        "placement": {
+            "fixed_line_slots": ["title", "text"],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            # Free string so the operator can type "2" or "02" (not coerced to int).
+            "meta_keys": ["numberLabel"],
+            "asset_keys": [],
+            "motion_keys": [],
+            "notes": (
+                "Optional title above the number; numberLabel is free text. "
+                "Phrase (text) types character-by-character like windows-prompt-typing "
+                "and wraps in the bottom band. Head docks into the upper-right frame; "
+                "Ends undocks to full talking-head."
+            ),
         },
     },
     # VCG mascot overlays (cheer / defiant / roast).
@@ -756,6 +816,10 @@ def _module_semantic_texts(cue: dict) -> list[tuple[str, str, str]]:
         fields.extend([("parameters.kicker", str(params.get("kicker") or "")), ("parameters.text", str(params.get("text") or ""))])
     if module_id == "dependency-stack":
         fields.append(("parameters.text", str(params.get("text") or "")))
+    if module_id == "intro-credentials":
+        fields.append(("parameters.text", str(params.get("text") or "")))
+        # thankYou always anchors robot timing (default copy applied at draw if blank).
+        fields.append(("parameters.thankYou", str(params.get("thankYou") or "Thank you!")))
     if module_id in ROBOT_MODULE_IDS or module_id == "robot-rocket-sign":
         fields.append(("parameters.text", str(params.get("text") or "")))
         if module_id == "robot-cheer":
@@ -765,14 +829,30 @@ def _module_semantic_texts(cue: dict) -> list[tuple[str, str, str]]:
     if module_id == "numbered-example-card":
         fields.append(("parameters.kicker", str(params.get("kicker") or "")))
     if module_id in PORTED_MODULE_IDS:
-        for key in ("kicker", "thesis", "phrase", "title", "action", "payoff", "verdict", "rank",
-                    "leftLabel", "rightLabel", "logoText", "destination", "appName", "prompt", "claim"):
+        for key in (
+            "kicker",
+            "thesis",
+            "phrase",
+            "title",
+            "action",
+            "payoff",
+            "verdict",
+            "rank",
+            "leftLabel",
+            "rightLabel",
+            "logoText",
+            "destination",
+            "appName",
+            "prompt",
+            "claim",
+            "text",
+        ):
             if key in MODULE_PARAMETER_KEYS.get(module_id, set()):
                 fields.append((f"parameters.{key}", str(params.get(key) or "")))
     if module_id == "ui-callout":
         fields.append(("parameters.label", str(params.get("label") or "")))
     list_fields = (
-        ["nodes"] if module_id == "dependency-stack"
+        ["nodes"] if module_id in {"dependency-stack", "intro-credentials"}
         else ["milestones"] if module_id == "progress-scale"
         else ["titleLines"] if module_id == "numbered-example-card"
         else ["cards"] if module_id == "problem-card-triptych"
@@ -1438,22 +1518,49 @@ def write_delivery_manifest(
 
 
 def publish_verified_render(staged_path: Path, requested_path: Path) -> Path:
-    """Publish atomically, falling back to a versioned name when Windows holds the old file open."""
+    """Publish atomically, overwriting an existing final when possible.
+
+    Falls back to a versioned name only when Windows still holds the canonical
+    file open (player, Explorer preview). An existing closed ``final-video.mp4``
+    must never block a new export.
+    """
     requested_path.parent.mkdir(parents=True, exist_ok=True)
+    staged_path = Path(staged_path)
+    requested_path = Path(requested_path)
+    if not staged_path.is_file() or staged_path.stat().st_size == 0:
+        raise RuntimeError("Verified render is missing; nothing to publish.")
+
+    # Prefer replace into the canonical name (overwrites closed existing files).
     try:
-        os.replace(staged_path, requested_path)
+        os.replace(str(staged_path), str(requested_path))
         return requested_path
     except OSError:
         if not requested_path.is_file():
             raise
+
+    # Locked target (common when final-video.mp4 is open in a player): try
+    # delete+replace, then versioned sibling.
+    try:
+        requested_path.unlink()
+        os.replace(str(staged_path), str(requested_path))
+        return requested_path
+    except OSError:
+        pass
+
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     for suffix in (timestamp, *[f"{timestamp}-{index}" for index in range(2, 100)]):
         fallback = requested_path.with_name(f"{requested_path.stem}-{suffix}{requested_path.suffix}")
         if fallback.exists():
             continue
-        os.replace(staged_path, fallback)
-        return fallback
-    raise RuntimeError("Could not choose an available filename for the completed Visual Production video.")
+        try:
+            os.replace(str(staged_path), str(fallback))
+            return fallback
+        except OSError:
+            continue
+    raise RuntimeError(
+        "Could not publish Final video — exports/final-video.mp4 is locked and no "
+        "versioned fallback path was available. Close the file in any player and retry."
+    )
 
 
 def _hyperframes_progress_percent(line: str) -> float | None:
@@ -2075,6 +2182,8 @@ PORTED_MODULE_IDS = {
     "tradeoff-meter",
     "brand-cta-lockup",
     "windows-prompt-typing",
+    "windows-prompt-overlay",
+    "numbered-phrase-reveal",
 }
 
 
@@ -2229,6 +2338,65 @@ def _ported_markup(
             f'</div></section>'
         )
 
+    if module_id == "windows-prompt-overlay":
+        # Overlay-only: source video stays full-frame (no dock, no white mask).
+        # Same Windows terminal + letter typing; terminal centered horizontally.
+        app_name = html.escape(str(params.get("appName") or "Windows PowerShell"))
+        full_prompt = str(params.get("prompt") or "").replace("\r\n", "\n").replace("\r", "\n")
+        full_attr = html.escape(full_prompt, quote=True)
+        return (
+            f'{open_tag}'
+            f'<div class="prompt-overlay-stage">'
+            f'<div class="prompt-overlay-terminal">'
+            f'<div class="prompt-titlebar">'
+            f'<span class="prompt-app" data-semantic-path="parameters.appName">{app_name}</span>'
+            f'<span class="prompt-win-controls" aria-hidden="true">'
+            f'<span class="win-btn win-min">&#x2013;</span>'
+            f'<span class="win-btn win-max">&#x25A1;</span>'
+            f'<span class="win-btn win-close">&#x2715;</span>'
+            f'</span>'
+            f'</div>'
+            f'<div class="prompt-body">'
+            f'<div class="prompt-line">'
+            f'<span class="prompt-prefix" aria-hidden="true">PS C:\\&gt;&nbsp;</span>'
+            f'<span class="prompt-typed" data-semantic-path="parameters.prompt" '
+            f'data-full-prompt="{full_attr}">'
+            f'<span class="prompt-typed-text"></span>'
+            f'</span>'
+            f'</div></div></div>'
+            f'</div></section>'
+        )
+
+    if module_id == "numbered-phrase-reveal":
+        # Full white stage: optional title + teal number (left), black-border
+        # talking-head frame (upper-right), magenta phrase types at bottom (wraps).
+        number_label = html.escape(str(params.get("numberLabel") or "1").strip() or "1")
+        title = html.escape(str(params.get("title") or "").strip())
+        full_phrase = str(params.get("text") or "").replace("\r\n", "\n").replace("\r", "\n")
+        full_attr = html.escape(full_phrase, quote=True)
+        title_markup = (
+            f'<div class="npr-title" data-semantic-path="parameters.title">{title}</div>'
+            if title
+            else ""
+        )
+        return (
+            f'{open_tag}'
+            f'<div class="npr-stage">'
+            f'<div class="npr-mask" aria-hidden="true"></div>'
+            f'<div class="npr-video-outline" aria-hidden="true"></div>'
+            f'<div class="npr-left">'
+            f'{title_markup}'
+            f'<div class="npr-number">{number_label}</div>'
+            f'</div>'
+            f'<div class="npr-phrase">'
+            f'<span class="npr-typed" data-semantic-path="parameters.text" '
+            f'data-full-prompt="{full_attr}">'
+            f'<span class="npr-typed-text"></span>'
+            f'</span>'
+            f'</div>'
+            f'</div></section>'
+        )
+
     raise ValueError(f"Unknown ported module id: {module_id}")
 
 
@@ -2254,6 +2422,66 @@ def _speaker_safe_overlay_style(params: dict) -> str:
         f'width:{bounds["width"] * 100:.3f}%;height:{bounds["height"] * 100:.3f}%;'
         "right:auto;bottom:auto;border:3px solid var(--ink);"
         "box-shadow:14px 16px 0 rgba(0,124,125,.24)"
+    )
+
+
+def _robot_svg_wai() -> str:
+    """Teal VCG robot — Thai Wai greeting (same shape language as robot-roast).
+
+    Clear neck gap between head and torso (like cheer/roast). Tall torso.
+    Upper-arm cylinders hang down the sides; forearm cylinders are true segments
+    from elbow → hand base (horizontal rounded rects rotated to that vector).
+    Triangle hands sit on the torso top only — they do not fill the neck gap.
+    """
+    # Neck gap matches robot-defiant exactly:
+    #   defiant head: y=100 h=106 → bottom 206; torso top y=234 → gap = 28.
+    #   wai torso top stays y=228 → head bottom = 228 - 28 = 200 → head y = 92 (h=108).
+    # Left elbow (98, 372) → left hand base (162, 288); right mirrored.
+    return (
+        '<svg class="intro-robot-svg" width="420" height="560" viewBox="0 0 360 520" '
+        'xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
+        '<g class="robot-body">'
+        # Feet + short legs
+        '<rect x="126" y="458" width="48" height="36" rx="14" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<rect x="186" y="458" width="48" height="36" rx="14" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<rect x="134" y="418" width="36" height="46" rx="16" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<rect x="190" y="418" width="36" height="46" rx="16" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        # Tall torso — top rim y=228 (hand tips); bottom y=418
+        '<rect x="112" y="228" width="136" height="190" rx="34" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<rect x="146" y="288" width="68" height="88" rx="16" fill="#FF00CE"/>'
+        '<circle cx="168" cy="328" r="9" fill="#fff"/><circle cx="192" cy="328" r="9" fill="#fff"/>'
+        # Upper arms: vertical cylinders on the sides (shoulder → elbow).
+        # Elbow centers ≈ (98, 372) and (262, 372).
+        '<rect x="78" y="240" width="40" height="140" rx="20" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '<rect x="242" y="240" width="40" height="140" rx="20" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        # Forearms: horizontal cylinders rotated so they span elbow → hand base.
+        # Left: elbow (98,372) → hand (162,288). dx=64, dy=-84 → angle ≈ -52.7°.
+        # length ≈ 106. Place rect of width 106, height 40, origin at elbow, mid-height.
+        '<g transform="rotate(-52.7 98 372)">'
+        '<rect x="98" y="352" width="106" height="40" rx="20" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '</g>'
+        # Right: elbow (262,372) → hand (198,288). dx=-64, dy=-84 → angle ≈ -127.3°.
+        '<g transform="rotate(-127.3 262 372)">'
+        '<rect x="262" y="352" width="106" height="40" rx="20" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        '</g>'
+        # Antenna + head — bottom y=200; torso top y=228 → neck gap 28 (defiant-matched)
+        '<line x1="180" y1="100" x2="180" y2="64" stroke="#1A1A2E" stroke-width="8" stroke-linecap="round"/>'
+        '<circle cx="180" cy="52" r="14" fill="#FF00CE"/>'
+        '<rect x="108" y="92" width="144" height="108" rx="30" fill="#007C7D" stroke="#1A1A2E" stroke-width="7"/>'
+        # Closed happy eyes
+        '<path d="M132 140 q20 24 40 0" fill="none" stroke="#1A1A2E" stroke-width="10" stroke-linecap="round"/>'
+        '<path d="M188 140 q20 24 40 0" fill="none" stroke="#1A1A2E" stroke-width="10" stroke-linecap="round"/>'
+        # Smaller mouth (was rx=40/ry=26 — overlapped eye arcs); top clears eye arcs (~164)
+        '<ellipse cx="180" cy="180" rx="28" ry="14" fill="#1A1A2E"/>'
+        '<path d="M158 182 a22 10 0 0 0 44 0 z" fill="#FF00CE"/>'
+        '<circle cx="128" cy="166" r="11" fill="#FF00CE" opacity="0.55"/>'
+        '<circle cx="232" cy="166" r="11" fill="#FF00CE" opacity="0.55"/>'
+        # Hands on torso only: tips at torso top (y=228), base mid-chest — not into neck.
+        '<g class="intro-wai-hands">'
+        '<polygon points="150,292 180,228 180,292" fill="#007C7D" stroke="#1A1A2E" stroke-width="7" stroke-linejoin="round"/>'
+        '<polygon points="210,292 180,228 180,292" fill="#007C7D" stroke="#1A1A2E" stroke-width="7" stroke-linejoin="round"/>'
+        '</g>'
+        '</g></svg>'
     )
 
 
@@ -2557,6 +2785,8 @@ def _module_markup(
         return (
             f'<section {common} style="--cue-accent:{accent_color}">'
             f'<div class="progress-stage">'
+            # White mask with punched hole = video only shows inside the outline frame.
+            f'<div class="progress-mask" aria-hidden="true"></div>'
             f'<div class="kicker" data-semantic-path="parameters.kicker">{kicker}</div>'
             f'<div class="stat-title" data-semantic-path="parameters.text">{text}</div>'
             f'<div class="progress-track-block">'
@@ -2661,6 +2891,35 @@ def _module_markup(
             f'<div class="nodes">{node_markup}</div>'
             f'</div>'
             f'<div class="dependency-video-outline" aria-hidden="true"></div>'
+            f'</div></section>'
+        )
+    if module_id == "intro-credentials":
+        # Host docks LEFT; name + experience + large Wai robot on the RIGHT.
+        name = html.escape(str(params.get("text") or "YOUR NAME"))
+        thank_you = html.escape(str(params.get("thankYou") or "").strip() or "Thank you!")
+        nodes = _strings(params.get("nodes"), 6)
+        node_markup = "".join(
+            f'<div class="intro-node" data-node-index="{index}" '
+            f'data-semantic-path="parameters.nodes.{index}">{html.escape(node)}</div>'
+            for index, node in enumerate(nodes)
+        )
+        return (
+            f'<section {common} style="--cue-accent:{accent_color}">'
+            f'<div class="intro-stage">'
+            f'<div class="intro-mask" aria-hidden="true"></div>'
+            f'<div class="intro-video-outline" aria-hidden="true"></div>'
+            f'<div class="intro-panel">'
+            f'<div class="intro-copy">'
+            f'<div class="intro-name" data-semantic-path="parameters.text">{name}</div>'
+            f'<div class="intro-nodes">{node_markup}</div>'
+            f'</div>'
+            f'<div class="intro-robot" aria-hidden="false">'
+            f'<div class="intro-robot-bubble">'
+            f'<span data-semantic-path="parameters.thankYou">{thank_you}</span>'
+            f'<div class="intro-robot-tail"></div></div>'
+            f'{_robot_svg_wai()}'
+            f'</div>'
+            f'</div>'
             f'</div></section>'
         )
     raise ValueError(f"Unknown visual module: {module_id}")
@@ -2772,6 +3031,164 @@ def _wrap_module_motion(markup: str) -> str:
 def _entry_preroll_time(start: float, fps: int) -> float:
     """Advance entrance motion one frame without changing clip visibility timing."""
     return max(0.0, start - (1.0 / max(1, fps)))
+
+
+# Docked talking-head engines (progress-scale, dependency-stack, joke card, …) use
+# pixel x/y with transform-origin top-left. source-punch-zoom temporarily sets a
+# focus origin; if a later dock tween omits origin, GSAP keeps 50%/42% and the
+# head flies off-screen in full-episode Final (single-beat preview never chains).
+# These helpers are shared by placement preview and Final — no Final-only path.
+_MAIN_VIDEO_DOCK_ORIGIN = "0% 0%"
+
+
+def _cover_dock_for_frame(
+    left: float,
+    top: float,
+    box_w: float,
+    box_h: float,
+) -> tuple[float, float, float]:
+    """Cover-crop #main-video into a **masked** frame rect (fractions of the canvas).
+
+    Returns ``(scale, x_frac, y_frac)`` for GSAP with transform-origin top-left.
+
+    Pure hole geometry (CSS ``object-fit: cover`` into the mask rect):
+    ``scale = max(box_w, box_h)``, overflow centered on the loose axis. No face
+    heuristics, no overscan nudges — those were a parallel "Final looks wrong"
+    framing path and are not product design.
+
+    Only use with a white mask hole (dependency-stack, joke card, prompt, CTA).
+    Progress-scale uses ``_fit_dock_for_frame`` (outline picture-frame, no crop).
+
+    Frame rect must match runtime.css outline/mask for the same engine.
+    """
+
+    left_f = float(left)
+    top_f = float(top)
+    box_w_f = float(box_w)
+    box_h_f = float(box_h)
+    scale = max(box_w_f, box_h_f)
+    # Center overflow; tight axis is flush with the hole edge.
+    x_frac = left_f + (box_w_f - scale) / 2.0
+    y_frac = top_f + (box_h_f - scale) / 2.0
+    return scale, x_frac, y_frac
+
+
+def _fit_dock_for_frame(
+    left: float,
+    top: float,
+    box_w: float,
+    box_h: float,
+) -> tuple[float, float, float]:
+    """Fit the full #main-video into an outline frame (edge-aligned, no crop shift).
+
+    Progress-scale uses a decorative outline over a white stage (no mask hole).
+    The scaled video must share the outline's top-left and size so the talking
+    head sits *inside* the black border. Uniform scale matches the box width
+    fraction (equal width/height % on a 16:9 canvas already yields 16:9 pixels).
+    """
+
+    # Equal % width/height on 16:9 → same scale for both axes; min is defensive
+    # if a future frame is non-matching.
+    scale = min(float(box_w), float(box_h))
+    return scale, float(left), float(top)
+
+
+def _main_video_dock_line(
+    *,
+    scale: float,
+    x_px: float,
+    y_px: float,
+    duration: float,
+    at: float,
+    ease: str = "power3.inOut",
+) -> str:
+    # fromTo identity → dock: do not inherit a prior punch-zoom transformOrigin
+    # (50%/42%). A plain .to() kept that origin on multi-cue Final while single-
+    # beat preview (no prior punch) looked correct — same engines, different
+    # GSAP state. overwrite auto cancels a still-running punch tween.
+    return (
+        f'tl.fromTo("#main-video", '
+        f'{{scale:1,x:0,y:0,transformOrigin:"{_MAIN_VIDEO_DOCK_ORIGIN}"}}, '
+        f'{{scale:{scale:.4f},x:{x_px:.2f},y:{y_px:.2f},'
+        f'transformOrigin:"{_MAIN_VIDEO_DOCK_ORIGIN}",duration:{duration:.3f},'
+        f'ease:"{ease}",overwrite:"auto",immediateRender:false}}, {at:.4f});'
+    )
+
+
+def _main_video_undock_line(
+    *,
+    duration: float,
+    at: float,
+    ease: str = "power3.inOut",
+) -> str:
+    return (
+        f'tl.to("#main-video", {{scale:1,x:0,y:0,'
+        f'transformOrigin:"{_MAIN_VIDEO_DOCK_ORIGIN}",duration:{duration:.3f},'
+        f'ease:"{ease}",overwrite:"auto"}}, {at:.4f});'
+    )
+
+
+def _main_video_reset_line(*, at: float) -> str:
+    return (
+        f'tl.set("#main-video", {{scale:1,x:0,y:0,'
+        f'transformOrigin:"{_MAIN_VIDEO_DOCK_ORIGIN}"}}, {at:.4f});'
+    )
+
+
+def _placement_item_reveal_schedule(
+    *,
+    count: int,
+    path_prefix: str,
+    semantic_items: list,
+    range_start: float,
+    start: float,
+    unanchored_at,
+    min_gap_anchored: float = 0.08,
+    min_gap_unanchored: float = 0.35,
+) -> tuple[list[float], int, list[int]]:
+    """Map placement reveal frames to composition-local times per item index.
+
+    Min-gap and pink-handoff follow **time order**, not slot index. A later
+    bullet with an earlier craft frame still lands at that frame (index-order
+    monotonic clamping used to delay it until after the previous slot).
+    """
+
+    raw: list[float] = []
+    anchored_count = 0
+    for index in range(count):
+        path = f"{path_prefix}.{index}"
+        match = next(
+            (
+                item
+                for item in semantic_items
+                if str(item.get("parameterPath") or "") == path
+            ),
+            None,
+        )
+        if match is not None:
+            try:
+                spoken = float(match.get("spokenStartSec") or 0.0)
+            except (TypeError, ValueError):
+                spoken = 0.0
+            appear_at = max(spoken, range_start) - range_start
+            # Honor placement frame; only keep after a brief stage settle.
+            raw.append(max(start + 0.12, appear_at))
+            anchored_count += 1
+        else:
+            raw.append(float(unanchored_at(index)))
+
+    min_gap = min_gap_anchored if anchored_count > 0 else min_gap_unanchored
+    order = sorted(range(count), key=lambda i: (raw[i], i))
+    times = [0.0] * count
+    running: float | None = None
+    for index in order:
+        if running is None:
+            times[index] = raw[index]
+        else:
+            times[index] = max(raw[index], running + min_gap)
+        running = times[index]
+    reveal_order = sorted(range(count), key=lambda i: (times[i], i))
+    return times, anchored_count, reveal_order
 
 
 def _replace_directory_tree(path: Path) -> bool:
@@ -2957,6 +3374,8 @@ def build_hyperframes_composition(
                     "brand-cta-lockup",
                     "robot-rocket-sign",
                     "windows-prompt-typing",
+                    "windows-prompt-overlay",
+                    "numbered-phrase-reveal",
                     "punchline-reveal",
                     # Stamp owns enter at phrase reveal (box + words together).
                     "kinetic-word-punctuation",
@@ -2992,9 +3411,12 @@ def build_hyperframes_composition(
                     "progress-scale",
                     "problem-card-triptych",
                     "dependency-stack",
+                    "intro-credentials",
                     "brand-cta-lockup",
                     "robot-rocket-sign",
                     "windows-prompt-typing",
+                    "windows-prompt-overlay",
+                    "numbered-phrase-reveal",
                     "punchline-reveal",  # joke card owns kicker/line reveals
                     # Phrase opacity is owned by the stamp reveal (not a separate fade).
                     "kinetic-word-punctuation",
@@ -3033,6 +3455,19 @@ def build_hyperframes_composition(
                         timeline_lines.extend(
                             _semantic_timeline_lines(filtered, element_id, range_start, range_end, start)
                         )
+                elif module_id == "intro-credentials":
+                    # Name uses semantic timing; nodes + thankYou/robot owned below.
+                    name_only = [
+                        item
+                        for item in cue.get("semanticItems", [])
+                        if str(item.get("parameterPath") or "") == "parameters.text"
+                    ]
+                    if name_only:
+                        filtered = dict(cue)
+                        filtered["semanticItems"] = name_only
+                        timeline_lines.extend(
+                            _semantic_timeline_lines(filtered, element_id, range_start, range_end, start)
+                        )
             if module_id == "punchline-reveal":
                 # Joke card only: dock head LEFT, image + caption panel from the right.
                 # Must match .joke-video-outline / .joke-mask (left tall frame).
@@ -3045,10 +3480,9 @@ def build_hyperframes_composition(
                 #   end). Trim that span earlier to undock back to full talking-head.
                 video_left, video_top = 0.08, 0.10
                 video_w, video_h = 0.42, 0.78
-                video_scale = max(video_w, video_h)
-                face_center_x = 0.47
-                video_x = (video_left + video_w / 2) - face_center_x * video_scale
-                video_y = video_top
+                video_scale, video_x, video_y = _cover_dock_for_frame(
+                    video_left, video_top, video_w, video_h
+                )
                 video_in, video_out = 0.55, 0.42
                 panel = f'#{element_id} .joke-panel'
                 card = f'#{element_id} .joke-card'
@@ -3085,9 +3519,13 @@ def build_hyperframes_composition(
 
                 # --- Beat start: stage move + head chrome only ---
                 timeline_lines.append(
-                    f'tl.to("#main-video", {{scale:{video_scale:.4f},'
-                    f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
-                    f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
+                    _main_video_dock_line(
+                        scale=video_scale,
+                        x_px=width * video_x,
+                        y_px=height * video_y,
+                        duration=video_in,
+                        at=start,
+                    )
                 )
                 timeline_lines.append(
                     f'tl.fromTo("#{element_id} .joke-mask", {{opacity:0}}, '
@@ -3127,8 +3565,10 @@ def build_hyperframes_composition(
                     f'{(end_at - exit_d):.4f});'
                 )
                 timeline_lines.append(
-                    f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},'
-                    f'ease:"power3.inOut"}}, {max(start, end_at - video_out):.4f});'
+                    _main_video_undock_line(
+                        duration=video_out,
+                        at=max(start, end_at - video_out),
+                    )
                 )
                 timeline_lines.append(
                     f'tl.set("{card}", {{opacity:0}}, {end_at:.4f});'
@@ -3228,19 +3668,17 @@ def build_hyperframes_composition(
             elif module_id == "dependency-stack":
                 # Tall right video window (CSS hole + outline). Cover-scale crops the
                 # sides of the full-frame talking head into a skinnier portrait frame.
-                # Must match .dependency-video-outline / .dependency-mask in runtime.css.
+                # Must match .dependency-video-outline / .dependency-mask in runtime.css
+                # (left:50%; top:10%; width:42%; height:78% — hole 50–92% × 10–88%).
                 #
                 # Placement contract: each node lands at its revealFrame (via semantic
                 # items). Never redistribute even spacing over placement anchors —
                 # that made bullets ignore the craft panel frames.
                 video_left, video_top = 0.50, 0.10
                 video_w, video_h = 0.42, 0.78
-                video_scale = max(video_w, video_h)
-                # Source talking head sits slightly left of geometric center; bias the
-                # cover crop so the face reads centered in the portrait hole.
-                face_center_x = 0.46
-                video_x = (video_left + video_w / 2) - face_center_x * video_scale
-                video_y = video_top
+                video_scale, video_x, video_y = _cover_dock_for_frame(
+                    video_left, video_top, video_w, video_h
+                )
                 video_in, video_out = 0.55, 0.45
                 settle_after_last_sec = 2.0
                 linger_all_white_sec = 2.0
@@ -3253,37 +3691,19 @@ def build_hyperframes_composition(
                     else 0.85
                 )
                 node_stagger = max(0.35, min(2.0, node_stagger))
-                node_times: list[float] = []
-                anchored_count = 0
-                for index in range(node_count):
-                    path = f"parameters.nodes.{index}"
-                    match = next(
-                        (
-                            item
-                            for item in cue.get("semanticItems", [])
-                            if str(item.get("parameterPath") or "") == path
-                        ),
-                        None,
-                    )
-                    if match is not None:
-                        try:
-                            spoken = float(match.get("spokenStartSec") or 0.0)
-                        except (TypeError, ValueError):
-                            spoken = 0.0
-                        appear_at = max(spoken, range_start) - range_start
-                        # Honor placement frame; only keep after a brief dock settle.
-                        node_times.append(max(start + 0.12, appear_at))
-                        anchored_count += 1
-                    else:
-                        node_times.append(start + 0.45 + index * node_stagger)
-                # Monotonic order — small gap when placement-driven so tight frames stay close.
-                min_gap = 0.08 if anchored_count > 0 else 0.35
-                for index in range(1, len(node_times)):
-                    node_times[index] = max(node_times[index], node_times[index - 1] + min_gap)
+                node_times, anchored_count, node_reveal_order = _placement_item_reveal_schedule(
+                    count=node_count,
+                    path_prefix="parameters.nodes",
+                    semantic_items=list(cue.get("semanticItems") or []),
+                    range_start=range_start,
+                    start=start,
+                    unanchored_at=lambda index, _stagger=node_stagger: start + 0.45 + index * _stagger,
+                )
                 if node_times and anchored_count == 0 and node_count > 1:
                     # Library / unanchored samples only: compress evenly if settle won't fit.
+                    last_t = max(node_times) if node_times else start
                     latest_need = (
-                        node_times[-1] + settle_after_last_sec + linger_all_white_sec + video_out
+                        last_t + settle_after_last_sec + linger_all_white_sec + video_out
                     )
                     if latest_need > start + duration:
                         budget = max(
@@ -3292,11 +3712,13 @@ def build_hyperframes_composition(
                         )
                         step = budget / max(node_count - 1, 1)
                         node_times = [start + 0.45 + index * step for index in range(node_count)]
+                        node_reveal_order = list(range(node_count))
                 elif node_times and anchored_count > 0:
                     # Placement path: keep node frames; shrink pink-settle / linger to fit.
+                    last_t = max(node_times)
                     room_after = max(
                         0.4,
-                        (start + duration - video_out) - node_times[-1],
+                        (start + duration - video_out) - last_t,
                     )
                     settle_after_last_sec = min(settle_after_last_sec, max(0.3, room_after * 0.45))
                     linger_all_white_sec = min(
@@ -3304,9 +3726,13 @@ def build_hyperframes_composition(
                         max(0.15, room_after - settle_after_last_sec - 0.05),
                     )
                 timeline_lines.append(
-                    f'tl.to("#main-video", {{scale:{video_scale:.4f},'
-                    f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
-                    f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
+                    _main_video_dock_line(
+                        scale=video_scale,
+                        x_px=width * video_x,
+                        y_px=height * video_y,
+                        duration=video_in,
+                        at=start,
+                    )
                 )
                 timeline_lines.append(
                     f'tl.fromTo("#{element_id} .dependency-panel", {{opacity:0,x:-36}}, '
@@ -3321,7 +3747,8 @@ def build_hyperframes_composition(
                     timeline_lines.append(
                         f'tl.set("#{element_id} .dep-node", {{opacity:0,y:56}}, {start:.4f});'
                     )
-                for index in range(node_count):
+                # Pink handoff follows reveal *time* order (not slot index).
+                for order_i, index in enumerate(node_reveal_order):
                     appear_at = node_times[index]
                     node_sel = f'#{element_id} .dep-node[data-node-index=\\"{index}\\"]'
                     timeline_lines.append(
@@ -3336,36 +3763,179 @@ def build_hyperframes_composition(
                         f'tl.to("{node_sel}", {{backgroundColor:"{pink}",color:"#ffffff",'
                         f'borderColor:"{pink}",duration:0.18,ease:"power1.out"}}, {appear_at:.4f});'
                     )
-                    if index > 0:
-                        prev_sel = f'#{element_id} .dep-node[data-node-index=\\"{index - 1}\\"]'
+                    if order_i > 0:
+                        prev_index = node_reveal_order[order_i - 1]
+                        prev_sel = f'#{element_id} .dep-node[data-node-index=\\"{prev_index}\\"]'
                         timeline_lines.append(
                             f'tl.to("{prev_sel}", {{backgroundColor:"{white_bg}",color:"{ink}",'
                             f'borderColor:"{ink}",duration:0.28,ease:"power1.out"}}, {appear_at:.4f});'
                         )
-                if node_count:
-                    last_sel = f'#{element_id} .dep-node[data-node-index=\\"{node_count - 1}\\"]'
-                    settle_at = node_times[-1] + settle_after_last_sec
+                if node_count and node_reveal_order:
+                    last_index = node_reveal_order[-1]
+                    last_t = node_times[last_index]
+                    last_sel = f'#{element_id} .dep-node[data-node-index=\\"{last_index}\\"]'
+                    settle_at = last_t + settle_after_last_sec
                     settle_at = min(settle_at, start + duration - video_out - linger_all_white_sec)
-                    settle_at = max(settle_at, node_times[-1] + 0.25)
+                    settle_at = max(settle_at, last_t + 0.25)
                     timeline_lines.append(
                         f'tl.to("{last_sel}", {{backgroundColor:"{white_bg}",color:"{ink}",'
                         f'borderColor:"{ink}",duration:0.3,ease:"power1.out"}}, {settle_at:.4f});'
                     )
                 restore_at = start + duration - video_out
-                timeline_lines.append(
-                    f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},ease:"power3.inOut"}}, '
-                    f'{restore_at:.4f});'
+                timeline_lines.append(_main_video_undock_line(duration=video_out, at=restore_at))
+            elif module_id == "intro-credentials":
+                # Host cover-docks LEFT (same tall frame geometry as joke card left dock).
+                # Right panel: name + experience pink-handoff, then large Wai robot + thankYou.
+                # Must match .intro-video-outline / .intro-mask in runtime.css
+                # (left:8%; top:10%; width:42%; height:78% — hole 8–50% × 10–88%).
+                video_left, video_top = 0.08, 0.10
+                video_w, video_h = 0.42, 0.78
+                video_scale, video_x, video_y = _cover_dock_for_frame(
+                    video_left, video_top, video_w, video_h
                 )
+                video_in, video_out = 0.55, 0.45
+                settle_after_last_sec = 2.0
+                robot_hold_before_exit = 1.6
+                pink, white_bg, ink = "#ff00ce", "#ffffff", "#1a1a2e"
+                nodes = _strings(params.get("nodes"), 6)
+                node_count = len(nodes)
+                node_stagger = (
+                    float(sample_reveal_stagger_sec)
+                    if sample_reveal_stagger_sec is not None and sample_reveal_stagger_sec > 0
+                    else 0.85
+                )
+                node_stagger = max(0.35, min(2.0, node_stagger))
+                node_times, anchored_count, node_reveal_order = _placement_item_reveal_schedule(
+                    count=node_count,
+                    path_prefix="parameters.nodes",
+                    semantic_items=list(cue.get("semanticItems") or []),
+                    range_start=range_start,
+                    start=start,
+                    unanchored_at=lambda index, _stagger=node_stagger: start + 0.45 + index * _stagger,
+                )
+                thank_you_at = None
+                for semantic in cue.get("semanticItems") or []:
+                    if not isinstance(semantic, dict):
+                        continue
+                    if str(semantic.get("parameterPath") or "") != "parameters.thankYou":
+                        continue
+                    try:
+                        spoken = float(semantic.get("spokenStartSec") or 0.0)
+                    except (TypeError, ValueError):
+                        spoken = 0.0
+                    thank_you_at = max(spoken, range_start) - range_start
+                    break
+                if node_times and anchored_count == 0 and node_count > 1:
+                    last_t = max(node_times) if node_times else start
+                    latest_need = last_t + settle_after_last_sec + robot_hold_before_exit + video_out
+                    if latest_need > start + duration:
+                        budget = max(
+                            0.8,
+                            duration - video_out - settle_after_last_sec - robot_hold_before_exit - 0.45,
+                        )
+                        step = budget / max(node_count - 1, 1)
+                        node_times = [start + 0.45 + index * step for index in range(node_count)]
+                        node_reveal_order = list(range(node_count))
+                elif node_times and anchored_count > 0:
+                    last_t = max(node_times)
+                    room_after = max(0.4, (start + duration - video_out) - last_t)
+                    settle_after_last_sec = min(settle_after_last_sec, max(0.3, room_after * 0.4))
+                    robot_hold_before_exit = min(
+                        robot_hold_before_exit,
+                        max(0.4, room_after - settle_after_last_sec - 0.05),
+                    )
+                timeline_lines.append(
+                    _main_video_dock_line(
+                        scale=video_scale,
+                        x_px=width * video_x,
+                        y_px=height * video_y,
+                        duration=video_in,
+                        at=start,
+                    )
+                )
+                # Panel enters from the right (content side).
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .intro-panel", {{opacity:0,x:36}}, '
+                    f'{{opacity:1,x:0,duration:0.45,ease:"power3.out"}}, {entry_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .intro-name", {{opacity:0}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .intro-robot", {{opacity:0,scale:0.88,y:28}}, {start:.4f});'
+                )
+                if node_count:
+                    timeline_lines.append(
+                        f'tl.set("#{element_id} .intro-node", {{opacity:0,y:56}}, {start:.4f});'
+                    )
+                for order_i, index in enumerate(node_reveal_order):
+                    appear_at = node_times[index]
+                    node_sel = f'#{element_id} .intro-node[data-node-index=\\"{index}\\"]'
+                    timeline_lines.append(
+                        f'tl.fromTo("{node_sel}", {{opacity:0,y:56}}, '
+                        f'{{opacity:1,y:0,duration:0.42,ease:"power2.out",immediateRender:false}}, '
+                        f'{appear_at:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.set("{node_sel}", {{opacity:1}}, {appear_at:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("{node_sel}", {{backgroundColor:"{pink}",color:"#ffffff",'
+                        f'borderColor:"{pink}",duration:0.18,ease:"power1.out"}}, {appear_at:.4f});'
+                    )
+                    if order_i > 0:
+                        prev_index = node_reveal_order[order_i - 1]
+                        prev_sel = f'#{element_id} .intro-node[data-node-index=\\"{prev_index}\\"]'
+                        timeline_lines.append(
+                            f'tl.to("{prev_sel}", {{backgroundColor:"{white_bg}",color:"{ink}",'
+                            f'borderColor:"{ink}",duration:0.28,ease:"power1.out"}}, {appear_at:.4f});'
+                        )
+                settle_at = start + 0.9
+                if node_count and node_reveal_order:
+                    last_index = node_reveal_order[-1]
+                    last_t = node_times[last_index]
+                    last_sel = f'#{element_id} .intro-node[data-node-index=\\"{last_index}\\"]'
+                    settle_at = last_t + settle_after_last_sec
+                    settle_at = min(settle_at, start + duration - video_out - robot_hold_before_exit)
+                    settle_at = max(settle_at, last_t + 0.25)
+                    timeline_lines.append(
+                        f'tl.to("{last_sel}", {{backgroundColor:"{white_bg}",color:"{ink}",'
+                        f'borderColor:"{ink}",duration:0.3,ease:"power1.out"}}, {settle_at:.4f});'
+                    )
+                robot_at = settle_at + 0.15
+                if thank_you_at is not None:
+                    robot_at = max(robot_at, thank_you_at)
+                robot_at = min(robot_at, start + duration - video_out - 0.55)
+                robot_at = max(robot_at, start + 0.7)
+                # CSS zeros [data-semantic-path] — force thankYou bubble text visible with robot.
+                # (intro-credentials owns thankYou/robot; generic semantic opacity is skipped.)
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .intro-robot-bubble [data-semantic-path]", '
+                    f'{{opacity:1}}, {robot_at:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .intro-robot", {{opacity:0,scale:0.88,y:28}}, '
+                    f'{{opacity:1,scale:1,y:0,duration:0.52,ease:"back.out(1.5)",'
+                    f'immediateRender:false}}, {robot_at:.4f});'
+                )
+                restore_at = start + duration - video_out
+                timeline_lines.append(
+                    f'tl.to("#{element_id} .intro-robot", {{opacity:0,y:18,duration:0.28,'
+                    f'ease:"power2.in"}}, {max(robot_at + 0.4, restore_at - 0.32):.4f});'
+                )
+                timeline_lines.append(_main_video_undock_line(duration=video_out, at=restore_at))
             elif module_id == "progress-scale":
-                # Match .stat-video-outline in runtime.css (upper-right window).
-                # main-video uses transform-origin:0 0, so scale + x/y land in the frame.
+                # Match .stat-video-outline + .progress-mask hole in runtime.css:
+                # left:56.25%; top:12%; width:36.5%; height:36.5%.
+                # Fit-dock (not cover/face-shift): video edges = border edges. Face-centering
+                # at scale==box size shifted the plate off the outline on Final.
                 #
                 # Fill + milestone stops are driven by placement reveal frames
                 # (semanticItems → parameters.milestones.*). The bar reaches stop i
                 # when bullet/stop i reveals — not a free-running linear fill.
-                video_x = 0.5625
-                video_y = 0.12
-                video_scale = 0.365
+                video_scale, video_x, video_y = _fit_dock_for_frame(
+                    0.5625, 0.12, 0.365, 0.365
+                )
                 video_in = 0.5
                 video_out = 0.45
                 hold_after_fill = 2.5
@@ -3444,16 +4014,30 @@ def build_hyperframes_composition(
                     if milestone_times
                     else start + max(1.2, duration * 0.5)
                 )
-                restore_at = min(start + duration - video_out, fill_end + hold_after_fill)
-                restore_at = max(restore_at, fill_end + 0.4)
+                # Undock at placement Ends (cue end), not after last stop + fixed hold.
+                # Early restore left full-frame video under a still-visible white outline
+                # and stage chrome — the "artifacts after the box" bug.
+                exit_at = start + duration - video_out
+                exit_at = max(exit_at, start + 0.35)
+                # Never start undock mid-fill; if Ends is tight after last stop, exit ASAP after fill.
+                restore_at = max(exit_at, fill_end + 0.12)
+                restore_at = min(restore_at, start + duration - 0.05)
 
                 timeline_lines.append(
-                    f'tl.to("#main-video", {{scale:{video_scale:.4f},'
-                    f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
-                    f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
+                    _main_video_dock_line(
+                        scale=video_scale,
+                        x_px=width * video_x,
+                        y_px=height * video_y,
+                        duration=video_in,
+                        at=start,
+                    )
                 )
                 timeline_lines.append(
                     f'tl.set("#{element_id} .scale-fill", {{scaleX:0}}, {start:.4f});'
+                )
+                # Full stage visible for the docked window; hard-clear on exit (no leftover outline).
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .progress-stage", {{opacity:1}}, {start:.4f});'
                 )
                 if milestone_count:
                     # Opacity only — never animate transform/y (inline left/translateX
@@ -3461,21 +4045,28 @@ def build_hyperframes_composition(
                     timeline_lines.append(
                         f'tl.set("#{element_id} .scale-milestone", {{opacity:0}}, {start:.4f});'
                     )
+                    # Chain scaleX segments end-to-end (no overlap). HyperFrames --strict
+                    # rejects concurrent scaleX tweens on the same fill node — that happened
+                    # when seg was floored to 0.05 while prev_t still advanced only to appear_at.
                     prev_t = start + 0.2
                     prev_frac = 0.0
+                    min_seg = 0.05
                     for index in range(milestone_count):
                         frac = (
                             index / max(milestone_count - 1, 1)
                             if milestone_count > 1
                             else 1.0
                         )
-                        appear_at = milestone_times[index]
-                        seg = max(0.05, appear_at - prev_t)
+                        appear_at = max(float(milestone_times[index]), prev_t + min_seg)
+                        # Stops must finish before undock.
+                        appear_at = min(appear_at, restore_at - min_seg)
+                        appear_at = max(appear_at, prev_t + min_seg)
+                        seg = appear_at - prev_t
                         # Grow the bar to this stop by the stop's reveal time.
                         timeline_lines.append(
                             f'tl.to("#{element_id} .scale-fill", '
-                            f'{{scaleX:{frac:.4f},duration:{seg:.3f},ease:"none"}}, '
-                            f'{prev_t:.4f});'
+                            f'{{scaleX:{frac:.4f},duration:{seg:.3f},ease:"none",'
+                            f'overwrite:"auto"}}, {prev_t:.4f});'
                         )
                         timeline_lines.append(
                             f'tl.fromTo("#{element_id} .scale-milestone[data-milestone-index=\\"{index}\\"]", '
@@ -3487,22 +4078,39 @@ def build_hyperframes_composition(
                         prev_frac = frac
                     # Ensure we end fully filled if last stop is not at 1.0 (single stop).
                     if prev_frac < 0.999:
+                        fill_tail = max(min_seg, min(0.25, restore_at - prev_t))
                         timeline_lines.append(
                             f'tl.to("#{element_id} .scale-fill", '
-                            f'{{scaleX:1,duration:0.2,ease:"none"}}, {prev_t:.4f});'
+                            f'{{scaleX:1,duration:{fill_tail:.3f},ease:"none",overwrite:"auto"}}, '
+                            f'{prev_t:.4f});'
                         )
                 else:
-                    # No stops — still grow the bar once over the mid-cue.
-                    fill_duration = max(1.0, duration - 0.45 - hold_after_fill - video_out)
+                    # No stops — grow the bar once, finish before undock.
+                    fill_duration = max(0.6, restore_at - (start + 0.45) - 0.15)
                     timeline_lines.append(
                         f'tl.fromTo("#{element_id} .scale-fill", {{scaleX:0}}, '
-                        f'{{scaleX:1,duration:{fill_duration:.3f},ease:"none"}}, '
+                        f'{{scaleX:1,duration:{fill_duration:.3f},ease:"none",overwrite:"auto"}}, '
                         f'{(start + 0.45):.4f});'
                     )
+                # Fade stage chrome + undock talking-head together at Ends.
                 timeline_lines.append(
-                    f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},ease:"power3.inOut"}}, '
-                    f'{restore_at:.4f});'
+                    f'tl.to("#{element_id} .progress-stage", '
+                    f'{{opacity:0,duration:{video_out:.3f},ease:"power2.in"}}, {restore_at:.4f});'
                 )
+                timeline_lines.append(
+                    _main_video_undock_line(duration=video_out, at=restore_at)
+                )
+                cue_end = start + duration
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .progress-stage", {{opacity:0}}, {cue_end:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .scale-fill", {{scaleX:0}}, {cue_end:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .scale-milestone", {{opacity:0}}, {cue_end:.4f});'
+                )
+                timeline_lines.append(_main_video_reset_line(at=cue_end))
             elif module_id == "source-punch-zoom":
                 # One camera engine, three paths (placement picks path; default in-out):
                 #   in     — full → tight at zoomInFrame, hold tight for the cue
@@ -3551,29 +4159,27 @@ def build_hyperframes_composition(
                 if motion == "in":
                     timeline_lines.append(
                         f'tl.to("#main-video", {{scale:{zoom:.4f},transformOrigin:{origin},'
-                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {zoom_in_at:.4f});'
+                        f'duration:{settle:.3f},ease:"power2.inOut",overwrite:"auto"}}, {zoom_in_at:.4f});'
                     )
-                    # Hold tight for the rest of the cue; clean reset after so the next cue starts full.
-                    timeline_lines.append(
-                        f'tl.set("#main-video", {{scale:1,transformOrigin:{origin}}}, '
-                        f'{cue_end:.4f});'
-                    )
+                    # Reset to full + top-left origin so the next dock engine (progress-scale, …)
+                    # does not inherit the punch focus origin and fly off-screen.
+                    timeline_lines.append(_main_video_reset_line(at=cue_end))
                 elif motion == "out":
                     timeline_lines.append(
                         f'tl.set("#main-video", {{scale:{zoom:.4f},transformOrigin:{origin}}}, {start:.4f});'
                     )
                     timeline_lines.append(
-                        f'tl.to("#main-video", {{scale:1,transformOrigin:{origin},'
-                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {zoom_out_at:.4f});'
+                        f'tl.to("#main-video", {{scale:1,x:0,y:0,transformOrigin:"{_MAIN_VIDEO_DOCK_ORIGIN}",'
+                        f'duration:{settle:.3f},ease:"power2.inOut",overwrite:"auto"}}, {zoom_out_at:.4f});'
                     )
                 else:  # in-out
                     timeline_lines.append(
                         f'tl.to("#main-video", {{scale:{zoom:.4f},transformOrigin:{origin},'
-                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {zoom_in_at:.4f});'
+                        f'duration:{settle:.3f},ease:"power2.inOut",overwrite:"auto"}}, {zoom_in_at:.4f});'
                     )
                     timeline_lines.append(
-                        f'tl.to("#main-video", {{scale:1,transformOrigin:{origin},'
-                        f'duration:{settle:.3f},ease:"power2.inOut"}}, {zoom_out_at:.4f});'
+                        f'tl.to("#main-video", {{scale:1,x:0,y:0,transformOrigin:"{_MAIN_VIDEO_DOCK_ORIGIN}",'
+                        f'duration:{settle:.3f},ease:"power2.inOut",overwrite:"auto"}}, {zoom_out_at:.4f});'
                     )
             elif module_id == "problem-card-triptych":
                 # Sequence:
@@ -3596,37 +4202,19 @@ def build_hyperframes_composition(
                     else 0.85
                 )
                 card_stagger = max(0.35, min(2.0, card_stagger))
-                card_times: list[float] = []
-                anchored_count = 0
-                for index in range(card_count):
-                    path = f"parameters.cards.{index}"
-                    match = next(
-                        (
-                            item
-                            for item in cue.get("semanticItems", [])
-                            if str(item.get("parameterPath") or "") == path
-                        ),
-                        None,
-                    )
-                    if match is not None:
-                        try:
-                            spoken = float(match.get("spokenStartSec") or 0.0)
-                        except (TypeError, ValueError):
-                            spoken = 0.0
-                        appear_at = max(spoken, range_start) - range_start
-                        # Honor placement frame; only keep after a brief stage settle.
-                        card_times.append(max(start + 0.12, appear_at))
-                        anchored_count += 1
-                    else:
-                        card_times.append(start + 0.28 + index * card_stagger)
-                # Monotonic order — small gap when placement-driven so tight frames stay close.
-                min_gap = 0.08 if anchored_count > 0 else 0.35
-                for index in range(1, len(card_times)):
-                    card_times[index] = max(card_times[index], card_times[index - 1] + min_gap)
+                card_times, anchored_count, card_reveal_order = _placement_item_reveal_schedule(
+                    count=card_count,
+                    path_prefix="parameters.cards",
+                    semantic_items=list(cue.get("semanticItems") or []),
+                    range_start=range_start,
+                    start=start,
+                    unanchored_at=lambda index, _stagger=card_stagger: start + 0.28 + index * _stagger,
+                )
                 if card_times and anchored_count == 0 and card_count > 1:
                     # Library / unanchored samples only: compress evenly if settle won't fit.
+                    last_t = max(card_times) if card_times else start
                     latest_need = (
-                        card_times[-1]
+                        last_t
                         + settle_after_last_sec
                         + linger_all_white_sec
                         + exit_duration
@@ -3642,11 +4230,13 @@ def build_hyperframes_composition(
                         )
                         step = budget / max(card_count - 1, 1)
                         card_times = [start + 0.28 + index * step for index in range(card_count)]
+                        card_reveal_order = list(range(card_count))
                 elif card_times and anchored_count > 0:
                     # Placement path: keep card frames; shrink pink-settle / linger to fit.
+                    last_t = max(card_times)
                     room_after = max(
                         0.4,
-                        (start + duration - exit_duration) - card_times[-1],
+                        (start + duration - exit_duration) - last_t,
                     )
                     settle_after_last_sec = min(
                         settle_after_last_sec, max(0.3, room_after * 0.45)
@@ -3663,7 +4253,8 @@ def build_hyperframes_composition(
                     timeline_lines.append(
                         f'tl.set("#{element_id} .pf-tri-card", {{opacity:0,y:18}}, {start:.4f});'
                     )
-                for index in range(card_count):
+                # Pink handoff follows reveal *time* order (not slot index).
+                for order_i, index in enumerate(card_reveal_order):
                     appear_at = card_times[index]
                     card_sel = f'#{element_id} .pf-tri-card[data-card-index=\\"{index}\\"]'
                     timeline_lines.append(
@@ -3683,8 +4274,9 @@ def build_hyperframes_composition(
                         f'tl.to("{card_sel} i, {card_sel} span", {{color:"#ffffff",duration:0.18}}, '
                         f'{appear_at:.4f});'
                     )
-                    if index > 0:
-                        prev_sel = f'#{element_id} .pf-tri-card[data-card-index=\\"{index - 1}\\"]'
+                    if order_i > 0:
+                        prev_index = card_reveal_order[order_i - 1]
+                        prev_sel = f'#{element_id} .pf-tri-card[data-card-index=\\"{prev_index}\\"]'
                         timeline_lines.append(
                             f'tl.to("{prev_sel}", {{backgroundColor:"{white_bg}",color:"{ink}",'
                             f'duration:0.28,ease:"power1.out"}}, {appear_at:.4f});'
@@ -3695,14 +4287,16 @@ def build_hyperframes_composition(
                         timeline_lines.append(
                             f'tl.to("{prev_sel} span", {{color:"{ink}",duration:0.28}}, {appear_at:.4f});'
                         )
-                if card_count:
-                    last_sel = f'#{element_id} .pf-tri-card[data-card-index=\\"{card_count - 1}\\"]'
-                    settle_at = card_times[-1] + settle_after_last_sec
+                if card_count and card_reveal_order:
+                    last_index = card_reveal_order[-1]
+                    last_t = card_times[last_index]
+                    last_sel = f'#{element_id} .pf-tri-card[data-card-index=\\"{last_index}\\"]'
+                    settle_at = last_t + settle_after_last_sec
                     # Keep settle before exit so the all-white linger is visible.
                     settle_at = min(
                         settle_at, start + duration - exit_duration - linger_all_white_sec
                     )
-                    settle_at = max(settle_at, card_times[-1] + 0.25)
+                    settle_at = max(settle_at, last_t + 0.25)
                     timeline_lines.append(
                         f'tl.to("{last_sel}", {{backgroundColor:"{white_bg}",color:"{ink}",'
                         f'duration:0.3,ease:"power1.out"}}, {settle_at:.4f});'
@@ -3725,10 +4319,9 @@ def build_hyperframes_composition(
                 # Terminal fades in on the left; prompt characters type like a CLI while spoken.
                 video_left, video_top = 0.50, 0.10
                 video_w, video_h = 0.42, 0.78
-                video_scale = max(video_w, video_h)
-                face_center_x = 0.46
-                video_x = (video_left + video_w / 2) - face_center_x * video_scale
-                video_y = video_top
+                video_scale, video_x, video_y = _cover_dock_for_frame(
+                    video_left, video_top, video_w, video_h
+                )
                 video_in, video_out = 0.55, 0.45
                 raw_prompt = str(params.get("prompt") or "").replace("\r\n", "\n").replace("\r", "\n")
                 type_count = len(raw_prompt)
@@ -3776,9 +4369,13 @@ def build_hyperframes_composition(
                     f'tl.set("#{element_id} .prompt-typed-text", {{textContent:""}}, {start:.4f});'
                 )
                 timeline_lines.append(
-                    f'tl.to("#main-video", {{scale:{video_scale:.4f},'
-                    f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
-                    f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
+                    _main_video_dock_line(
+                        scale=video_scale,
+                        x_px=width * video_x,
+                        y_px=height * video_y,
+                        duration=video_in,
+                        at=start,
+                    )
                 )
                 timeline_lines.append(
                     f'tl.fromTo("#{element_id} .prompt-mask", {{opacity:0}}, '
@@ -3810,30 +4407,184 @@ def build_hyperframes_composition(
                     f'tl.to("#{element_id} .prompt-stage > *", {{opacity:0,duration:{exit_d:.3f},'
                     f'ease:"power2.in"}}, {(start + duration - exit_d):.4f});'
                 )
-                timeline_lines.append(
-                    f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},'
-                    f'ease:"power3.inOut"}}, {restore_at:.4f});'
+                timeline_lines.append(_main_video_undock_line(duration=video_out, at=restore_at))
+            elif module_id == "windows-prompt-overlay":
+                # Overlay only: no video dock/undock, no white mask. Terminal fades in
+                # centered horizontally; prompt types character-by-character (same pace
+                # as windows-prompt-typing).
+                raw_prompt = str(params.get("prompt") or "").replace("\r\n", "\n").replace("\r", "\n")
+                type_count = len(raw_prompt)
+                min_type_duration = max(1.2, type_count * 0.075) if type_count else 0.5
+                type_start = start + 0.55
+                type_end = start + duration - 0.55
+                prompt_match = next(
+                    (
+                        item
+                        for item in cue.get("semanticItems", [])
+                        if str(item.get("parameterPath") or "") == "parameters.prompt"
+                    ),
+                    None,
                 )
+                if prompt_match is not None:
+                    spoken = float(prompt_match.get("spokenStartSec") or 0.0)
+                    fully = float(prompt_match.get("fullyVisibleSec") or spoken)
+                    type_start = max(start + 0.45, max(spoken, range_start) - range_start)
+                    speech_end = max(fully, range_start) - range_start
+                    if speech_end >= type_start + min_type_duration * 0.85:
+                        type_end = speech_end
+                    else:
+                        type_end = type_start + min_type_duration
+                type_end = max(type_end, type_start + min_type_duration)
+                type_end = min(type_end, start + duration - 0.4)
+                if type_end <= type_start + 0.4 and type_count > 0:
+                    type_start = start + 0.45
+                    type_end = min(start + duration - 0.4, type_start + min_type_duration)
+                type_duration = max(0.4, type_end - type_start)
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .prompt-app, #{element_id} .prompt-typed, '
+                    f'#{element_id} .prompt-typed-text, #{element_id} .prompt-prefix", '
+                    f'{{opacity:1}}, {entry_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .prompt-typed-text", {{textContent:""}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .prompt-overlay-terminal", '
+                    f'{{opacity:0,y:18,scale:0.98}}, '
+                    f'{{opacity:1,y:0,scale:1,duration:0.5,ease:"power3.out",'
+                    f'transformOrigin:"center center",immediateRender:false}}, '
+                    f'{(start + 0.12):.4f});'
+                )
+                if type_count > 0:
+                    step = type_duration / type_count
+                    for index in range(1, type_count + 1):
+                        appear_at = type_start + (index - 1) * step
+                        partial = json.dumps(raw_prompt[:index])
+                        timeline_lines.append(
+                            f'tl.set("#{element_id} .prompt-typed-text", '
+                            f'{{textContent:{partial}}}, {appear_at:.4f});'
+                        )
+                exit_d = 0.28
+                timeline_lines.append(
+                    f'tl.to("#{element_id} .prompt-overlay-terminal", '
+                    f'{{opacity:0,duration:{exit_d:.3f},ease:"power2.in"}}, '
+                    f'{(start + duration - exit_d):.4f});'
+                )
+            elif module_id == "numbered-phrase-reveal":
+                # Full white stage: number/title left, head cover-docks upper-right,
+                # magenta phrase types at bottom (same char-step mechanics as prompt).
+                # Geometry must match .npr-mask hole + .npr-video-outline exactly:
+                # left 50%, top 9%, width 42%, height 50%.
+                video_left, video_top = 0.50, 0.09
+                video_w, video_h = 0.42, 0.50
+                video_scale, video_x, video_y = _cover_dock_for_frame(
+                    video_left, video_top, video_w, video_h
+                )
+                video_in, video_out = 0.55, 0.45
+                raw_phrase = str(params.get("text") or "").replace("\r\n", "\n").replace("\r", "\n")
+                type_count = len(raw_phrase)
+                min_type_duration = max(1.2, type_count * 0.075) if type_count else 0.5
+                type_start = start + 0.9
+                type_end = start + duration - video_out - 0.45
+                phrase_match = next(
+                    (
+                        item
+                        for item in cue.get("semanticItems", [])
+                        if str(item.get("parameterPath") or "") == "parameters.text"
+                    ),
+                    None,
+                )
+                if phrase_match is not None:
+                    spoken = float(phrase_match.get("spokenStartSec") or 0.0)
+                    fully = float(phrase_match.get("fullyVisibleSec") or spoken)
+                    type_start = max(start + 0.85, max(spoken, range_start) - range_start)
+                    speech_end = max(fully, range_start) - range_start
+                    if speech_end >= type_start + min_type_duration * 0.85:
+                        type_end = speech_end
+                    else:
+                        type_end = type_start + min_type_duration
+                type_end = max(type_end, type_start + min_type_duration)
+                type_end = min(type_end, start + duration - video_out - 0.35)
+                if type_end <= type_start + 0.4 and type_count > 0:
+                    type_start = start + 0.85
+                    type_end = min(
+                        start + duration - video_out - 0.35,
+                        type_start + min_type_duration,
+                    )
+                type_duration = max(0.4, type_end - type_start)
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .npr-title, #{element_id} .npr-number, '
+                    f'#{element_id} .npr-typed, #{element_id} .npr-typed-text", '
+                    f'{{opacity:1}}, {entry_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .npr-typed-text", {{textContent:""}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    _main_video_dock_line(
+                        scale=video_scale,
+                        x_px=width * video_x,
+                        y_px=height * video_y,
+                        duration=video_in,
+                        at=start,
+                    )
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .npr-mask", {{opacity:0}}, '
+                    f'{{opacity:1,duration:0.28,ease:"power2.out"}}, {entry_start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .npr-video-outline", {{opacity:0}}, '
+                    f'{{opacity:1,duration:0.35,ease:"power2.out"}}, {(start + 0.12):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .npr-left", {{opacity:0,x:-28}}, '
+                    f'{{opacity:1,x:0,duration:0.45,ease:"power3.out"}}, {(start + 0.1):.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.fromTo("#{element_id} .npr-phrase", {{opacity:0,y:14}}, '
+                    f'{{opacity:1,y:0,duration:0.35,ease:"power2.out"}}, {(start + 0.55):.4f});'
+                )
+                if type_count > 0:
+                    step = type_duration / type_count
+                    for index in range(1, type_count + 1):
+                        appear_at = type_start + (index - 1) * step
+                        partial = json.dumps(raw_phrase[:index])
+                        timeline_lines.append(
+                            f'tl.set("#{element_id} .npr-typed-text", '
+                            f'{{textContent:{partial}}}, {appear_at:.4f});'
+                        )
+                restore_at = start + duration - video_out
+                exit_d = 0.28
+                timeline_lines.append(
+                    f'tl.to("#{element_id} .npr-stage > *", {{opacity:0,duration:{exit_d:.3f},'
+                    f'ease:"power2.in"}}, {(start + duration - exit_d):.4f});'
+                )
+                timeline_lines.append(_main_video_undock_line(duration=video_out, at=restore_at))
             elif module_id == "brand-cta-lockup":
                 # Community CTA stage:
                 # full white stage, teal band wipe, logo + join line + URL pill,
                 # talking head cover-scaled into the right tall frame.
-                # Frame matches .community-video-outline / .community-mask (58.85%/10.2%/35.9%/78.7%).
-                video_left, video_top = 0.5885, 0.1019
-                video_w, video_h = 0.3594, 0.7870
-                video_scale = max(video_w, video_h)
-                face_center_x = 0.47
-                video_x = (video_left + video_w / 2) - face_center_x * video_scale
-                video_y = video_top
+                # Frame matches .community-video-outline / .community-mask exactly:
+                # left:58.85%; top:10.2%; width:35.9%; height:78.7% (hole → 94.75% / 88.9%).
+                video_left, video_top = 0.5885, 0.102
+                video_w, video_h = 0.359, 0.787
+                video_scale, video_x, video_y = _cover_dock_for_frame(
+                    video_left, video_top, video_w, video_h
+                )
                 video_in, video_out = 0.55, 0.4
                 exit_d = 0.28
                 timeline_lines.append(
                     f'tl.set("#{element_id} [data-semantic-path]", {{opacity:1}}, {entry_start:.4f});'
                 )
                 timeline_lines.append(
-                    f'tl.to("#main-video", {{scale:{video_scale:.4f},'
-                    f'x:{width * video_x:.2f},y:{height * video_y:.2f},'
-                    f'duration:{video_in:.3f},ease:"power3.inOut"}}, {start:.4f});'
+                    _main_video_dock_line(
+                        scale=video_scale,
+                        x_px=width * video_x,
+                        y_px=height * video_y,
+                        duration=video_in,
+                        at=start,
+                    )
                 )
                 timeline_lines.append(
                     f'tl.fromTo("#{element_id} .community-mask", {{opacity:0}}, '
@@ -3882,10 +4633,7 @@ def build_hyperframes_composition(
                     f'tl.to("#{element_id} .community-stage > *", {{opacity:0,duration:{exit_d:.3f},'
                     f'ease:"power2.in"}}, {(start + duration - exit_d):.4f});'
                 )
-                timeline_lines.append(
-                    f'tl.to("#main-video", {{scale:1,x:0,y:0,duration:{video_out:.3f},'
-                    f'ease:"power3.inOut"}}, {restore_at:.4f});'
-                )
+                timeline_lines.append(_main_video_undock_line(duration=video_out, at=restore_at))
             elif module_id == "robot-rocket-sign":
                 # Soft CTA gag (L→R), slightly slower for readability:
                 #   1) blast in fast to ~1/3
@@ -3938,50 +4686,57 @@ def build_hyperframes_composition(
                     f'tl.to("{rig}", {{x:{x_third:.1f},rotation:-3,duration:{0.55 * scale:.3f},'
                     f'ease:"power3.out"}}, {_t(0):.4f});'
                 )
+                # Flame pulse must finish before misfire dim (strict lint: no scale overlap).
+                flame_pulse_step = 0.10
+                flame_pulse_reps = 2  # total active ≈ step * (reps + 1) with yoyo pairs
+                flame_pulse_end = _t(0) + flame_pulse_step * (flame_pulse_reps + 1)
+                misfire_at = max(_t(t_fast_end), flame_pulse_end + 0.02)
                 timeline_lines.append(
-                    f'tl.to("{flame}", {{scale:1.15,transformOrigin:"100% 50%",duration:0.14,'
-                    f'repeat:3,yoyo:true,ease:"sine.inOut"}}, {_t(0):.4f});'
+                    f'tl.to("{flame}", {{scale:1.15,transformOrigin:"100% 50%",'
+                    f'duration:{flame_pulse_step:.3f},repeat:{flame_pulse_reps},yoyo:true,'
+                    f'ease:"sine.inOut",overwrite:"auto"}}, {_t(0):.4f});'
                 )
                 # 2) Misfire: puffs + slow to middle + confused face
                 timeline_lines.append(
-                    f'tl.to("{smoke}", {{opacity:1,duration:0.14,ease:"power1.out"}}, {_t(t_fast_end):.4f});'
+                    f'tl.to("{smoke}", {{opacity:1,duration:0.14,ease:"power1.out"}}, {misfire_at:.4f});'
                 )
                 timeline_lines.append(
-                    f'tl.set("{face_n}", {{opacity:0}}, {_t(t_fast_end):.4f});'
+                    f'tl.set("{face_n}", {{opacity:0}}, {misfire_at:.4f});'
                 )
                 timeline_lines.append(
-                    f'tl.set("{face_c}", {{opacity:1}}, {_t(t_fast_end):.4f});'
+                    f'tl.set("{face_c}", {{opacity:1}}, {misfire_at:.4f});'
                 )
                 timeline_lines.append(
                     f'tl.to("#{element_id} .rocket-puff-a", {{x:-18,y:10,scale:1.35,opacity:0.35,'
-                    f'duration:{1.15 * scale:.3f},ease:"power1.out"}}, {_t(t_fast_end):.4f});'
+                    f'duration:{1.15 * scale:.3f},ease:"power1.out"}}, {misfire_at:.4f});'
                 )
                 timeline_lines.append(
                     f'tl.to("#{element_id} .rocket-puff-b", {{x:-28,y:16,scale:1.5,opacity:0.25,'
-                    f'duration:{1.2 * scale:.3f},ease:"power1.out"}}, {_t(t_fast_end + 0.1):.4f});'
+                    f'duration:{1.2 * scale:.3f},ease:"power1.out"}}, {(misfire_at + 0.1):.4f});'
                 )
                 timeline_lines.append(
                     f'tl.to("#{element_id} .rocket-puff-c", {{x:-22,y:22,scale:1.4,opacity:0.2,'
-                    f'duration:{1.25 * scale:.3f},ease:"power1.out"}}, {_t(t_fast_end + 0.16):.4f});'
+                    f'duration:{1.25 * scale:.3f},ease:"power1.out"}}, {(misfire_at + 0.16):.4f});'
                 )
                 timeline_lines.append(
                     f'tl.to("{flame}", {{scale:0.5,opacity:0.4,duration:{0.4 * scale:.3f},'
-                    f'ease:"power2.inOut"}}, {_t(t_fast_end):.4f});'
+                    f'ease:"power2.inOut",overwrite:"auto"}}, {misfire_at:.4f});'
                 )
                 timeline_lines.append(
                     f'tl.to("{rig}", {{x:{x_mid:.1f},rotation:4,'
                     f'duration:{(t_misfire_end - t_fast_end) * scale:.3f},'
-                    f'ease:"power1.inOut"}}, {_t(t_fast_end):.4f});'
+                    f'ease:"power1.inOut",overwrite:"auto"}}, {misfire_at:.4f});'
                 )
                 timeline_lines.append(
                     f'tl.to("{rig}", {{y:"+=12",duration:0.14,repeat:7,yoyo:true,ease:"sine.inOut"}}, '
-                    f'{_t(t_fast_end):.4f});'
+                    f'{misfire_at:.4f});'
                 )
                 # 3) Confused linger mid-screen
+                confused_at = max(_t(t_misfire_end), misfire_at + 0.05)
                 timeline_lines.append(
                     f'tl.to("{rig}", {{x:{x_mid:.1f},rotation:2,'
                     f'duration:{(t_confused_end - t_misfire_end) * scale:.3f},'
-                    f'ease:"none"}}, {_t(t_misfire_end):.4f});'
+                    f'ease:"none",overwrite:"auto"}}, {confused_at:.4f});'
                 )
                 # 4) A couple of solid smacks (fist is at arm end; pivot at shoulder)
                 timeline_lines.append(
@@ -4004,8 +4759,8 @@ def build_hyperframes_composition(
                     f'tl.to("{smoke}", {{opacity:0,duration:0.14}}, {_t(t_pound_end):.4f});'
                 )
                 timeline_lines.append(
-                    f'tl.to("{flame}", {{scale:1.95,opacity:1,duration:0.2,ease:"power2.out"}}, '
-                    f'{_t(t_pound_end):.4f});'
+                    f'tl.to("{flame}", {{scale:1.95,opacity:1,duration:0.2,ease:"power2.out",'
+                    f'overwrite:"auto"}}, {_t(t_pound_end):.4f});'
                 )
                 timeline_lines.append(
                     f'tl.to("{rig}", {{x:{x_end:.1f},y:{(y_lane - 0.03 * height):.1f},rotation:-12,'
@@ -4017,17 +4772,56 @@ def build_hyperframes_composition(
                 )
             elif module_id in ROBOT_MODULE_IDS:
                 # Recovered mascot motion: wrap enters, bubble pops, robot loops bounce.
+                # Placement contract: bubble lands at the craft `text` revealFrame
+                # (not always at beat start + fixed offset).
                 # Hard cap: at most ROBOT_HOLD_AFTER_DRAWN_SEC after fully drawn, then exit
                 # (even if the placement cue is longer). Shorter cues still exit at cue end.
+                # Bounce must start *after* the bubble entrance finishes — overlapping
+                # scale/transformOrigin on .robot-bubble fails HyperFrames --strict.
                 exit_d = 0.28
                 if module_id == "robot-roast":
-                    drawn_at = start + 0.35 + 0.5  # bubble land
-                    bounce_at = start + 0.85
+                    wrap_lead = 0.35
+                    bubble_dur = 0.5
                     bounce_period = 0.5
+                    bubble_origin = "60% 100%"
+                    wrap_enter_dur = 0.55
                 else:
-                    drawn_at = start + 0.28 + 0.45  # bubble land
-                    bounce_at = start + 0.65
+                    wrap_lead = 0.28
+                    bubble_dur = 0.45
                     bounce_period = 0.42 if module_id == "robot-cheer" else 0.4
+                    bubble_origin = "20% 100%"
+                    wrap_enter_dur = 0.5
+                # Prefer parameters.text; fall back to any spoken semantic (tagline, etc.).
+                land_at = start + wrap_lead  # library / unanchored default
+                text_match = None
+                for item in cue.get("semanticItems") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    path = str(item.get("parameterPath") or "")
+                    if path == "parameters.text":
+                        text_match = item
+                        break
+                match = text_match
+                if match is None:
+                    for item in cue.get("semanticItems") or []:
+                        if isinstance(item, dict) and item.get("spokenStartSec") is not None:
+                            match = item
+                            break
+                if match is not None:
+                    try:
+                        spoken = float(match.get("spokenStartSec") or 0.0)
+                    except (TypeError, ValueError):
+                        spoken = 0.0
+                    land_at = max(spoken, range_start) - range_start
+                    land_at = max(start + 0.05, land_at)
+                # Keep room for bubble pop + min hold start + exit after land.
+                min_tail = bubble_dur + 0.4 + exit_d
+                land_at = min(land_at, start + max(duration - min_tail, 0.05))
+                land_at = max(start + 0.05, land_at)
+                bubble_start = land_at
+                wrap_at = max(start, land_at - wrap_lead)
+                drawn_at = bubble_start + bubble_dur
+                bounce_at = drawn_at + 0.04
                 hold_end = drawn_at + ROBOT_HOLD_AFTER_DRAWN_SEC
                 exit_at = min(start + duration - exit_d, hold_end)
                 exit_at = max(exit_at, drawn_at + 0.35)
@@ -4036,18 +4830,24 @@ def build_hyperframes_composition(
                 wrap = f'#{element_id} .robot-wrap'
                 bubble = f'#{element_id} .robot-bubble'
                 body = f'#{element_id} .robot-body'
+                # Hide until land; bubble scale owns the pop (do not show copy at beat start).
                 timeline_lines.append(
-                    f'tl.set("#{element_id} [data-semantic-path]", {{opacity:1}}, {entry_start:.4f});'
+                    f'tl.set("#{element_id} [data-semantic-path]", {{opacity:0}}, {start:.4f});'
+                )
+                timeline_lines.append(
+                    f'tl.set("#{element_id} [data-semantic-path]", {{opacity:1}}, {bubble_start:.4f});'
                 )
                 if module_id == "robot-roast":
                     timeline_lines.append(
                         f'tl.fromTo("{wrap}", {{x:90,opacity:0}}, '
-                        f'{{x:0,opacity:1,duration:0.55,ease:"power3.out"}}, {entry_start:.4f});'
+                        f'{{x:0,opacity:1,duration:{wrap_enter_dur:.3f},ease:"power3.out"}}, '
+                        f'{wrap_at:.4f});'
                     )
                     timeline_lines.append(
                         f'tl.fromTo("{bubble}", {{scale:0,opacity:0}}, '
-                        f'{{scale:1,opacity:1,duration:0.5,ease:"back.out(1.8)",'
-                        f'transformOrigin:"60% 100%",immediateRender:false}}, {(start + 0.35):.4f});'
+                        f'{{scale:1,opacity:1,duration:{bubble_dur:.3f},ease:"back.out(1.8)",'
+                        f'transformOrigin:"{bubble_origin}",immediateRender:false,'
+                        f'overwrite:"auto"}}, {bubble_start:.4f});'
                     )
                     timeline_lines.append(
                         f'tl.to("{body}", {{y:"-=16",duration:0.5,repeat:{bounce_repeats},'
@@ -4060,19 +4860,21 @@ def build_hyperframes_composition(
                         f'{bounce_at:.4f});'
                     )
                     timeline_lines.append(
-                        f'tl.to("{bubble}", {{rotation:2.5,transformOrigin:"60% 100%",'
+                        f'tl.to("{bubble}", {{rotation:2.5,transformOrigin:"{bubble_origin}",'
                         f'duration:0.55,repeat:{max(1, bounce_repeats - 1)},yoyo:true,'
-                        f'ease:"sine.inOut"}}, {(bounce_at + 0.1):.4f});'
+                        f'ease:"sine.inOut",overwrite:"auto"}}, {bounce_at:.4f});'
                     )
                 else:
                     timeline_lines.append(
                         f'tl.fromTo("{wrap}", {{y:60,opacity:0}}, '
-                        f'{{y:0,opacity:1,duration:0.5,ease:"power3.out"}}, {entry_start:.4f});'
+                        f'{{y:0,opacity:1,duration:{wrap_enter_dur:.3f},ease:"power3.out"}}, '
+                        f'{wrap_at:.4f});'
                     )
                     timeline_lines.append(
                         f'tl.fromTo("{bubble}", {{scale:0,opacity:0}}, '
-                        f'{{scale:1,opacity:1,duration:0.45,ease:"back.out(1.9)",'
-                        f'transformOrigin:"20% 100%",immediateRender:false}}, {(start + 0.28):.4f});'
+                        f'{{scale:1,opacity:1,duration:{bubble_dur:.3f},ease:"back.out(1.9)",'
+                        f'transformOrigin:"{bubble_origin}",immediateRender:false,'
+                        f'overwrite:"auto"}}, {bubble_start:.4f});'
                     )
                     if module_id == "robot-cheer":
                         timeline_lines.append(
@@ -4080,9 +4882,9 @@ def build_hyperframes_composition(
                             f'yoyo:true,ease:"sine.inOut"}}, {bounce_at:.4f});'
                         )
                         timeline_lines.append(
-                            f'tl.to("{bubble}", {{scale:1.04,transformOrigin:"20% 100%",'
-                            f'duration:0.42,repeat:{bounce_repeats},yoyo:true,ease:"sine.inOut"}}, '
-                            f'{bounce_at:.4f});'
+                            f'tl.to("{bubble}", {{scale:1.04,transformOrigin:"{bubble_origin}",'
+                            f'duration:0.42,repeat:{bounce_repeats},yoyo:true,ease:"sine.inOut",'
+                            f'overwrite:"auto"}}, {bounce_at:.4f});'
                         )
                     else:
                         # robot-defiant: body bounce + fist pump + bubble wiggle
@@ -4097,9 +4899,9 @@ def build_hyperframes_composition(
                             f'{bounce_at:.4f});'
                         )
                         timeline_lines.append(
-                            f'tl.to("{bubble}", {{rotation:-2.5,transformOrigin:"20% 100%",'
-                            f'duration:0.4,repeat:{bounce_repeats},yoyo:true,ease:"sine.inOut"}}, '
-                            f'{bounce_at:.4f});'
+                            f'tl.to("{bubble}", {{rotation:-2.5,transformOrigin:"{bubble_origin}",'
+                            f'duration:0.4,repeat:{bounce_repeats},yoyo:true,ease:"sine.inOut",'
+                            f'overwrite:"auto"}}, {bounce_at:.4f});'
                         )
                 timeline_lines.append(
                     f'tl.to("{wrap}", {{opacity:0,duration:{exit_d:.3f},ease:"power2.in"}}, '
@@ -4220,6 +5022,8 @@ def build_hyperframes_composition(
             elif module_id in PORTED_MODULE_IDS and module_id not in {
                 "brand-cta-lockup",
                 "windows-prompt-typing",
+                "windows-prompt-overlay",
+                "numbered-phrase-reveal",
                 "kinetic-word-punctuation",  # stamp timing owned above
                 "speaker-rise-callouts",  # thesis + callouts own placement timing above
                 "tradeoff-meter",  # meter fill owned above (syncs to verdict frame)

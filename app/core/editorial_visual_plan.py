@@ -49,6 +49,11 @@ TREATMENT_TO_MODULE: dict[str, dict[str, str]] = {
         "moduleId": "dependency-stack",
         "mode": "dependency",
     },
+    # Host intro: left docked head, right name + experience + Wai thank-you
+    "intro-credentials": {
+        "moduleId": "intro-credentials",
+        "mode": "intro",
+    },
     # Tutorial structure
     "numbered-example-card": {
         "moduleId": "numbered-example-card",
@@ -61,6 +66,14 @@ TREATMENT_TO_MODULE: dict[str, dict[str, str]] = {
     "windows-prompt-typing": {
         "moduleId": "windows-prompt-typing",
         "mode": "prompt",
+    },
+    "windows-prompt-overlay": {
+        "moduleId": "windows-prompt-overlay",
+        "mode": "prompt-overlay",
+    },
+    "numbered-phrase-reveal": {
+        "moduleId": "numbered-phrase-reveal",
+        "mode": "numbered-phrase",
     },
     # Lists
     # UI / proof / CTA
@@ -140,6 +153,7 @@ def _kicker_for(beat: dict, mode: str) -> str:
         "side-panel": "SECTION",
         "numbered-example": "EXAMPLE",
         "numbered-step": "STEP",
+        "numbered-phrase": "STEP",
         "prompt": "PROMPT",
         "list": "LIST",
         "side-list": "LIST",
@@ -258,6 +272,17 @@ def _module_parameters(beat: dict, binding: dict[str, str], *, index: int) -> di
                 "appName": "Windows PowerShell",
                 "prompt": copy or "prompt",
                 "side": "left",
+            }
+        )
+        return _filter_module_params(module_id, base)
+
+    if mode == "numbered-phrase":
+        number, lines = _parse_numbered(copy or "1 — Phrase")
+        base.update(
+            {
+                "numberLabel": str(number),
+                "title": "",
+                "text": " ".join(lines) if lines else (copy or "Phrase"),
             }
         )
         return _filter_module_params(module_id, base)
@@ -388,9 +413,12 @@ def _binding_for_module(module_id: str, fallback_treatment: str) -> dict[str, st
         "kinetic-word-punctuation": "kinetic",
         "punchline-reveal": "punchline",
         "numbered-step-intro": "numbered-step",
+        "numbered-phrase-reveal": "numbered-phrase",
         "windows-prompt-typing": "prompt",
+        "windows-prompt-overlay": "prompt-overlay",
         "source-punch-zoom": "punch-zoom",
         "dependency-stack": "dependency",
+        "intro-credentials": "intro",
         "numbered-example-card": "numbered-example",
         "robot-cheer": "robot",
         "robot-defiant": "robot",

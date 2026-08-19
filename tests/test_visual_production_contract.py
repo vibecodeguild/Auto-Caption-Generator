@@ -29,6 +29,7 @@ def test_module_catalog_matches_visual_plan_schema() -> None:
         "tradeoffMeterCue",
         "brandCtaLockupCue",
         "windowsPromptTypingCue",
+        "numberedPhraseRevealCue",
         "robotCheerCue",
         "robotDefiantCue",
         "robotRoastCue",

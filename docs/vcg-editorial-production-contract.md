@@ -242,12 +242,15 @@ Drawn from modules that already appear in successful projects and/or the registe
 
 - `numbered-example-card`
 - `numbered-step-intro`
+- `numbered-phrase-reveal`
 - `windows-prompt-typing`
+- `windows-prompt-overlay` (same terminal typing, no dock — screen unchanged)
 - `ui-callout`
 
 **Structure / proof / end / soft CTA**
 
 - `dependency-stack`
+- `intro-credentials` (host intro: head left, name + experience + large Wai thank-you right)
 - `progress-scale`
 - `tradeoff-meter`
 - `brand-cta-lockup` (Skool hard CTA)

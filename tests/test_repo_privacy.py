@@ -15,6 +15,8 @@ from scripts.new_visual_project import PROJECT_DIRECTORIES, create_project, norm
         "app/temp/transcript.json",
         "somewhere/interview.srt",
         "edit/project.prproj",
+        ".tmp-overview.txt",
+        ".tmp_mb_diag.py",
     ],
 )
 def test_private_paths_are_rejected(path: str) -> None:

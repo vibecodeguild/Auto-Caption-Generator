@@ -229,6 +229,11 @@ _DEMO_COPY: dict[str, dict[str, Any]] = {
         "text": "WHAT YOU NEED",
         "nodes": ["Transcript", "Locked cut", "Graphics kit"],
     },
+    "intro-credentials": {
+        "text": "YOUR NAME",
+        "nodes": ["Builder", "Teacher", "Community host"],
+        "thankYou": "Thank you!",
+    },
     "numbered-example-card": {
         "kicker": "EXAMPLE",
         "exampleNumber": 1,
@@ -288,6 +293,15 @@ _DEMO_COPY: dict[str, dict[str, Any]] = {
         "appName": "Windows PowerShell",
         "prompt": "Rewrite this slide so a first-time reader gets the point in five seconds",
         "side": "left",
+    },
+    "windows-prompt-overlay": {
+        "appName": "Windows PowerShell",
+        "prompt": "Rewrite this slide so a first-time reader gets the point in five seconds",
+    },
+    "numbered-phrase-reveal": {
+        "numberLabel": "2",
+        "title": "",
+        "text": "Here are words that I want to show on the screen",
     },
     "robot-cheer": {
         "text": "Vibe coding",
@@ -502,7 +516,10 @@ def create_graphics_library(
         return load_graphics_library(root)
     document = empty_index()
     document["rootLabel"] = root_label
-    return save_graphics_library(document, root)
+    save_graphics_library(document, root)
+    # Seed one candidate row per production engine so a new library is usable.
+    ensure_candidate_usages_from_engines(root)
+    return load_graphics_library(root)
 
 
 def create_golden_record(
@@ -753,7 +770,7 @@ def ensure_candidate_usages_from_engines(
 
     Does not draw graphics. Does not promote to golden. Only creates/updates
     shelf entries (when/where shells) so the creator can sample and promote.
-    Safe to run repeatedly.
+    Safe to run repeatedly. Only rewrites the index when something changes.
     """
 
     root = (root or default_graphics_library_root()).resolve()
@@ -761,6 +778,7 @@ def ensure_candidate_usages_from_engines(
     by_id = {str(entry["id"]): entry for entry in document["entries"]}
     now = _now()
     created = 0
+    dirty = False
     for module in load_module_catalog():
         module_id = str(module.get("id") or "")
         if not module_id:
@@ -770,6 +788,11 @@ def ensure_candidate_usages_from_engines(
         if module_id in by_id:
             # Refresh engine link / layouts that do not overwrite creator status.
             entry = by_id[module_id]
+            before = (
+                str(entry.get("engineId") or ""),
+                list(entry.get("allowedLayouts") or []),
+                list(entry.get("beatTypes") or []),
+            )
             entry["engineId"] = str(entry.get("engineId") or module_id)
             if entry["engineId"] not in MODULE_IDS:
                 entry["engineId"] = module_id
@@ -779,22 +802,39 @@ def ensure_candidate_usages_from_engines(
                 ]
             if module.get("beatTypes") and not entry.get("beatTypes"):
                 entry["beatTypes"] = normalize_beat_types(module.get("beatTypes"))
-            by_id[module_id] = scrub_usage_entry(entry)
+            entry = scrub_usage_entry(entry)
+            by_id[module_id] = entry
+            # Keep the list entry in sync with scrubbed fields.
+            for index, existing in enumerate(document["entries"]):
+                if str(existing.get("id") or "") == module_id:
+                    document["entries"][index] = entry
+                    break
+            after = (
+                str(entry.get("engineId") or ""),
+                list(entry.get("allowedLayouts") or []),
+                list(entry.get("beatTypes") or []),
+            )
+            if after != before:
+                dirty = True
             continue
         entry = _entry_shell(module, now=now)
         document["entries"].append(entry)
         by_id[module_id] = entry
         created += 1
+        dirty = True
     # Ensure every runtime MODULE_IDS is present even if catalog file is incomplete.
     for module_id in sorted(MODULE_IDS):
         if module_id not in by_id:
             document["entries"].append(_entry_shell({"id": module_id}, now=now))
             created += 1
-    save_graphics_library(document, root)
+            dirty = True
+    if dirty:
+        save_graphics_library(document, root)
     return {
         "created": created,
         "total": len(document["entries"]),
         "root": str(root),
+        "updated": dirty,
     }
 
 
@@ -1095,14 +1135,23 @@ def get_production_graphics(
             ),
         }
 
+    from app.core.visual_production import MODULE_IDS, RETIRED_ENGINE_ALIASES, canonicalize_engine_id
+
     document = load_graphics_library(root)
     usages: list[dict[str, Any]] = []
     for entry in document["entries"]:
         status = str(entry.get("status") or "candidate")
         if status not in allowed_statuses:
             continue
-        usage_id = str(entry.get("id") or "")
-        engine_id = str(entry.get("engineId") or entry.get("implementationId") or usage_id)
+        usage_id = str(entry.get("id") or "").strip()
+        if not usage_id or usage_id in RETIRED_ENGINE_ALIASES:
+            # Retired shelf cards (speaker-side-panel, etc.) are not production-selectable.
+            continue
+        engine_id = canonicalize_engine_id(
+            str(entry.get("engineId") or entry.get("implementationId") or usage_id).strip()
+        )
+        if engine_id not in MODULE_IDS:
+            continue
         usages.append(
             {
                 "id": usage_id,
@@ -1155,6 +1204,11 @@ def get_production_usages(
 def summary(root: Path | None = None) -> dict[str, Any]:
     root = (root or default_graphics_library_root()).resolve()
     exists = index_path(root).is_file()
+    # Keep the shelf in sync with ENGINE_REGISTRY: new engines appear as
+    # candidate usages automatically (never auto-golden).
+    if exists:
+        ensure_candidate_usages_from_engines(root)
+        exists = index_path(root).is_file()
     document = load_graphics_library(root) if exists else empty_index()
     counts: dict[str, int] = {}
     for entry in document["entries"]:
@@ -1384,7 +1438,7 @@ def _semantic_items_for_cue(
         fully = min(end, spoken + (0.35 if stagger > 0 else 0.4))
         # Prompt typing needs a long fully-visible window so sample letters type out
         # instead of snapping in over the default 0.4s semantic settle.
-        if module_id == "windows-prompt-typing" and path == "parameters.prompt":
+        if module_id in {"windows-prompt-typing", "windows-prompt-overlay"} and path == "parameters.prompt":
             prompt_len = max(1, sum(1 for char in str(text) if char != "\n"))
             type_span = max(3.0, prompt_len * 0.075)
             spoken = min(start + 0.9, max(start, end - type_span - 0.5))
@@ -1617,6 +1671,15 @@ def render_entry_sample(
         )
         if cue_end <= cue_start + 6.0:
             cue_end = min(duration - 0.05, cue_start + max(9.0, duration * 0.85))
+    elif module_id == "intro-credentials":
+        # Dock + name + sequential experience nodes + settle + Wai robot thank-you + undock.
+        node_n = len(params.get("nodes") or []) or 3
+        cue_end = min(
+            duration - 0.08,
+            cue_start + 0.5 + node_n * sample_reveal_stagger_sec + 2.0 + 1.8 + 0.55,
+        )
+        if cue_end <= cue_start + 7.0:
+            cue_end = min(duration - 0.05, cue_start + max(10.0, duration * 0.88))
     elif module_id in {"robot-cheer", "robot-defiant", "robot-roast"}:
         # Entrance (~0.75–0.85s) + hard 3s hold after drawn + short exit.
         from app.core.visual_production import ROBOT_HOLD_AFTER_DRAWN_SEC
@@ -1637,6 +1700,22 @@ def render_entry_sample(
         # Dock + terminal fade + letter-by-letter type (~13 cps) + hold finished line + exit.
         prompt_text = str(params.get("prompt") or "")
         char_n = sum(1 for char in prompt_text.replace("\r\n", "\n") if char != "\n")
+        type_sec = max(3.5, char_n * 0.075)
+        cue_end = min(duration - 0.08, cue_start + 0.95 + type_sec + 1.6 + 0.55)
+        if cue_end <= cue_start + 6.0:
+            cue_end = min(duration - 0.05, cue_start + max(8.0, duration * 0.8))
+    elif module_id == "windows-prompt-overlay":
+        # Overlay terminal only (no dock): fade + letter type + hold + exit.
+        prompt_text = str(params.get("prompt") or "")
+        char_n = sum(1 for char in prompt_text.replace("\r\n", "\n") if char != "\n")
+        type_sec = max(3.5, char_n * 0.075)
+        cue_end = min(duration - 0.08, cue_start + 0.55 + type_sec + 1.4 + 0.4)
+        if cue_end <= cue_start + 5.0:
+            cue_end = min(duration - 0.05, cue_start + max(7.0, duration * 0.75))
+    elif module_id == "numbered-phrase-reveal":
+        # Dock + number/title land + letter-by-letter phrase type + hold + undock.
+        phrase_text = str(params.get("text") or "")
+        char_n = len(phrase_text.replace("\r\n", "\n").replace("\r", "\n"))
         type_sec = max(3.5, char_n * 0.075)
         cue_end = min(duration - 0.08, cue_start + 0.95 + type_sec + 1.6 + 0.55)
         if cue_end <= cue_start + 6.0:
