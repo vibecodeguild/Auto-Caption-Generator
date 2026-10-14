@@ -316,6 +316,13 @@ _DEMO_COPY: dict[str, dict[str, Any]] = {
     "robot-rocket-sign": {
         "text": "LINK IN DESCRIPTION",
     },
+    "broll-overlay": {
+        "clipStartSec": 0,
+        "fit": "cover",
+    },
+    "image-overlay": {
+        "layers": [],
+    },
 }
 
 

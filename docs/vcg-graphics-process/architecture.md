@@ -139,6 +139,42 @@ Production selection: **usages where status is golden** — not “select the go
 
 ---
 
+## 5.2 Overlay B-roll is an engine (approved 2026-08-19)
+
+**Product decision:** covering the speaker with footage **without moving time** is a Visual Package **graphic**, not a recut and not a parallel B-roll timeline.
+
+| Layer | Rule |
+| --- | --- |
+| **What it is** | A new **engine** (footage plate over the locked cut). Library **usages** of that engine are assigned and placed like every other golden. |
+| **What it is not** | A new Masterbeater beat type. A source-sequence clip. A locked-cut re-export. An insert that grows program duration. |
+| **Pipeline** | Same as every graphic: beats → scenelayer → assignment → placement (asset + trim/transform) → live Tier B → lock → Final. |
+| **Clock** | Locked-cut frames stay authority. Transcript, beats, and other placements do not shift. Locked-cut audio continues under the plate. |
+| **Not this engine** | **Insert clips** (split the program, drop a shot, shift everything after) — Stage 4, [§5.3](#53-insert-clips-are-a-program-edit-list-approved-2026-08-19). |
+
+**Engine id:** `broll-overlay`. Placement chooses the clip (`videoAssetId`) and in-point (`clipStartSec`). The plate is **full-bleed** over the locked cut. **Starts** is a word-chip on the locked cut. **Ends** defaults to the out-point of the chosen clip (from that in-point), still inside the beat; a word pick only wins when it is earlier. They do not change locked-cut time. Library samples may render a placeholder plate until a clip is attached. Clip source is a **local file**, a **frozen project library** clip, or a **Pexels** search from Placement (landscape 16:9, Pexels License, frozen into the project with evidence). Overlay is muted. Pexels is the only stock provider — not a parallel Visual Production inbox.
+
+---
+
+## 5.3 Insert clips are a program edit list (approved 2026-08-19)
+
+**Product decision:** after graphics are **locked**, a separate insert pass may split the **show** and drop one or more clips. This is not overlay B-roll (§5.2) and not a locked-cut re-export.
+
+| Layer | Rule |
+| --- | --- |
+| **What stays frozen** | `locked-cut.mp4`, transcript word IDs, beats, assignment, placement frames (locked-cut clock). |
+| **What is new** | A **program** edit list: play cut range, play clip, play cut range, play another clip, … Any number of inserts. Later inserts add to the waits already created by earlier ones. |
+| **Preview / Final** | Live seek the piece under the playhead (cut or clip). Encode the list once at Final. No episode preview MP4. |
+| **Program transcript** | After inserts, write a **derived** transcript on the **program** clock. A-roll words are the locked-cut transcript with times shifted by total insert duration before each word — not a new Whisper pass on the talking head. Each insert span includes a **marker** (clip name / chapter). When the clip has speech, transcribe **that clip** and splice those words into the same file at program times. Silent clips keep the marker only. Insert word IDs are clip-scoped; they must not collide with locked-cut word IDs. This file is what leaves the app for YouTube descriptions and other tools. |
+| **Where T may land (v1)** | **Between beats / in gaps only.** A locked-cut frame is legal when it is **not strictly inside** a beat `[startFrame, endFrameExclusive)`. Boundaries, pre-first-beat, unlabeled gaps, and post-last-beat are allowed. Several inserts may share a T and play in list order. A locked graphic stays whole and shifts on the program clock if an insert is before it. Mid-sentence / mid-graphic splits are out of v1. |
+| **UI (2026-08-20)** | Visual Package **Stage 4 · Inserts**, enabled when every assigned placement is locked. Stage 3 is Place + Lock only. **Final** is on Stage 4. |
+| **A-roll / delivery (2026-08-20)** | HyperFrames full-cut encode is a private **A-roll master**. Delivery Final concatenates A-roll slices + clips (identity copy when there are no inserts) to `exports/final-video.mp4`. Preview seeks the piece under the playhead. No episode preview MP4. |
+| **Insert audio (2026-08-20)** | Clip audio **plays**. Optional **mute** per insert. A-roll audio does not mix under an insert. Overlay B-roll remains muted on the locked-cut clock. |
+| **Marker wording (2026-08-20)** | Clip **display name** only (default filename). Rename on the insert row. No chapter field. |
+
+v1 contract: [inserts.md](./inserts.md).
+
+---
+
 ## 6. What was destroyed / scrubbed
 
 | Destroy / scrub | Why |
@@ -191,12 +227,11 @@ Placement           // later
 | Engine interface declarations (single source) | `app/core/visual_production.py` (`ENGINE_REGISTRY`; `MODULE_IDS` / `MODULE_PARAMETER_KEYS` are derived) |
 | Placement adapter (policy only, no engine facts) | `app/core/placement_roles.py` (`ENGINE_PLACEMENT_SPECS` is a derived view) |
 | Usage store + sample render | `app/core/graphics_library.py` (private root; product: Graphics Library) |
-| Creator Production holdover (not product path) | `app/core/creator_production_menu.py` |
-| Beats → engine cues | `app/core/editorial_visual_plan.py` |
-| Editorial build (engine path only) | `app/core/editorial_build.py` |
-| Beat plan validation | `app/core/editorial_beats.py` |
+| Beat types | `app/core/masterbeater.py` / `app/core/editorial_beats.py` |
+| Scene layouts | `app/core/editorial_layout.py` |
 | Library UI | `web/app/graphics-library.tsx` |
-| API | `/api/graphics-library/*` |
+| Visual Package UI | `web/app/visual-package.tsx` |
+| API | `/api/graphics-library/*`, `/api/visual-package/*` |
 
 Private root: `VCG_GRAPHICS_LIBRARY` (also discovers existing `golden-record` folder/index on disk for migration). Index: `graphics-library.json` (reads legacy `golden-record.json` if present).
 

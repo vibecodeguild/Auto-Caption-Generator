@@ -12,7 +12,8 @@ This folder stays **small on purpose**: only durable product authority. No expla
 | [beat-universe.md](./beat-universe.md) | **APPROVED** portable beat contract (13 types + spotting rules only) |
 | [assignment.md](./assignment.md) | **APPROVED** Stage 2 assignment design (algorithm + UI + artifacts) |
 | [scenelayer.md](./scenelayer.md) | **APPROVED** Stage 2 layout label per beat (before Assign) |
-| [placement.md](./placement.md) | **APPROVED / LOCKED** Stage 3 (studio UI, live Tier B, reveal UX, lock, final) |
+| [placement.md](./placement.md) | **APPROVED / LOCKED** Stage 3 (studio UI, live Tier B, reveal UX, lock) |
+| [inserts.md](./inserts.md) | **APPROVED** Stage 4 program edit list + delivery Final |
 | [placement-perfected-engines.md](./placement-perfected-engines.md) | Human checklist: which engines are placement-craft perfected |
 
 Stage 1 skill (Grok): **`masterbeater`** — `.grok/skills/masterbeater` — loads [beat-universe.md](./beat-universe.md).
@@ -41,9 +42,9 @@ Perfect zero-touch labeling is **not** the near-term goal. Efficient review is.
 [0] Locked cut + final transcript     (existing product)
 [1] Masterbeater                      → ordered beats (speech jobs)
 [2] Scenelayer → Assignment           → layout per beat, then golden usages ([scenelayer.md](./scenelayer.md), [assignment.md](./assignment.md))
-[3] Placement                         → lines + reveal frames, lock, full render ([placement.md](./placement.md))
-[4] Engine draw                       → same production engine as library samples
-[5] Review → fix → export
+[3] Placement                         → lines + reveal frames, lock ([placement.md](./placement.md))
+[4] Inserts                           → program edit list, then one delivery Final ([inserts.md](./inserts.md))
+[5] Engine draw                       → same production engine as library samples (A-roll master)
 ```
 
 **Vernacular (approved 2026-08-01):** **engine** · **usage** · **placement** · **assignment** · **graphics library**.  
@@ -51,6 +52,12 @@ Usage **has-a** engine (not identity-coupled). `golden` = usage status only. Nev
 Authority: [architecture.md](./architecture.md).
 
 **Golden lock (approved 2026-08-01):** brand/type **defaults apply while authoring `candidate` usages**. Promoting to **`golden` locks that usage’s size/position language** (sample is proof). Daily production assigns and places goldens — it does not re-skin them. Change the look only by demote → refine → re-promote. Full rule: [architecture.md §5.1](./architecture.md#51-candidate-authoring-vs-golden-lock-approved-2026-08-01).
+
+**Overlay B-roll (approved 2026-08-19):** covering the speaker without moving time is a new **engine** on the same beat → assign → place path — not a recut. Authority: [architecture.md §5.2](./architecture.md#52-overlay-b-roll-is-an-engine-approved-2026-08-19).
+
+**Insert clips (approved 2026-08-19; Stage 4 locked 2026-08-20):** after graphics lock, Visual Package Stage 4 may insert any number of clips without rewriting the locked cut. v1 splits only between beats / in gaps. Clip audio plays (optional mute). Marker = display name. One delivery Final encodes the program list. Authority: [architecture.md §5.3](./architecture.md#53-insert-clips-are-a-program-edit-list-approved-2026-08-19), [inserts.md](./inserts.md).
+
+**Retired parallel UIs (approved 2026-08-19):** Visual Production and Creator Production tabs are not product surfaces. Daily finishing is Transcript Edit → Visual Package (beats → assign → place) → Graphics Library. Overlay B-roll is an engine on that path; insert-and-shift is the post-lock program edit list.
 
 **Library metrics:** Graphics Library → **Metrics** tab shows usage counts by beat type and by allowed layout (including zero rows for coverage gaps). API: `GET /api/graphics-library/metrics`.
 
@@ -204,9 +211,10 @@ Never “fix” original by pasting human edits into `masterbeater-beats.json`.
 | Assignment (deal + UI + artifacts) | **BUILT** — type + layout filter, card poster/name, original/working/ledger |
 | Scenelayer | **BUILT** — Stage 2 button before Assign; layout dropdown; artifacts |
 | Placement design | **APPROVED / LOCKED** — [placement.md](./placement.md) §2 decision table |
-| Placement (draft, lines, lock APIs) | **BUILT** — Place / Save / Lock; Final gated |
+| Placement (draft, lines, lock APIs) | **BUILT** — Place / Save / Lock |
 | Placement studio UI + live Tier B preview + reveal nudges | **BUILT** — single-beat studio, word chips, ±1/5/10, pin, live HyperFrames |
-| Final full episode render | **BUILT** — all locked → one HyperFrames encode + locked-cut audio remux → `exports/final-video.mp4` |
+| A-roll master (graphics on locked cut) | **BUILT** — HyperFrames encode + locked-cut audio remux → `working/placement-final/a-roll-master.mp4` |
+| Stage 4 inserts + delivery Final | **BUILT** — program edit list; concat (or identity copy) → `exports/final-video.mp4` |
 | Full daily “go” button | **Not wanted** — hybrid AI / code / human stages are the product path |
 | Creator Production / old multi-agent VP essays | **Not** daily authority |
 
@@ -220,7 +228,8 @@ Never “fix” original by pasting human edits into `masterbeater-beats.json`.
 | Masterbeater skill | `.grok/skills/masterbeater/SKILL.md` |
 | Normalize + status + run | `app/core/masterbeater.py` |
 | HTTP | `app/web_api.py` — `/api/visual-package/*` |
-| Stage 1–2 UI | `web/app/visual-package.tsx` |
+| Stage 1–4 UI | `web/app/visual-package.tsx` |
+| Program edits | `app/core/program_edits.py` |
 | Assignment deal + artifacts | `app/core/assignment.py` |
 | Scenelayer classify + artifacts | `app/core/scenelayer.py` |
 | Allowed plan shape + beat types | `visual-production/schemas/editorial-beats.v1.schema.json` (`schemaVersion: 2`) |

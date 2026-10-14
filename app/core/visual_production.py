@@ -25,7 +25,7 @@ VISUAL_PLAN_VERSION = 2
 # neither surface can serve a stale composition after engine code changes.
 # Preview and Final call the same build_hyperframes_composition path — there is
 # no Final-only framing recipe.
-ENGINE_COMPOSE_RECIPE = 43
+ENGINE_COMPOSE_RECIPE = 47
 # The speaker modes a graphic may declare. Full-frame takeovers are deliberately absent.
 SPEAKER_SAFETY_MODES = {
     "full-frame-speaker",
@@ -385,6 +385,48 @@ ENGINE_REGISTRY: dict[str, dict[str, Any]] = {
             "asset_keys": [],
             "motion_keys": [],
             "notes": "Placard line on rocket CTA.",
+        },
+    },
+    # Overlay B-roll: cover the talking-head picture for the beat span.
+    # Locked-cut audio continues. Duration does not change (architecture §5.2).
+    "broll-overlay": {
+        "placement": {
+            "fixed_line_slots": [],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": ["clipStartSec", "fit"],
+            "asset_keys": ["videoAssetId"],
+            "motion_keys": [],
+            "notes": (
+                "Full-frame muted plate over the locked cut. Talking-head audio "
+                "keeps playing. Choose a project clip in Placement; clipStartSec "
+                "is the in-point inside that file. Fit is cover or contain. "
+                "Ends defaults to the clip out-point from that in-point; a word "
+                "pick only wins when it is earlier. Clip is a local file or a "
+                "Pexels landscape 16:9 HD download frozen into the project. "
+                "Not an insert that grows the show — that is a later pass."
+            ),
+        },
+    },
+    # Still overlays on the talking-head picture. No copy. One or more images,
+    # each with size, position, and a reveal frame inside the beat span.
+    "image-overlay": {
+        "placement": {
+            "fixed_line_slots": [],
+            "list_slot": None,
+            "list_min": 0,
+            "list_max": 0,
+            "meta_keys": [],
+            "asset_keys": ["layers"],
+            "motion_keys": [],
+            "notes": (
+                "No words. Import one or more stills in Placement. Each layer has "
+                "imageAssetId plus x/y/width/height (normalized 0–1, upper-left + size) "
+                "and its own startFrame / endFrameExclusive on the locked cut. "
+                "Talking-head audio is unchanged. Not B-roll (that is video) "
+                "and not an insert that grows the show."
+            ),
         },
     },
 }
@@ -2650,6 +2692,88 @@ def _robot_rocket_svg() -> str:
     )
 
 
+IMAGE_OVERLAY_MAX_LAYERS = 6
+
+
+def normalize_image_overlay_layers(
+    raw: Any,
+    *,
+    default_reveal: int = 0,
+    default_end: int | None = None,
+) -> list[dict[str, Any]]:
+    """Clamp image-overlay layers for draw and placement.
+
+    ``revealFrame`` is accepted as a legacy alias for ``startFrame``. When a
+    layer has no end, ``default_end`` (the overlay span) is used.
+    """
+
+    layers = raw if isinstance(raw, list) else []
+    out: list[dict[str, Any]] = []
+    for item in layers[:IMAGE_OVERLAY_MAX_LAYERS]:
+        if not isinstance(item, dict):
+            continue
+        asset_id = str(item.get("imageAssetId") or "").strip()
+
+        def _unit(key: str, default: float) -> float:
+            try:
+                return max(0.0, min(1.0, float(item.get(key, default))))
+            except (TypeError, ValueError):
+                return default
+
+        def _frame(key: str, fallback: int) -> int:
+            raw_value = item.get(key)
+            if raw_value is None or raw_value == "":
+                return fallback
+            try:
+                return int(raw_value)
+            except (TypeError, ValueError):
+                return fallback
+
+        start = max(0, _frame("startFrame", _frame("revealFrame", default_reveal)))
+        has_end = item.get("endFrameExclusive") not in (None, "")
+        record: dict[str, Any] = {
+            "imageAssetId": asset_id,
+            "x": _unit("x", 0.55),
+            "y": _unit("y", 0.08),
+            "width": max(0.05, _unit("width", 0.4)),
+            "height": max(0.05, _unit("height", 0.4)),
+            "startFrame": start,
+            "revealFrame": start,
+        }
+        if has_end or default_end is not None:
+            end_fallback = default_end if default_end is not None else start + 1
+            record["endFrameExclusive"] = max(start + 1, _frame("endFrameExclusive", end_fallback))
+        out.append(record)
+    return out
+
+
+def image_overlay_span(
+    layers: list[dict[str, Any]],
+    *,
+    fallback_start: int,
+    fallback_end: int,
+) -> tuple[int, int]:
+    """Inclusive start / exclusive end covering every overlay still."""
+
+    if not layers:
+        return fallback_start, max(fallback_start + 1, fallback_end)
+    starts: list[int] = []
+    ends: list[int] = []
+    for layer in layers:
+        try:
+            start = int(layer.get("startFrame", fallback_start))
+        except (TypeError, ValueError):
+            start = fallback_start
+        try:
+            raw_end = layer.get("endFrameExclusive", fallback_end)
+            end = fallback_end if raw_end in (None, "") else int(raw_end)
+        except (TypeError, ValueError):
+            end = fallback_end
+        starts.append(start)
+        ends.append(max(start + 1, end))
+    return min(starts), max(ends)
+
+
 def _robot_rocket_markup(params: dict, common: str) -> str:
     """Soft CTA: robot on rocket flies L→R with a short sign line."""
     line = html.escape(str(params.get("text") or "LINK IN DESCRIPTION"))
@@ -2921,6 +3045,66 @@ def _module_markup(
             f'</div>'
             f'</div>'
             f'</div></section>'
+        )
+    if module_id == "broll-overlay":
+        video_asset_id = str(params.get("videoAssetId") or "").strip()
+        staged_video = (staged_assets or {}).get(video_asset_id) if video_asset_id else None
+        fit = params.get("fit") if params.get("fit") in {"cover", "contain"} else "cover"
+        clip_start = 0.0
+        try:
+            clip_start = max(0.0, float(params.get("clipStartSec") or 0.0))
+        except (TypeError, ValueError):
+            clip_start = 0.0
+        if staged_video:
+            src = html.escape(staged_video)
+            # Inner <video> is media-only (no class="clip"): HyperFrames visual clips
+            # must be direct children of #root. The section.clip owns the window;
+            # the plate is CSS full-bleed inside it. data-start matches the section
+            # so the media engine seeks this file on the same span.
+            return (
+                f'<section {common}>'
+                f'<video class="broll-plate" src="assets/{src}" muted playsinline '
+                f'data-start="{start:.4f}" data-duration="{duration:.4f}" '
+                f'data-media-start="{clip_start:.4f}" data-track-index="{track + 1}" '
+                f'style="object-fit:{html.escape(fit)}"></video>'
+                f'</section>'
+            )
+        return (
+            f'<section {common}>'
+            f'<div class="broll-placeholder" aria-label="B-roll overlay">'
+            f'B-ROLL · choose a clip'
+            f'</div></section>'
+        )
+    if module_id == "image-overlay":
+        layers = normalize_image_overlay_layers(params.get("layers"))
+        layer_markup: list[str] = []
+        for index, layer in enumerate(layers):
+            asset_id = str(layer.get("imageAssetId") or "").strip()
+            staged = (staged_assets or {}).get(asset_id) if asset_id else None
+            if not staged:
+                continue
+            left = float(layer["x"]) * 100.0
+            top = float(layer["y"]) * 100.0
+            width_pct = float(layer["width"]) * 100.0
+            height_pct = float(layer["height"]) * 100.0
+            src = html.escape(str(staged))
+            layer_markup.append(
+                f'<img class="image-overlay-layer" data-layer-index="{index}" '
+                f'src="assets/{src}" alt="" '
+                f'style="left:{left:.3f}%;top:{top:.3f}%;width:{width_pct:.3f}%;'
+                f'height:{height_pct:.3f}%;object-fit:contain"/>'
+            )
+        if not layer_markup:
+            return (
+                f'<section {common}>'
+                f'<div class="image-overlay-placeholder" aria-label="Image overlay">'
+                f'IMAGE · choose stills'
+                f'</div></section>'
+            )
+        return (
+            f'<section {common}>'
+            f'<div class="image-overlay-stage">{"".join(layer_markup)}</div>'
+            f"</section>"
         )
     raise ValueError(f"Unknown visual module: {module_id}")
 
@@ -3379,6 +3563,8 @@ def build_hyperframes_composition(
                     "punchline-reveal",
                     # Stamp owns enter at phrase reveal (box + words together).
                     "kinetic-word-punctuation",
+                    "broll-overlay",
+                    "image-overlay",
                 }
             )
             if owns_shell:
@@ -3420,6 +3606,8 @@ def build_hyperframes_composition(
                     "punchline-reveal",  # joke card owns kicker/line reveals
                     # Phrase opacity is owned by the stamp reveal (not a separate fade).
                     "kinetic-word-punctuation",
+                    "broll-overlay",
+                    "image-overlay",
                     *ROBOT_MODULE_IDS,
                 }
                 if module_id not in skip_semantic:
@@ -5042,6 +5230,47 @@ def build_hyperframes_composition(
                     timeline_lines.append(f'tl.fromTo("#{element_id} {kids}", {{opacity:0,y:18}}, {{opacity:1,y:0,duration:0.35,stagger:{kid_stagger:.3f},ease:"power2.out"}}, {(start + .24):.4f});')
                 timeline_lines.append(f'tl.to("#{element_id} {shell}", {{opacity:0,duration:0.28,ease:"power2.in"}}, {(start + duration - 0.28):.4f});')
                 timeline_lines.append(f'tl.set("#{element_id} {shell}", {{opacity:0}}, {(start + duration):.4f});')
+            elif module_id == "image-overlay":
+                layers = normalize_image_overlay_layers(params.get("layers"))
+                timeline_lines.append(
+                    f'tl.set("#{element_id} .image-overlay-layer", {{opacity:0}}, {start:.4f});'
+                )
+                cue_end_local = start + duration
+                fps_local = max(1.0, float(fps))
+
+                def _overlay_frame_local(raw: object, *, default_local: float) -> float:
+                    if raw is None or raw == "":
+                        return default_local
+                    try:
+                        frame_abs = float(raw)
+                    except (TypeError, ValueError):
+                        return default_local
+                    local = frame_abs / fps_local - range_start
+                    return max(start, min(cue_end_local - 0.02, local))
+
+                for index, layer in enumerate(layers):
+                    if not str(layer.get("imageAssetId") or "").strip():
+                        continue
+                    in_at = _overlay_frame_local(layer.get("startFrame"), default_local=start)
+                    out_at = _overlay_frame_local(
+                        layer.get("endFrameExclusive"),
+                        default_local=cue_end_local,
+                    )
+                    if out_at <= in_at + 0.04:
+                        out_at = min(cue_end_local, in_at + 0.05)
+                    if out_at - in_at < 0.08:
+                        continue
+                    fade_in = min(0.28, max(0.08, out_at - in_at - 0.04))
+                    fade_out = min(0.2, max(0.08, (out_at - in_at) / 6))
+                    exit_at = max(in_at, out_at - fade_out)
+                    sel = f'#{element_id} .image-overlay-layer[data-layer-index=\\"{index}\\"]'
+                    timeline_lines.append(
+                        f'tl.fromTo("{sel}", {{opacity:0,scale:0.97}}, '
+                        f'{{opacity:1,scale:1,duration:{fade_in:.3f},ease:"power2.out"}}, {in_at:.4f});'
+                    )
+                    timeline_lines.append(
+                        f'tl.to("{sel}", {{opacity:0,duration:{fade_out:.3f},ease:"power2.in"}}, {exit_at:.4f});'
+                    )
             elif module_id == "ui-callout":
                 timeline_lines.append(f'tl.fromTo("#{element_id} .callout-ring", {{opacity:0,scale:1.12}}, {{opacity:1,scale:1,transformOrigin:"center center",duration:0.32,ease:"power3.out"}}, {entry_start:.4f});')
                 timeline_lines.append(f'tl.fromTo("#{element_id} .callout-label", {{opacity:0,y:10}}, {{opacity:1,y:0,duration:0.28,ease:"power2.out"}}, {(start + .16):.4f});')
@@ -5106,6 +5335,15 @@ def build_hyperframes_composition(
 {runtime_css}
 .pf-step-no-num{{padding-top:38px}}.pf-step-no-num .pf-step-title{{margin-top:0}}.pf-community{{top:7.2%;width:33.85%;min-height:48.15%;padding:46px;text-align:left;border-width:4px;box-shadow:18px 20px 0 rgba(0,124,125,.3)}}.pf-community::before{{content:"";position:absolute;left:0;top:0;bottom:0;width:22px;background:var(--teal)}}.pf-logo-image{{display:block;width:min(330px,82%);height:110px;object-fit:contain;object-position:left center}}.pf-community .pf-action{{margin-top:44px;font-size:43px}}.pf-community .pf-dest{{font-size:18px}}
 .callout-align-right.callout-below{{transform:translate(-100%,14px)}}.callout-align-right.callout-above{{transform:translate(-100%,calc(-100% - 14px))}}
+.module-broll-overlay{{background:#0a0a12;z-index:8}}
+.module-broll-overlay .cue-motion{{inset:0;width:100%;height:100%}}
+.module-broll-overlay .broll-plate{{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#0a0a12;z-index:1}}
+.broll-placeholder{{position:absolute;inset:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:#12121c;color:#ff00ce;font:800 42px Montserrat,sans-serif;letter-spacing:.12em}}
+.module-image-overlay{{z-index:9;pointer-events:none}}
+.module-image-overlay .cue-motion,.image-overlay-stage{{inset:0;width:100%;height:100%}}
+.image-overlay-stage{{position:absolute;inset:0}}
+.image-overlay-layer{{position:absolute;object-fit:contain;pointer-events:none;filter:drop-shadow(0 10px 18px rgba(0,0,0,.35))}}
+.image-overlay-placeholder{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ff00ce;font:800 36px Montserrat,sans-serif;letter-spacing:.08em}}
 </style></head><body><div id="root" data-composition-id="vcg-visual-plan" data-start="0" data-width="{width}" data-height="{height}" data-duration="{render_duration:.4f}" data-fps="{fps}"><div class="base"></div><video id="main-video" class="clip" src="source.mp4" muted playsinline data-start="0" data-duration="{render_duration:.4f}" data-track-index="0"></video>{source_audio_markup}{''.join(clip_markup)}{''.join(audio_markup)}<script src="vendor/gsap.min.js"></script><script>(function(){{window.__timelines=window.__timelines||{{}};var tl=gsap.timeline({{paused:true}});{''.join(timeline_lines)}window.__timelines["vcg-visual-plan"]=tl;}})();</script></div></body></html>'''
     (public / "index.html").write_text(index_html, encoding="utf-8")
     return public, render_duration

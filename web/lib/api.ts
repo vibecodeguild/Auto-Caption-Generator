@@ -1,365 +1,5 @@
 export const API_BASE = process.env.NEXT_PUBLIC_VCG_API_BASE ?? "http://127.0.0.1:8731";
 
-export type CreatorProductionCurrent = {
-  initialized: boolean;
-  reason?: string;
-  recoveryAction?: string;
-  workflowId?: string;
-  episodeId?: string;
-  state?: string;
-  currentHash?: string;
-  capabilitySummary?: Record<string, number>;
-  reviewStale?: boolean;
-  workflowUpgradeRequired?: boolean;
-  workflowUpgradeReason?: string | null;
-  artifactAvailability?: Record<string, boolean>;
-  authority?: {
-    productionOwnsRouting: boolean;
-    nativeWorkflowDiscoveryPerformed: boolean;
-    lockedTranscriptIsTimingAuthority: boolean;
-    durationTargetsEnabled: boolean;
-  };
-};
-
-export type CreatorProductionJob = {
-  id: string;
-  taskKind: "analyze" | "plan" | "classify-layouts" | "adapt" | "materialize" | "revise";
-  status: "queued" | "running" | "canceling" | "completed" | "failed" | "canceled" | "interrupted";
-  stage: string;
-  error: string | null;
-  createdAt: string;
-  updatedAt: string;
-  outputArtifactRef: Record<string, unknown> | null;
-  handoffPrompt?: string;
-  handoffPacketRef?: {
-    path: string;
-    sha256: string;
-    packetHash: string;
-  } | null;
-};
-
-export type CreatorCapability = {
-  id: string;
-  category: string;
-  scope: string;
-  sourceAvailability: string;
-  implementationMaturity: string;
-  technicalAdmission: string;
-  productionSelection: string;
-  statusReason?: string;
-};
-
-export type CreatorCapabilityCatalog = {
-  inventorySummary: Record<string, number>;
-  capabilities: CreatorCapability[];
-};
-
-export type CreatorPipelineSequence = {
-  id: string;
-  chapterId: string;
-  absoluteStartFrame: number;
-  absoluteEndFrameExclusive: number;
-  editorialJob: string;
-  semanticForm: string;
-  presentationRole: string;
-  candidates: Array<{
-    capabilityId: string;
-    sourceResourceIds: string[];
-    implementationMaturity: string;
-    technicalAdmission: string;
-    projectAdmissions: Array<Record<string, unknown>>;
-  }>;
-  decision?: {
-    disposition: string;
-    selectedCapabilityId: string | null;
-    topRankedCapabilityId: string | null;
-  };
-};
-
-export type CreatorProductionPipeline = {
-  fps?: { numerator: number; denominator: number };
-  sequences: CreatorPipelineSequence[];
-  adaptationDebt: CreatorPipelineSequence[];
-  sourceEvidenceStatus: "not-ready" | "agent-classification-required" | "layout-classification-blocked" | "complete";
-};
-
-export type CreatorRenderJob = {
-  id: string;
-  status: "queued" | "running" | "canceling" | "completed" | "failed" | "canceled" | "interrupted";
-  stage: string;
-  value: number;
-  message: string;
-  buildHash: string;
-  error: string | null;
-  chapterStates: Array<{ chapterId: string; cacheStatus: string; status: string }>;
-};
-
-export type CreatorReviewNote = {
-  id: string;
-  buildHash: string;
-  sequenceId: string;
-  elementId: string | null;
-  wordId: string | null;
-  absoluteFrame: number;
-  note: string;
-  status: "changes-requested" | "ready-for-review";
-  saveStatus: "saved" | "saving" | "failed" | "stale";
-};
-
-export type CreatorReview = {
-  revision: number;
-  buildHash: string;
-  activeNotes: CreatorReviewNote[];
-  noteHistory: CreatorReviewNote[];
-  approvalRecords: Array<Record<string, unknown>>;
-  autosave: { status: string; failureReason: string | null; updatedAt: string };
-};
-
-export type CreatorReviewSequence = {
-  id: string;
-  chapterId: string;
-  absoluteStartFrame: number;
-  absoluteEndFrameExclusive: number;
-  startWordId: string | null;
-  endWordId: string | null;
-  editorialJob: string;
-  semanticForm: string;
-  presentationRole: string;
-  selectedCanvasTopology: string;
-  compositionGraph: {
-    elements: Array<{
-      id: string;
-      kind: string;
-      geometry: { x: number; y: number; width: number; height: number };
-      properties: Record<string, unknown>;
-      tokenBindings: Record<string, unknown>;
-    }>;
-    events: Array<{
-      id: string;
-      targetElementId: string;
-      absoluteFrame: number;
-      operation: string;
-      parameters: Record<string, unknown>;
-    }>;
-  };
-};
-
-export type CreatorReviewContext = {
-  review: CreatorReview;
-  build: Record<string, unknown>;
-  manifest: {
-    revision: number;
-    sequences: CreatorReviewSequence[];
-  };
-  preflight: {
-    passed: boolean;
-    findings: Array<{
-      severity: string;
-      gate: string;
-      sequenceId?: string;
-      elementId?: string;
-      absoluteFrame?: number;
-    }>;
-  } | null;
-};
-
-export type CreatorEvidenceDraft = {
-  schemaVersion: number;
-  episodeId: string;
-  availableLayoutIds: string[];
-  classificationMethod: "agent-frame-classification";
-  sequences: Array<{
-    sequenceId: string;
-    absoluteStartFrame: number;
-    absoluteEndFrameExclusive: number;
-  }>;
-};
-
-export function listCreatorChannelProfiles() {
-  return request<{
-    profiles: Array<{
-      id: string;
-      version: number;
-      referenceGrammarRef: string;
-      fileName: string;
-    }>;
-  }>("/api/creator-production/channel-profiles");
-}
-
-export function initializeCreatorProduction(channelProfileId: string) {
-  return request<CreatorProductionCurrent>("/api/creator-production/initialize", {
-    method: "POST",
-    body: JSON.stringify({ channel_profile_id: channelProfileId }),
-  });
-}
-
-export function getCreatorProductionCurrent() {
-  return request<CreatorProductionCurrent>("/api/creator-production/current");
-}
-
-export function upgradeCreatorProductionWorkflow(actor: string, reason: string) {
-  return request<CreatorProductionCurrent>("/api/creator-production/workflow-upgrade", {
-    method: "POST",
-    body: JSON.stringify({ actor, reason }),
-  });
-}
-
-export function getCreatorCapabilities() {
-  return request<CreatorCapabilityCatalog>("/api/creator-production/capabilities");
-}
-
-export function getCreatorProductionPipeline() {
-  return request<CreatorProductionPipeline>("/api/creator-production/pipeline");
-}
-
-export function listCreatorProductionJobs() {
-  return request<{ jobs: CreatorProductionJob[]; recoveredJobIds: string[] }>(
-    "/api/creator-production/jobs",
-  );
-}
-
-export function createCreatorProductionJob(
-  taskKind: CreatorProductionJob["taskKind"],
-  inputArtifactKeys: string[],
-  requestedResourceIds: string[] = [],
-  taskParameters: Record<string, unknown> = {},
-) {
-  return request<CreatorProductionJob>("/api/creator-production/jobs", {
-    method: "POST",
-    body: JSON.stringify({
-      task_kind: taskKind,
-      input_artifact_keys: inputArtifactKeys,
-      requested_resource_ids: requestedResourceIds,
-      task_parameters: taskParameters,
-    }),
-  });
-}
-
-export function getCreatorProductionHandoff(jobId: string) {
-  return request<{
-    job: CreatorProductionJob;
-    packet: Record<string, unknown>;
-    handoffPrompt: string;
-  }>(`/api/creator-production/jobs/${jobId}/handoff`);
-}
-
-export function cancelCreatorProductionJob(jobId: string) {
-  return request<CreatorProductionJob>(`/api/creator-production/jobs/${jobId}/cancel`, {
-    method: "POST",
-    body: "{}",
-  });
-}
-
-export function listCreatorRenderJobs() {
-  return request<{ jobs: CreatorRenderJob[]; recoveredJobIds: string[] }>(
-    "/api/creator-production/render-jobs",
-  );
-}
-
-export function createCreatorRenderJob() {
-  return request<CreatorRenderJob>("/api/creator-production/render-jobs", {
-    method: "POST",
-    body: "{}",
-  });
-}
-
-export function startCreatorRenderJob(jobId: string) {
-  return request<CreatorRenderJob>(`/api/creator-production/render-jobs/${jobId}/start`, {
-    method: "POST",
-    body: "{}",
-  });
-}
-
-export function cancelCreatorRenderJob(jobId: string) {
-  return request<CreatorRenderJob>(`/api/creator-production/render-jobs/${jobId}/cancel`, {
-    method: "POST",
-    body: "{}",
-  });
-}
-
-export function getCreatorReview() {
-  return request<CreatorReviewContext>(
-    "/api/creator-production/review",
-  );
-}
-
-export function saveCreatorReviewNote(note: {
-  id: string;
-  sequence_id: string;
-  element_id: string | null;
-  word_id: string | null;
-  absolute_frame: number;
-  note: string;
-}) {
-  return request<{ review: CreatorReview }>("/api/creator-production/review/notes", {
-    method: "POST",
-    body: JSON.stringify(note),
-  });
-}
-
-export function acceptCreatorReviewNote(noteId: string) {
-  return request<{ review: CreatorReview }>(
-    `/api/creator-production/review/notes/${noteId}/accept`,
-    { method: "POST", body: "{}" },
-  );
-}
-
-export function approveCreatorReview() {
-  return request<{ review: CreatorReview; delivery: { reusedExactReviewBytes: boolean } }>(
-    "/api/creator-production/review/approve",
-    { method: "POST", body: "{}" },
-  );
-}
-
-export function creatorReviewVideoUrl() {
-  return `${API_BASE}/api/creator-production/review-video`;
-}
-
-export function getCreatorSourceEvidence() {
-  return request<{
-    status: "complete" | "agent-classification-required";
-    draft?: CreatorEvidenceDraft;
-    ledger?: Record<string, unknown>;
-  }>("/api/creator-production/source-evidence");
-}
-
-export function saveCreatorSourceEvidence(ledger: Record<string, unknown>) {
-  return request<{ status: "complete" }>("/api/creator-production/source-evidence", {
-    method: "POST",
-    body: JSON.stringify({ ledger }),
-  });
-}
-
-export function creatorSourceFrameUrl(timeSeconds: number) {
-  return `${API_BASE}/api/visual/source-frame?time_sec=${encodeURIComponent(timeSeconds.toFixed(6))}`;
-}
-
-export function createCreatorStudioHandoff(input: {
-  sequence_id: string;
-  element_id: string | null;
-  absolute_frame: number;
-}) {
-  return request<Record<string, unknown>>("/api/creator-production/studio/handoff", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
-}
-
-export function applyCreatorStudioEdits(
-  handoff: Record<string, unknown>,
-  edits: Array<Record<string, unknown>>,
-) {
-  return request<{
-    manifestRef: Record<string, unknown>;
-    buildLockRef: Record<string, unknown>;
-    receiptRef: Record<string, unknown>;
-    overrideRef: Record<string, unknown>;
-  }>("/api/creator-production/studio/edits", {
-    method: "POST",
-    body: JSON.stringify({ handoff, edits }),
-  });
-}
-
 export type EditorToken = {
   id: string;
   kind: "word" | "silence";
@@ -951,10 +591,13 @@ export type StockCandidate = {
   width: number;
   height: number;
   previewUrl: string;
+  previewPlayUrl?: string;
   downloadUrl: string;
   assetPage: string;
   creator: string;
   creatorUrl?: string;
+  license?: string;
+  licensePage?: string;
   score: number;
 };
 
@@ -1176,9 +819,7 @@ export function openVideoProject() {
   return request<VideoProjectOpenResponse>("/api/video-project/open-dialog", { method: "POST", body: "{}" });
 }
 
-export function getVisualPlanPrompt() {
-  return request<{ prompt: string }>("/api/video-project/visual-prompt");
-}
+
 
 export type MasterbeaterBeat = {
   id: string;
@@ -1431,7 +1072,73 @@ export type VisualPackageStatus = {
   assignment?: AssignmentStatus;
   /** Stage 3 placement. */
   placement?: PlacementStatus;
+  /** Stage 4 program edit list (insert clips). */
+  program?: ProgramStatus;
 };
+
+export type ProgramInsert = {
+  id: string;
+  tFrame: number;
+  videoAssetId: string;
+  clipStartSec?: number;
+  /** Used length from clip in-point. Default is the rest of the file. */
+  durationSec?: number;
+  muted?: boolean;
+  displayName?: string;
+  clipDurationSec?: number;
+};
+
+export type ProgramPiece = {
+  kind: "aroll" | "insert" | string;
+  cutStartFrame?: number;
+  cutEndFrameExclusive?: number;
+  programStartFrame: number;
+  programEndFrameExclusive: number;
+  startSec?: number;
+  durationSec?: number;
+  insertId?: string;
+  videoAssetId?: string;
+  displayName?: string;
+  tFrame?: number;
+  clipStartSec?: number;
+  muted?: boolean;
+};
+
+export type ProgramLegalSlot = {
+  startFrame: number;
+  endFrameExclusive: number;
+};
+
+export type ProgramStatus = {
+  ok?: boolean;
+  ready?: boolean;
+  insertCount?: number;
+  inserts?: ProgramInsert[];
+  legalSlots?: ProgramLegalSlot[];
+  pieces?: ProgramPiece[];
+  cutEndFrameExclusive?: number;
+  cutDurationSec?: number;
+  fps?: number;
+  programDurationFrames?: number;
+  programDurationSec?: number;
+  aRollExists?: boolean;
+  aRollPath?: string;
+  deliveryExists?: boolean;
+  deliveryPath?: string;
+  transcriptExists?: boolean;
+  transcriptPath?: string;
+};
+
+export function saveProgramInserts(inserts: ProgramInsert[]) {
+  return request<ProgramStatus>("/api/visual-package/program/inserts", {
+    method: "PUT",
+    body: JSON.stringify({ inserts }),
+  });
+}
+
+export function programARollVideoUrl() {
+  return `${API_BASE}/api/visual-package/program/a-roll`;
+}
 
 export type PlacementLine = {
   slot: string;
@@ -1446,6 +1153,10 @@ export type PlacementBeat = {
   locked?: boolean;
   startFrame?: number;
   endFrameExclusive?: number;
+  /** Overlay B-roll: probed duration of the chosen clip (seconds). */
+  clipDurationSec?: number;
+  /** Overlay B-roll: exclusive locked-cut frame at clip out (from in-point). */
+  clipEndFrameExclusive?: number;
   lines?: PlacementLine[];
   meta?: Record<string, unknown>;
   assets?: Record<string, unknown>;
@@ -1573,6 +1284,116 @@ export function importPlacementImageDialog() {
   );
 }
 
+/** Native image/video picker → copies into the project's placement media store. */
+export function importPlacementMediaDialog() {
+  return request<{
+    assetId: string;
+    fileName: string;
+    sourceName: string;
+    mediaType?: string;
+    durationSec?: number;
+  }>(
+    "/api/visual-package/placement/import-media-dialog",
+    { method: "POST", body: "{}" },
+  );
+}
+
+export type PlacementPexelsSettings = {
+  configured: boolean;
+  source?: string;
+  license?: string;
+  licensePage?: string;
+};
+
+export function getPlacementPexelsSettings() {
+  return request<PlacementPexelsSettings>("/api/visual-package/placement/pexels/settings");
+}
+
+export function savePlacementPexelsKey(apiKey: string) {
+  return request<PlacementPexelsSettings>("/api/visual-package/placement/pexels/settings", {
+    method: "POST",
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+}
+
+export type PlacementPexelsSearch = PlacementPexelsSettings & {
+  query?: string;
+  candidates: StockCandidate[];
+  page?: number;
+  perPage?: number;
+  totalResults?: number;
+  hasPrev?: boolean;
+  hasNext?: boolean;
+};
+
+export function searchPlacementPexels(
+  query: string,
+  options?: {
+    minDurationSec?: number;
+    maxDurationSec?: number;
+    size?: "large" | "medium" | "small";
+    page?: number;
+  },
+) {
+  return request<PlacementPexelsSearch>(
+    "/api/visual-package/placement/pexels/search",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        query,
+        minDurationSec: options?.minDurationSec ?? 0,
+        maxDurationSec: options?.maxDurationSec ?? 0,
+        size: options?.size ?? "large",
+        page: options?.page ?? 1,
+      }),
+    },
+  );
+}
+
+export type PlacementLibraryClip = {
+  assetId: string;
+  fileName: string;
+  mediaType?: string;
+  provider?: string;
+  attribution?: string;
+  creator?: string;
+  durationSec?: number | null;
+  width?: number | null;
+  height?: number | null;
+  previewUrl?: string | null;
+  license?: string;
+};
+
+export function listPlacementLibrary() {
+  return request<{ clips: PlacementLibraryClip[] }>("/api/visual-package/placement/library");
+}
+
+export function placementLibraryVideoUrl(assetId: string) {
+  return `${API_BASE}/api/visual-package/placement/library/${encodeURIComponent(assetId)}/video`;
+}
+
+export function placementLibraryImageUrl(assetId: string) {
+  return `${API_BASE}/api/visual-package/placement/library/${encodeURIComponent(assetId)}/image`;
+}
+
+export function selectPlacementPexels(candidate: StockCandidate) {
+  return request<{
+    assetId: string;
+    fileName: string;
+    sourceName: string;
+    mediaType?: string;
+    durationSec?: number;
+    provider?: string;
+    license?: string;
+    attribution?: string;
+    width?: number;
+    height?: number;
+  }>("/api/visual-package/placement/pexels/select", {
+    method: "POST",
+    body: JSON.stringify({ candidate }),
+  });
+}
+
 /** Save one beat placement (lines / lock / meta). */
 export function savePlacementBeat(payload: {
   beatId: string;
@@ -1603,6 +1424,8 @@ export type PlacementPreview = {
   startFrame?: number;
   /** Full speech-beat end (preview window). */
   endFrameExclusive?: number;
+  /** When the graphic docks in; may be later than startFrame. */
+  graphicStartFrame?: number;
   /** When the graphic undocks; may be earlier than endFrameExclusive. */
   graphicEndFrameExclusive?: number;
   startSec?: number;
@@ -1652,14 +1475,14 @@ export type PlacementFinalJob = {
 
 export function startPlacementFinal(payload?: {
   quality?: "draft" | "standard" | "high";
-  /** When true (default), always re-encode even if final-video.mp4 already exists. */
+  /** When true, rebuild the A-roll master even if its fingerprint matches. */
   force?: boolean;
 }) {
   return request<{ ok?: boolean; reconnected?: boolean; job: PlacementFinalJob }>(
     "/api/visual-package/placement/final",
     {
       method: "POST",
-      body: JSON.stringify({ force: true, ...(payload ?? {}) }),
+      body: JSON.stringify({ force: false, ...(payload ?? {}) }),
     },
   );
 }

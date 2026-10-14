@@ -196,8 +196,8 @@ their one-frame sample in the app; unbuilt recipes must produce their exact
 implementation sample during the same Cook operation and are never replaced by
 a generic fallback.
 
-Pexels is the only stock provider. Its key is read from `PEXELS_API_KEY` or
-private local settings. When configured, stock suggestions prepare three to
+Pexels is the only stock provider. Its key is `PEXELS_API_KEY` in repo-root
+`.env.local` (or `.env`, or the process environment). When configured, stock suggestions prepare three to
 five candidates ahead of review from up to three literal/metaphorical queries.
 Only the selected full-resolution video downloads. The project records creator,
 asset page, download time, license page/evidence, checksum, attribution, and
@@ -476,10 +476,10 @@ inside a new Creator Production project.
 
 ## API Inventory
 
-Generated from `app/web_api.py` by `scripts/generate_api_inventory.py`. 146 routes.
+Generated from `app/web_api.py` by `scripts/generate_api_inventory.py`. 97 routes.
 Edit the route or its docstring, then regenerate; do not edit this section by hand.
 
-### Visual Production
+### Visual Package
 
 | Method | Route | Purpose |
 | --- | --- | --- |
@@ -488,52 +488,36 @@ Edit the route or its docstring, then regenerate; do not edit this section by ha
 | PUT | `/api/visual-package/masterbeater/beats` | Auto-save Stage 1 word edits to masterbeater-beats-reviewed.json + ledger |
 | POST | `/api/visual-package/masterbeater/run` | Run Masterbeater skill against the locked final transcript |
 | PUT | `/api/visual-package/placement/beat` | Save lines/timing/lock for one placement beat. Original file untouched |
+| POST | `/api/visual-package/placement/final` | Start Stage 4 delivery Final when every assigned placement is locked |
+| GET | `/api/visual-package/placement/final/active` | Return the active or last persisted Final job for the open project |
+| GET | `/api/visual-package/placement/final/jobs/{job_id}` | Visual package placement final job |
+| POST | `/api/visual-package/placement/final/jobs/{job_id}/cancel` | Cancel an in-flight Final encode (kills HyperFrames/Chrome worker tree) |
+| GET | `/api/visual-package/placement/final/jobs/{job_id}/video` | Visual package placement final video |
 | POST | `/api/visual-package/placement/import-image-dialog` | Pick an image file and copy it into the project's placement image store |
+| POST | `/api/visual-package/placement/import-media-dialog` | Pick an image or video and copy it into the project's placement store |
+| GET | `/api/visual-package/placement/library` | List frozen overlay clips already downloaded into this project |
+| GET | `/api/visual-package/placement/library/{asset_id}/image` | Stream a frozen placement still for overlay craft thumbs |
+| GET | `/api/visual-package/placement/library/{asset_id}/video` | Stream a frozen placement clip for library / insert preview (seekable) |
+| POST | `/api/visual-package/placement/pexels/search` | Search one page of Pexels landscape 16:9 overlay clips (preview stills + short play URLs) |
+| POST | `/api/visual-package/placement/pexels/select` | Download the chosen Pexels clip into the project placement store with license evidence |
+| GET | `/api/visual-package/placement/pexels/settings` | Whether a Pexels API key is configured (never returns the key) |
+| POST | `/api/visual-package/placement/pexels/settings` | Store PEXELS_API_KEY in repo-root .env.local (gitignored; not the project) |
 | POST | `/api/visual-package/placement/preview` | Build live Tier B HyperFrames composition for one placement beat (no encode) |
 | GET | `/api/visual-package/placement/preview/composition/{relative_path:path}` | Serve the active single-beat HyperFrames composition for placement live preview |
 | POST | `/api/visual-package/placement/run` | Stage 3: draft placements for assigned beats (skips locked on re-run) |
+| GET | `/api/visual-package/program/a-roll` | Private A-roll master for Stage 4 preview (graphics on the locked cut) |
+| PUT | `/api/visual-package/program/inserts` | Save Stage 4 insert list (legal T, frozen clip, mute, display name) |
 | PUT | `/api/visual-package/scenelayer/override` | Human layout dropdown → scenelayer-reviewed.json + ledger |
 | POST | `/api/visual-package/scenelayer/run` | Stage 2: label each beat with an OBS layout from its first frame |
 | GET | `/api/visual-package/source-video` | Locked cut (preferred) or working source for Visual Package review |
 | GET | `/api/visual-package/status` | Status + Masterbeater + Assignment for the open private video project |
-| POST | `/api/visual/assets/import-dialog` | Import visual asset dialog |
-| GET | `/api/visual/assets/{asset_id}` | Visual asset |
-| GET | `/api/visual/catalog` | Visual catalog |
-| GET | `/api/visual/catalog/recipes/{recipe_id}/preview` | Visual recipe preview |
-| PATCH | `/api/visual/catalog/treatments/{treatment_id}` | Patch visual treatment |
-| GET | `/api/visual/catalog/treatments/{treatment_id}/motion-preview` | Visual treatment motion preview |
-| GET | `/api/visual/catalog/treatments/{treatment_id}/preview` | Visual treatment preview |
-| POST | `/api/visual/create-dialog` | Create visual project dialog |
-| GET | `/api/visual/credits` | Visual credits |
-| GET | `/api/visual/current` | Current visual project |
-| POST | `/api/visual/ensure` | Ensure visual project |
-| GET | `/api/visual/final` | Visual final video |
-| POST | `/api/visual/gates/full-review` | Approve visual full review |
-| POST | `/api/visual/gates/reopen` | Verify visual delivery reopened |
-| POST | `/api/visual/gates/representative` | Approve visual representative |
-| POST | `/api/visual/open-dialog` | Open visual project dialog |
-| GET | `/api/visual/pexels/settings` | Pexels configuration |
-| POST | `/api/visual/pexels/settings` | Save pexels configuration |
-| POST | `/api/visual/render` | Reject retired visual render execution |
-| GET | `/api/visual/render/active` | Active visual render job |
-| GET | `/api/visual/render/jobs/{job_id}` | Visual render job |
-| GET | `/api/visual/render/jobs/{job_id}/video` | Visual render video |
-| POST | `/api/visual/review-prompt` | Visual review prompt |
-| GET | `/api/visual/runtime/composition/{relative_path:path}` | Visual runtime composition file |
+
+### Visual runtime
+
+| Method | Route | Purpose |
+| --- | --- | --- |
 | GET | `/api/visual/runtime/core.js` | Visual runtime core |
 | GET | `/api/visual/runtime/player.js` | Visual runtime player |
-| POST | `/api/visual/save` | Save current visual plan |
-| GET | `/api/visual/source` | Visual source video |
-| GET | `/api/visual/source-frame` | Visual source frame |
-| GET | `/api/visual/suggestions` | Visual suggestions |
-| POST | `/api/visual/suggestions/recipe` | Add recipe suggestion |
-| PATCH | `/api/visual/suggestions/{suggestion_id}` | Patch visual suggestion |
-| POST | `/api/visual/suggestions/{suggestion_id}/approval-evidence/prepare` | Prepare visual suggestion approval evidence |
-| GET | `/api/visual/suggestions/{suggestion_id}/approval-frame` | Visual suggestion approval frame |
-| POST | `/api/visual/suggestions/{suggestion_id}/build` | Build visual suggestion |
-| POST | `/api/visual/suggestions/{suggestion_id}/decision` | Decide visual suggestion |
-| POST | `/api/visual/suggestions/{suggestion_id}/pexels/search` | Search suggestion stock |
-| POST | `/api/visual/suggestions/{suggestion_id}/pexels/select` | Select suggestion stock |
 
 ### Graphics Library
 
@@ -553,16 +537,6 @@ Edit the route or its docstring, then regenerate; do not edit this section by ha
 | GET | `/api/graphics-library/usages/{entry_id}/media/{kind}` | Stream a private sample or poster from the Graphics Library root |
 | POST | `/api/graphics-library/usages/{entry_id}/render-sample` | Render a short sample; stream NDJSON progress events, then a final entry payload |
 
-### Creator Library
-
-| Method | Route | Purpose |
-| --- | --- | --- |
-| GET | `/api/creator-library` | Creator library |
-| POST | `/api/creator-library/import-dialog` | Import creator library asset |
-| PATCH | `/api/creator-library/{asset_id}` | Patch creator library asset |
-| GET | `/api/creator-library/{asset_id}/media` | Creator library media |
-| POST | `/api/creator-library/{asset_id}/use` | Use creator library asset |
-
 ### Video projects
 
 | Method | Route | Purpose |
@@ -573,7 +547,7 @@ Edit the route or its docstring, then regenerate; do not edit this section by ha
 | POST | `/api/video-project/create-dialog` | Create video project dialog |
 | GET | `/api/video-project/current` | Current video project |
 | POST | `/api/video-project/open-dialog` | Open video project dialog |
-| GET | `/api/video-project/visual-prompt` | Video project visual prompt |
+| GET | `/api/video-project/visual-prompt` | Status + Masterbeater + Assignment for the open private video project |
 
 ### Audio
 
@@ -599,13 +573,16 @@ Edit the route or its docstring, then regenerate; do not edit this section by ha
 | POST | `/api/projects/current/delete` | Delete selection |
 | POST | `/api/projects/current/delete-dead-space` | Delete dead space |
 | GET | `/api/projects/current/document` | Project document |
-| POST | `/api/projects/current/export` | Export cut |
+| POST | `/api/projects/current/export` | Start Stage 5 cut export as a background job (cancelable) |
+| GET | `/api/projects/current/export/jobs/{job_id}` | Export cut job |
+| POST | `/api/projects/current/export/jobs/{job_id}/cancel` | Cancel export cut job |
 | POST | `/api/projects/current/final-out-frame` | Set final out frame |
 | GET | `/api/projects/current/frame` | Frame image |
+| GET | `/api/projects/current/live-cut-preview` | Instant cut timeline plan for Stage 4 — seek source ranges, no re-encode |
 | POST | `/api/projects/current/manual-cuts` | Add manual cut |
 | POST | `/api/projects/current/manual-cuts/adjust` | Adjust manual cut |
 | DELETE | `/api/projects/current/manual-cuts/{cut_id}` | Remove manual cut |
-| POST | `/api/projects/current/render-preview` | Render cut preview |
+| POST | `/api/projects/current/render-preview` | Legacy full-bake draft (optional). Stage 4 product path is live-cut-preview |
 | GET | `/api/projects/current/render-preview/{preview_id}` | Rendered cut preview |
 | POST | `/api/projects/current/restore` | Restore selection |
 | POST | `/api/projects/current/save` | Save project |
@@ -613,6 +590,7 @@ Edit the route or its docstring, then regenerate; do not edit this section by ha
 | GET | `/api/projects/current/source-video` | Source video |
 | POST | `/api/projects/current/splices/adjust` | Adjust splice |
 | POST | `/api/projects/current/splices/review` | Review splice |
+| DELETE | `/api/projects/current/splices/{anchor_key:path}` | Undo a Stage 4 splice: drop a manual cut, or restore the deleted gap for a transcript cut |
 | POST | `/api/projects/open` | Open project |
 | POST | `/api/projects/open-dialog` | Open project dialog |
 | POST | `/api/projects/transcribe` | Transcribe project |
@@ -631,33 +609,6 @@ Edit the route or its docstring, then regenerate; do not edit this section by ha
 | GET | `/api/caption/source-video` | Caption source video |
 | POST | `/api/caption/styles` | Save caption style |
 | DELETE | `/api/caption/styles/{name}` | Delete caption style |
-| GET | `/api/creator-production/capabilities` | Creator production capabilities |
-| GET | `/api/creator-production/channel-profiles` | Creator production channel profiles |
-| GET | `/api/creator-production/current` | Current creator production |
-| POST | `/api/creator-production/initialize` | Initialize creator production |
-| GET | `/api/creator-production/jobs` | List creator production jobs |
-| POST | `/api/creator-production/jobs` | Create creator production job |
-| GET | `/api/creator-production/jobs/{job_id}` | Get creator production job |
-| POST | `/api/creator-production/jobs/{job_id}/cancel` | Cancel creator production job |
-| POST | `/api/creator-production/jobs/{job_id}/claim` | Claim creator production job |
-| POST | `/api/creator-production/jobs/{job_id}/complete` | Complete creator production job |
-| GET | `/api/creator-production/jobs/{job_id}/handoff` | Get creator production handoff |
-| POST | `/api/creator-production/jobs/{job_id}/start` | Reject the retired nested Codex execution path |
-| GET | `/api/creator-production/pipeline` | Creator production pipeline |
-| GET | `/api/creator-production/render-jobs` | List creator render jobs |
-| POST | `/api/creator-production/render-jobs` | Create creator render job |
-| POST | `/api/creator-production/render-jobs/{job_id}/cancel` | Cancel creator render job |
-| POST | `/api/creator-production/render-jobs/{job_id}/start` | Start creator render job |
-| GET | `/api/creator-production/review` | Get creator production review |
-| GET | `/api/creator-production/review-video` | Creator production review video |
-| POST | `/api/creator-production/review/approve` | Approve creator production review |
-| POST | `/api/creator-production/review/notes` | Save creator production review note |
-| POST | `/api/creator-production/review/notes/{note_id}/accept` | Accept creator production review note |
-| GET | `/api/creator-production/source-evidence` | Get creator source evidence |
-| POST | `/api/creator-production/source-evidence` | Update creator source evidence |
-| POST | `/api/creator-production/studio/edits` | Apply creator studio edits |
-| POST | `/api/creator-production/studio/handoff` | Create creator studio handoff |
-| POST | `/api/creator-production/workflow-upgrade` | Upgrade creator production workflow |
 | GET | `/api/health` | Health |
 
 ## Storage and State

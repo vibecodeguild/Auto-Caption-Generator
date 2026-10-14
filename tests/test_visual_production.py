@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,42 @@ def _private_project(tmp_path: Path) -> tuple[Path, dict]:
     plan_path = root / "plans" / "visual-plan.json"
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
     return plan_path, plan
+
+
+def test_normalize_image_overlay_layers_keeps_per_still_start_and_end() -> None:
+    layers = visual_production.normalize_image_overlay_layers(
+        [
+            {
+                "imageAssetId": "a",
+                "revealFrame": 12,
+                "x": 0.5,
+                "y": 0.1,
+                "width": 0.4,
+                "height": 0.4,
+            },
+            {
+                "imageAssetId": "b",
+                "startFrame": 40,
+                "endFrameExclusive": 80,
+                "x": 0.1,
+                "y": 0.1,
+                "width": 0.3,
+                "height": 0.3,
+            },
+        ],
+        default_reveal=10,
+        default_end=90,
+    )
+    assert layers[0]["startFrame"] == 12
+    assert layers[0]["endFrameExclusive"] == 90
+    assert layers[0]["revealFrame"] == 12
+    assert layers[1]["startFrame"] == 40
+    assert layers[1]["endFrameExclusive"] == 80
+    assert visual_production.image_overlay_span(
+        layers,
+        fallback_start=10,
+        fallback_end=30,
+    ) == (12, 90)
 
 
 def test_visual_plan_round_trip_stays_inside_marked_private_project(tmp_path: Path) -> None:
@@ -623,7 +660,39 @@ def test_cover_dock_is_pure_hole_geometry() -> None:
 def test_engine_compose_recipe_is_shared_version_token() -> None:
     """Preview and Final fingerprints both hash this — one engine code version."""
     assert isinstance(visual_production.ENGINE_COMPOSE_RECIPE, int)
-    assert visual_production.ENGINE_COMPOSE_RECIPE >= 34
+    assert visual_production.ENGINE_COMPOSE_RECIPE >= 47
+
+
+def test_image_overlay_gsap_layer_selector_is_valid_javascript() -> None:
+    """Attribute selectors must not break the GSAP IIFE.
+
+    Final concatenates every cue into one paused timeline. An unescaped
+    data-layer-index quote throws SyntaxError before
+    window.__timelines is assigned, so docks and copy never apply.
+    """
+    source = Path(visual_production.__file__).read_text(encoding="utf-8")
+    overlay_line = next(
+        line.strip()
+        for line in source.splitlines()
+        if "sel = f'#{element_id} .image-overlay-layer[data-layer-index" in line
+    )
+    ns = {"element_id": "cue-overlay", "index": 0}
+    exec(overlay_line, ns)
+    sel = ns["sel"]
+    script = (
+        "var tl={fromTo:function(){},to:function(){}};"
+        f'tl.fromTo("{sel}", {{opacity:0}}, {{opacity:1,duration:0.2}}, 1);'
+        f'tl.to("{sel}", {{opacity:0,duration:0.2}}, 2);'
+    )
+    ok = subprocess.run(["node", "--check"], input=script, capture_output=True, text=True)
+    assert ok.returncode == 0, ok.stderr
+    broken = (
+        "var tl={fromTo:function(){},to:function(){}};"
+        'tl.fromTo("#cue-overlay .image-overlay-layer[data-layer-index="0"]",'
+        "{opacity:0},{opacity:1,duration:0.2},1);"
+    )
+    bad = subprocess.run(["node", "--check"], input=broken, capture_output=True, text=True)
+    assert bad.returncode != 0
 
 
 def test_progress_scale_fit_dock_aligns_video_to_outline() -> None:
@@ -772,6 +841,41 @@ def test_dependency_stack_markup_has_title_nodes_and_video_frame() -> None:
     assert "Transcript" in markup
     assert "lib-kicker" not in markup
     assert 'class="kicker"' not in markup
+
+
+def test_broll_overlay_placeholder_without_clip() -> None:
+    markup = visual_production._module_markup(
+        {"moduleId": "broll-overlay", "parameters": {}},
+        "broll",
+        1.0,
+        4.0,
+        20,
+    )
+    assert "module-broll-overlay" in markup
+    assert "B-ROLL" in markup
+    assert "<video" not in markup
+
+
+def test_broll_overlay_muted_plate_when_clip_staged() -> None:
+    markup = visual_production._module_markup(
+        {
+            "moduleId": "broll-overlay",
+            "parameters": {"videoAssetId": "city-broll", "clipStartSec": 1.5, "fit": "cover"},
+        },
+        "broll",
+        2.0,
+        6.0,
+        21,
+        {"city-broll": "city-broll.mp4"},
+    )
+    assert '<video' in markup
+    assert 'src="assets/city-broll.mp4"' in markup
+    assert "muted" in markup
+    assert 'data-media-start="1.5000"' in markup
+    assert "object-fit:cover" in markup
+    assert 'class="broll-plate"' in markup
+    assert 'class="clip broll-plate"' not in markup
+    assert "module-broll-overlay" in markup
 
 
 def test_intro_credentials_markup_has_name_nodes_wai_robot() -> None:

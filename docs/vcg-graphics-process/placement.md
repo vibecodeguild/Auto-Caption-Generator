@@ -10,7 +10,7 @@ Code: `app/core/placement_roles.py`, `app/core/placement.py`, Stage 3 in `web/ap
 
 ## 1. One-line job
 
-For each **assigned** beat, produce a **locked instance** of that golden’s **engine**: on-screen **lines** (words) and **when each line reveals** (absolute frame), plus non-text knobs. Iterate with **live HyperFrames preview** (no encode). When **every** assigned placement is **locked**, run **one full episode re-render**.
+For each **assigned** beat, produce a **locked instance** of that golden’s **engine**: on-screen **lines** (words) and **when each line reveals** (absolute frame), plus non-text knobs. Iterate with **live HyperFrames preview** (no encode). When **every** assigned placement is **locked**, Stage 4 may run delivery Final. The HyperFrames full-cut encode is the private **A-roll master**, not the published file.
 
 ```text
 Beat + layout + usageId
@@ -31,7 +31,7 @@ Beat + layout + usageId
 
 | # | Decision | Status |
 | --- | --- | --- |
-| D1 | **Final assemble** = one **full re-render** from locked placements on the locked cut. Not stitch of beat encodes as the product path. | **LOCKED** |
+| D1 | **Graphics assemble** = one **full re-render** from locked placements on the locked cut (A-roll master). Not stitch of beat encodes. Published delivery is Stage 4 program Final ([inserts.md](./inserts.md)). | **LOCKED** (delivery path superseded 2026-08-20) |
 | D2 | **Beat iteration** = live **HyperFrames / GSAP** composition only (**Tier B**). No parallel “Tier A” fake sticker path. No draft FFmpeg encode required for timing/copy. | **LOCKED** |
 | D3 | **Encode** only for **Final** (and optional rare debug). Never for every nudge. | **LOCKED** |
 | D4 | **Content model** = `lines[]` with `{ text, revealFrame, slot }` (+ meta / assets / motion). | **LOCKED** |
@@ -133,6 +133,8 @@ Adapters map slots → existing `parameters.*` (engines keep draw names until cl
 | brand-cta-lockup | *(none — join line + link brand-fixed)* | — | — | — | — |
 | tradeoff-meter | `leftLabel`, `rightLabel`, `verdict` | — | `value` | — | `side` |
 | source-punch-zoom | *(none)* | — | — | — | `focusX`/`focusY`/`zoom`/`settleSec`/`motion`; **`zoomInFrame`/`zoomOutFrame`** (absolute frames when zoom-in / zoom-out *start*; default beat start / near beat end) |
+| broll-overlay | *(none)* | — | `clipStartSec` (in-point inside the file), `fit` (`cover` / `contain`) | `videoAssetId` | Full-frame muted plate; locked-cut audio continues. **Starts** is a word-chip. **Ends** defaults to the clip out-point from that in-point (still capped by beat end); a word pick only wins when it is earlier. Clip from **Choose…** (disk) or **Pexels** (landscape 16:9 HD, Pexels License, frozen locally). |
+| image-overlay | *(none)* | — | — | `layers[]` (`imageAssetId`, `x`/`y`/`width`/`height` 0–1, `startFrame`/`endFrameExclusive`) | One or more stills over the beat. No copy. Import in Placement. Each still has its own Starts/Ends. **Place overlay** drag/resize writes X/Y/W/H. |
 
 **No `kicker` slot** anywhere. Adapters never fill kicker.
 
@@ -225,10 +227,10 @@ List engines: **Add line** / remove within `list_max` (dependency-stack **6** no
 | **Lock** | Human marks beat ready for episode render |
 | **Unlock** | Edit again; change usage/engine; re-draft that beat after unlock |
 | **Re-Place** | Overwrites **unlocked** only; **never** locked |
-| **Final** | Enabled only when every **assigned** placement has `locked: true` |
-| **Final output** | One full re-render of locked cut with all locked placements (same engines as library samples) |
-| **Final audio** | Stream-copy from the locked cut (no second normalize). Optional loudness pass is Stage 5 export only. |
-| **Final path** | `exports/final-video.mp4` under the private video project |
+| **Final (Stage 3)** | **Superseded 2026-08-20.** Stage 3 no longer publishes. Lock still gates Stage 4. |
+| **A-roll master** | One full HyperFrames re-render of locked graphics on the locked cut (same engines as library samples). Path: `working/placement-final/a-roll-master.mp4`. |
+| **A-roll audio** | Stream-copy from the locked cut (no second normalize). Optional loudness pass is Stage 5 export only. |
+| **Delivery Final** | Stage 4 program assemble → `exports/final-video.mp4`. See [inserts.md](./inserts.md). |
 
 Unassigned beats (no golden) do not require a placement lock.
 
@@ -256,7 +258,8 @@ For each assigned unlocked beat:
 | HTTP | `POST …/placement/run`, `PUT …/placement/beat`, `POST …/placement/preview` | **BUILT** |
 | Stage 3 UI studio | `web/app/visual-package.tsx` | **BUILT** — images/6 layout: craft left (primary), live preview right; word chips + ±1/5/10; no transcript wall |
 | Live composition preview | HyperFrames single-beat workspace + player scrub | **BUILT** — Tier B hyperframes-player; rebuild on select/edit |
-| Final full render from placements | `render_placement_final_for_video_project` + `POST …/placement/final` | **BUILT** — full HyperFrames encode; locked-cut audio stream-copied (no re-normalize) → `exports/final-video.mp4` |
+| A-roll master | `render_placement_final_for_video_project` | **BUILT** — HyperFrames encode + locked-cut audio remux → `working/placement-final/a-roll-master.mp4` |
+| Delivery Final | `render_program_final_for_video_project` + `POST …/placement/final` | **BUILT** — Stage 4; program concat (or identity) → `exports/final-video.mp4` |
 
 ---
 

@@ -41,11 +41,12 @@ REVIEWED_FILENAME = "placement-reviewed.json"
 LEDGER_FILENAME = "placement-edit-ledger.json"
 PREVIEW_DIRNAME = "working/placement-preview"
 PREVIEW_RECEIPT = "preview-receipt.json"
-# Full-episode Final encode workspace + published delivery (locked-cut audio remuxed).
+# Full-episode A-roll encode workspace. Published delivery is Stage 4 program Final.
 FINAL_DIRNAME = "working/placement-final"
 FINAL_PLAN_FILENAME = "visual-plan.final.json"
 FINAL_RECEIPT = "final-receipt.json"
 FINAL_JOB_FILENAME = "render-job.json"
+A_ROLL_OUTPUT_REL = "working/placement-final/a-roll-master.mp4"
 FINAL_OUTPUT_REL = "exports/final-video.mp4"
 
 SCHEMA_VERSION = 1
@@ -86,6 +87,19 @@ def _masterbeater_beat_by_id(project_root: Path, beat_id: str) -> dict[str, Any]
         if str(beat.get("id") or "") == want:
             return beat
     return None
+
+
+def _beat_start_frame(beat: dict[str, Any] | None, *, fallback: int) -> int:
+    """Natural speech-beat start (not a delayed graphic Starts frame)."""
+
+    if not isinstance(beat, dict):
+        return max(0, int(fallback))
+    raw = beat.get("startFrame")
+    try:
+        start_i = int(raw if raw is not None else fallback)
+    except (TypeError, ValueError):
+        start_i = int(fallback)
+    return max(0, start_i)
 
 
 def _beat_end_frame_exclusive(beat: dict[str, Any] | None, *, fallback: int) -> int:
@@ -281,6 +295,8 @@ DEMO_JOKE_IMAGE_ASSET_ID = "demo-joke-image"
 # Per-project store for placement instance images (joke art, logos, …).
 PLACEMENT_IMAGE_DIRNAME = "assets/placement"
 PLACEMENT_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+PLACEMENT_VIDEO_EXTENSIONS = (".mp4", ".mov", ".webm", ".mkv", ".avi")
+PLACEMENT_MEDIA_EXTENSIONS = PLACEMENT_IMAGE_EXTENSIONS + PLACEMENT_VIDEO_EXTENSIONS
 
 
 def _placement_image_dir(project_root: Path) -> Path:
@@ -290,12 +306,22 @@ def _placement_image_dir(project_root: Path) -> Path:
 def _find_placement_image(project_root: Path, asset_id: str) -> Path | None:
     """Resolve an imported placement image by asset id (file stem)."""
 
+    return _find_placement_media(project_root, asset_id, PLACEMENT_IMAGE_EXTENSIONS)
+
+
+def _find_placement_media(
+    project_root: Path,
+    asset_id: str,
+    extensions: tuple[str, ...] | None = None,
+) -> Path | None:
+    """Resolve an imported placement image or video by asset id (file stem)."""
+
     stem = str(asset_id or "").strip()
     if not stem:
         return None
-    image_dir = _placement_image_dir(project_root)
-    for ext in PLACEMENT_IMAGE_EXTENSIONS:
-        candidate = image_dir / f"{stem}{ext}"
+    media_dir = _placement_image_dir(project_root)
+    for ext in extensions or PLACEMENT_MEDIA_EXTENSIONS:
+        candidate = media_dir / f"{stem}{ext}"
         if candidate.is_file():
             return candidate
     return None
@@ -332,6 +358,401 @@ def import_placement_image(manifest_path: Path, source: Path) -> dict[str, Any]:
     return {"assetId": asset_id, "fileName": dest.name, "sourceName": source.name}
 
 
+def import_placement_media(manifest_path: Path, source: Path) -> dict[str, Any]:
+    """Copy an image or video into the project's placement store; returns asset id."""
+
+    root = video_project_root(manifest_path)
+    source = Path(source).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"Media not found: {source}")
+    ext = source.suffix.lower()
+    if ext not in PLACEMENT_MEDIA_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported media type {ext!r}. Use mp4/mov/webm/mkv/avi or png/jpg/gif/webp."
+        )
+    stem = re.sub(r"[^a-z0-9-]+", "-", source.stem.lower()).strip("-") or "clip"
+    if stem == DEMO_JOKE_IMAGE_ASSET_ID:
+        stem = f"{stem}-custom"
+    media_dir = _placement_image_dir(root)
+    media_dir.mkdir(parents=True, exist_ok=True)
+    asset_id = stem
+    dest = media_dir / f"{asset_id}{ext}"
+    counter = 2
+    while dest.is_file() and dest.stat().st_size != source.stat().st_size:
+        asset_id = f"{stem}-{counter}"
+        dest = media_dir / f"{asset_id}{ext}"
+        counter += 1
+    shutil.copy2(source, dest)
+    kind = "video" if ext in PLACEMENT_VIDEO_EXTENSIONS else "image"
+    duration_sec = _probe_placement_clip_duration(dest) if kind == "video" else None
+    out: dict[str, Any] = {
+        "assetId": asset_id,
+        "fileName": dest.name,
+        "sourceName": source.name,
+        "mediaType": kind,
+    }
+    if duration_sec is not None:
+        out["durationSec"] = duration_sec
+    return out
+
+
+def search_placement_pexels(
+    query: str,
+    *,
+    min_duration_sec: float = 0.0,
+    max_duration_sec: float = 0.0,
+    size: str = "large",
+    page: int = 1,
+    per_page: int = 20,
+) -> dict[str, Any]:
+    """Search one Pexels page for landscape 16:9 overlay plates. Does not download until select."""
+
+    from app.core.story_assets import (
+        PEXELS_LICENSE_NAME,
+        PEXELS_LICENSE_URL,
+        PEXELS_PAGE_SIZE,
+        pexels_settings,
+        search_pexels_videos,
+    )
+
+    settings = pexels_settings()
+    configured = bool(str(settings.get("apiKey") or "").strip())
+    if not configured:
+        return {
+            "configured": False,
+            "source": settings.get("source") or "missing",
+            "candidates": [],
+            "page": 1,
+            "perPage": per_page or PEXELS_PAGE_SIZE,
+            "totalResults": 0,
+            "hasPrev": False,
+            "hasNext": False,
+            "license": PEXELS_LICENSE_NAME,
+            "licensePage": PEXELS_LICENSE_URL,
+        }
+    q = str(query or "").strip()
+    if not q:
+        raise ValueError("Enter a search query.")
+    result = search_pexels_videos(
+        {
+            "query": q,
+            "desiredDurationSec": max(0.0, float(min_duration_sec or 0.0)),
+            "minDurationSec": max(0.0, float(min_duration_sec or 0.0)),
+            "maxDurationSec": max(0.0, float(max_duration_sec or 0.0)),
+            "size": size,
+        },
+        limit=per_page or PEXELS_PAGE_SIZE,
+        page=page,
+    )
+    return {
+        "configured": True,
+        "source": settings.get("source") or "local-settings",
+        "query": q,
+        "candidates": result.get("candidates") or [],
+        "page": result.get("page") or 1,
+        "perPage": result.get("perPage") or PEXELS_PAGE_SIZE,
+        "totalResults": result.get("totalResults") or 0,
+        "hasPrev": bool(result.get("hasPrev")),
+        "hasNext": bool(result.get("hasNext")),
+        "license": PEXELS_LICENSE_NAME,
+        "licensePage": PEXELS_LICENSE_URL,
+    }
+
+
+def select_placement_pexels(
+    manifest_path: Path,
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    """Download one Pexels candidate into the project's placement store (muted overlay later)."""
+
+    from app.core.story_assets import (
+        PEXELS_LICENSE_NAME,
+        PEXELS_LICENSE_URL,
+        download_trusted_pexels_file,
+        sha256_file,
+        trusted_pexels_media_url,
+    )
+
+    if not isinstance(candidate, dict):
+        raise ValueError("Invalid Pexels candidate.")
+    if candidate.get("provider") != "pexels" or not str(candidate.get("id") or "").isdigit():
+        raise ValueError("Invalid Pexels candidate.")
+    download_url = str(candidate.get("downloadUrl") or "")
+    if not trusted_pexels_media_url(download_url):
+        raise ValueError("Pexels download URL is not trusted.")
+
+    root = video_project_root(manifest_path)
+    media_dir = _placement_image_dir(root)
+    license_dir = media_dir / "licenses"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    license_dir.mkdir(parents=True, exist_ok=True)
+    asset_id = f"pexels-{candidate['id']}"
+    dest = media_dir / f"{asset_id}.mp4"
+    if not dest.is_file():
+        download_trusted_pexels_file(download_url, dest)
+    duration_sec = _probe_placement_clip_duration(dest)
+    if duration_sec is None:
+        try:
+            duration_sec = float(candidate.get("durationSec") or 0) or None
+        except (TypeError, ValueError):
+            duration_sec = None
+    checksum = sha256_file(dest)
+    now = datetime.now(timezone.utc).isoformat()
+    evidence = {
+        "provider": "pexels",
+        "providerAssetId": str(candidate["id"]),
+        "creator": candidate.get("creator"),
+        "creatorUrl": candidate.get("creatorUrl"),
+        "assetPage": candidate.get("assetPage"),
+        "downloadUrl": download_url,
+        "downloadedAt": now,
+        "license": PEXELS_LICENSE_NAME,
+        "licensePage": PEXELS_LICENSE_URL,
+        "licenseEvidence": (
+            "Pexels License recorded at selection time. Content may be used and "
+            "modified for free, including commercial YouTube use, subject to Pexels "
+            "restrictions (do not redistribute the unaltered file as stock)."
+        ),
+        "sha256": checksum,
+        "localFile": dest.relative_to(root).as_posix(),
+        "width": candidate.get("width"),
+        "height": candidate.get("height"),
+        "durationSec": duration_sec,
+        "previewUrl": candidate.get("previewUrl"),
+        "attribution": f"Video by {candidate.get('creator') or 'a Pexels creator'} on Pexels",
+    }
+    (license_dir / f"{asset_id}.json").write_text(
+        json.dumps(evidence, indent=2) + "\n", encoding="utf-8"
+    )
+    out: dict[str, Any] = {
+        "assetId": asset_id,
+        "fileName": dest.name,
+        "sourceName": evidence["attribution"],
+        "mediaType": "video",
+        "provider": "pexels",
+        "license": PEXELS_LICENSE_NAME,
+        "licensePage": PEXELS_LICENSE_URL,
+        "attribution": evidence["attribution"],
+        "width": candidate.get("width"),
+        "height": candidate.get("height"),
+    }
+    if duration_sec is not None:
+        out["durationSec"] = duration_sec
+    return out
+
+
+def list_placement_clips(manifest_path: Path) -> dict[str, Any]:
+    """Frozen overlay clips already in this project's placement store."""
+
+    root = video_project_root(manifest_path)
+    media_dir = _placement_image_dir(root)
+    license_dir = media_dir / "licenses"
+    clips: list[dict[str, Any]] = []
+    if not media_dir.is_dir():
+        return {"clips": []}
+    videos = [
+        path
+        for path in media_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in PLACEMENT_VIDEO_EXTENSIONS
+    ]
+    videos.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in videos:
+        asset_id = path.stem
+        evidence: dict[str, Any] = {}
+        license_path = license_dir / f"{asset_id}.json"
+        if license_path.is_file():
+            try:
+                loaded = json.loads(license_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    evidence = loaded
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                evidence = {}
+        duration = evidence.get("durationSec")
+        try:
+            duration_sec = float(duration) if duration is not None else None
+        except (TypeError, ValueError):
+            duration_sec = None
+        if duration_sec is None:
+            duration_sec = _probe_placement_clip_duration(path)
+        provider = str(evidence.get("provider") or ("pexels" if asset_id.startswith("pexels-") else "local"))
+        attribution = str(evidence.get("attribution") or path.name)
+        clips.append(
+            {
+                "assetId": asset_id,
+                "fileName": path.name,
+                "mediaType": "video",
+                "provider": provider,
+                "attribution": attribution,
+                "creator": evidence.get("creator"),
+                "durationSec": duration_sec,
+                "width": evidence.get("width"),
+                "height": evidence.get("height"),
+                "previewUrl": evidence.get("previewUrl"),
+                "license": evidence.get("license"),
+            }
+        )
+    return {"clips": clips}
+
+
+def placement_library_video_path(manifest_path: Path, asset_id: str) -> Path:
+    """Resolve a frozen placement clip. Rejects path traversal."""
+
+    stem = str(asset_id or "").strip()
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,120}", stem):
+        raise ValueError("Invalid clip id.")
+    root = video_project_root(manifest_path)
+    media_dir = _placement_image_dir(root).resolve()
+    found = _find_placement_media(root, stem, PLACEMENT_VIDEO_EXTENSIONS)
+    if found is None or not found.is_file():
+        raise FileNotFoundError(f"No frozen clip named {stem!r}.")
+    resolved = found.resolve()
+    if media_dir not in resolved.parents and resolved.parent != media_dir:
+        raise ValueError("Clip is outside the placement store.")
+    return resolved
+
+
+def placement_library_image_path(manifest_path: Path, asset_id: str) -> Path:
+    """Resolve a frozen placement still. Rejects path traversal."""
+
+    stem = str(asset_id or "").strip()
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,120}", stem):
+        raise ValueError("Invalid image id.")
+    root = video_project_root(manifest_path)
+    media_dir = _placement_image_dir(root).resolve()
+    found = _find_placement_image(root, stem)
+    if found is None or not found.is_file():
+        raise FileNotFoundError(f"No frozen still named {stem!r}.")
+    resolved = found.resolve()
+    if media_dir not in resolved.parents and resolved.parent != media_dir:
+        raise ValueError("Image is outside the placement store.")
+    return resolved
+
+
+def _probe_placement_clip_duration(path: Path) -> float | None:
+    """Best-effort duration for an imported placement clip. Missing/unreadable → None."""
+
+    from app.core.visual_production import probe_visual_source
+
+    try:
+        probed = float(probe_visual_source(Path(path))["durationSec"])
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+    if probed <= 0:
+        return None
+    return probed
+
+
+def broll_clip_end_frame_exclusive(
+    *,
+    start_frame: int,
+    clip_start_sec: float,
+    clip_duration_sec: float,
+    fps: float,
+    beat_end_exclusive: int,
+) -> int:
+    """Last exclusive locked-cut frame this overlay can cover from the chosen clip.
+
+    Overlay duration cannot exceed remaining media after ``clipStartSec``.
+    Never later than the beat end (overlay does not grow the cut).
+    """
+
+    start = max(0, int(start_frame))
+    beat_end = max(start + 1, int(beat_end_exclusive))
+    remaining = max(0.0, float(clip_duration_sec) - max(0.0, float(clip_start_sec)))
+    rate = max(1.0, float(fps) if fps else 30.0)
+    frames = max(1, int(round(remaining * rate)))
+    return max(start + 1, min(start + frames, beat_end))
+
+
+def _placement_fps(project_root: Path) -> float:
+    reviewed = load_masterbeater_reviewed(project_root)
+    original = load_masterbeater_output(project_root)
+    for doc in (reviewed, original):
+        if not isinstance(doc, dict):
+            continue
+        try:
+            fps = float(doc.get("fps") or 0)
+        except (TypeError, ValueError):
+            fps = 0.0
+        if fps > 0:
+            return fps
+    return 30.0
+
+
+def _broll_clip_duration_for_row(project_root: Path, row: dict[str, Any]) -> float | None:
+    assets = row.get("assets") if isinstance(row.get("assets"), dict) else {}
+    video_id = str(assets.get("videoAssetId") or "").strip()
+    if not video_id:
+        return None
+    source = _find_placement_media(project_root, video_id, PLACEMENT_VIDEO_EXTENSIONS)
+    if source is None:
+        source = _find_placement_media(project_root, video_id)
+    if source is None or not source.is_file():
+        return None
+    return _probe_placement_clip_duration(source)
+
+
+def _broll_clip_end_for_row(
+    project_root: Path,
+    row: dict[str, Any],
+    *,
+    fps: float | None = None,
+    beat_end_exclusive: int | None = None,
+) -> tuple[float | None, int | None]:
+    """Return (clipDurationSec, clipEndFrameExclusive) for a b-roll placement."""
+
+    from app.core.visual_production import canonicalize_engine_id
+
+    if canonicalize_engine_id(str(row.get("engineId") or "")) != "broll-overlay":
+        return None, None
+    duration = _broll_clip_duration_for_row(project_root, row)
+    if duration is None:
+        return None, None
+    start = int(row.get("startFrame") or 0)
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+    try:
+        clip_start = max(0.0, float(meta.get("clipStartSec") or 0.0))
+    except (TypeError, ValueError):
+        clip_start = 0.0
+    rate = float(fps) if fps else _placement_fps(project_root)
+    beat_id = str(row.get("beatId") or "")
+    beat = _masterbeater_beat_by_id(project_root, beat_id) if beat_id else None
+    beat_end = (
+        int(beat_end_exclusive)
+        if beat_end_exclusive is not None
+        else _beat_end_frame_exclusive(beat, fallback=int(row.get("endFrameExclusive") or start + 1))
+    )
+    clip_end = broll_clip_end_frame_exclusive(
+        start_frame=start,
+        clip_start_sec=clip_start,
+        clip_duration_sec=duration,
+        fps=rate,
+        beat_end_exclusive=beat_end,
+    )
+    return duration, clip_end
+
+
+def _clamp_broll_end_to_clip(
+    project_root: Path,
+    row: dict[str, Any],
+    *,
+    fps: float | None = None,
+) -> dict[str, Any]:
+    """Cap overlay Ends at clip out (or an earlier human pick). Does not persist derived fields."""
+
+    out = dict(row)
+    duration, clip_end = _broll_clip_end_for_row(project_root, out, fps=fps)
+    if clip_end is None:
+        return out
+    start = int(out.get("startFrame") or 0)
+    try:
+        end = int(out.get("endFrameExclusive") or clip_end)
+    except (TypeError, ValueError):
+        end = clip_end
+    out["endFrameExclusive"] = max(start + 1, min(end, clip_end))
+    return out
+
+
 def _default_assets(engine_id: str) -> dict[str, Any]:
     """Default asset bag required by single-mode engines (e.g. punchline joke card)."""
 
@@ -341,6 +762,8 @@ def _default_assets(engine_id: str) -> dict[str, Any]:
     if engine_id == "punchline-reveal" and "imageAssetId" in keys:
         # Required: punchline-reveal is only the joke-card look (no text-only mode).
         assets["imageAssetId"] = DEMO_JOKE_IMAGE_ASSET_ID
+    if engine_id == "image-overlay" and "layers" in keys:
+        assets["layers"] = []
     return {k: v for k, v in assets.items() if k in keys}
 
 
@@ -394,6 +817,57 @@ def _stage_plan_assets_for_preview(
                 "hasTransparency": False,
             }
         )
+    video_id = str(params.get("videoAssetId") or "").strip()
+    if engine_id == "broll-overlay" and video_id:
+        source = _find_placement_media(project_root, video_id, PLACEMENT_VIDEO_EXTENSIONS)
+        if source is None:
+            source = _find_placement_media(project_root, video_id)
+        if source is not None and source.is_file():
+            asset_dir = Path(project_root) / PREVIEW_DIRNAME / "assets"
+            asset_dir.mkdir(parents=True, exist_ok=True)
+            dest_name = f"{video_id}{source.suffix.lower() or '.mp4'}"
+            dest = asset_dir / dest_name
+            if not dest.is_file() or dest.stat().st_size != source.stat().st_size:
+                shutil.copy2(source, dest)
+            rel = f"{PREVIEW_DIRNAME}/assets/{dest_name}".replace("\\", "/")
+            kind = "video" if source.suffix.lower() in PLACEMENT_VIDEO_EXTENSIONS else "image"
+            plan_assets.append(
+                {
+                    "id": video_id,
+                    "name": f"B-roll · {video_id}",
+                    "path": rel,
+                    "mediaType": kind,
+                    "durationSec": None,
+                    "hasTransparency": False,
+                }
+            )
+    if engine_id == "image-overlay":
+        from app.core.visual_production import normalize_image_overlay_layers
+
+        for layer in normalize_image_overlay_layers(params.get("layers")):
+            image_id = str(layer.get("imageAssetId") or "").strip()
+            if not image_id:
+                continue
+            source = _find_placement_image(project_root, image_id)
+            if source is None or not source.is_file():
+                continue
+            asset_dir = Path(project_root) / PREVIEW_DIRNAME / "assets"
+            asset_dir.mkdir(parents=True, exist_ok=True)
+            dest_name = f"{image_id}{source.suffix.lower() or '.png'}"
+            dest = asset_dir / dest_name
+            if not dest.is_file() or dest.stat().st_size != source.stat().st_size:
+                shutil.copy2(source, dest)
+            rel = f"{PREVIEW_DIRNAME}/assets/{dest_name}".replace("\\", "/")
+            plan_assets.append(
+                {
+                    "id": image_id,
+                    "name": f"Overlay still · {image_id}",
+                    "path": rel,
+                    "mediaType": "image",
+                    "durationSec": None,
+                    "hasTransparency": False,
+                }
+            )
     return plan_assets
 
 
@@ -415,8 +889,10 @@ def draft_lines_for_engine(
 
     lines: list[dict[str, Any]] = []
 
-    if engine_id in {"source-punch-zoom", "brand-cta-lockup"}:
+    if engine_id in {"source-punch-zoom", "brand-cta-lockup", "broll-overlay", "image-overlay"}:
         # Punch zoom: motion-only. Brand CTA: join line + link are brand-fixed.
+        # Overlay B-roll: footage plate — no copy lines.
+        # Image overlay: stills only, no copy lines.
         return []
 
     # Fixed slots first
@@ -901,6 +1377,10 @@ def save_placement_beat_for_video_project(
     if "locked" in payload:
         row["locked"] = bool(payload["locked"])
 
+    row = _clamp_broll_end_to_clip(root, row)
+    row.pop("clipDurationSec", None)
+    row.pop("clipEndFrameExclusive", None)
+
     by_id[beat_id] = row
     ordered = list(by_id.values())
 
@@ -997,6 +1477,11 @@ def placement_status_for_video_project(
             assets.pop("logoAssetId", None)
             row["assets"] = assets
         row = _expand_ui_callout_bounds_into_meta(row)
+        duration, clip_end = _broll_clip_end_for_row(root, row)
+        if duration is not None:
+            row["clipDurationSec"] = duration
+        if clip_end is not None:
+            row["clipEndFrameExclusive"] = clip_end
         by_beat[str(row["beatId"])] = row
 
     interfaces: dict[str, Any] = {}
@@ -1090,6 +1575,7 @@ def _placement_preview_fingerprint(
     *,
     source_rel: str,
     fps: float,
+    beat_start_frame: int | None = None,
     beat_end_frame_exclusive: int | None = None,
 ) -> str:
     # Same engine-compose recipe Final uses — one version, both surfaces.
@@ -1101,6 +1587,11 @@ def _placement_preview_fingerprint(
         "startFrame": int(placement.get("startFrame") or 0),
         # Graphic undock (placement Ends). Separate from preview window end.
         "endFrameExclusive": int(placement.get("endFrameExclusive") or 0),
+        "beatStartFrame": int(
+            beat_start_frame
+            if beat_start_frame is not None
+            else (placement.get("startFrame") or 0)
+        ),
         "beatEndFrameExclusive": int(
             beat_end_frame_exclusive
             if beat_end_frame_exclusive is not None
@@ -1267,6 +1758,21 @@ def _sanitize_engine_parameters_for_plan(engine_id: str, params: dict[str, Any])
         if side and side not in {"left", "right"}:
             out["side"] = "left"
 
+    if eid == "broll-overlay":
+        fit = str(out.get("fit") or "").strip().lower()
+        out["fit"] = fit if fit in {"cover", "contain"} else "cover"
+        try:
+            out["clipStartSec"] = max(0.0, float(out.get("clipStartSec") or 0.0))
+        except (TypeError, ValueError):
+            out["clipStartSec"] = 0.0
+        if not str(out.get("videoAssetId") or "").strip():
+            out.pop("videoAssetId", None)
+
+    if eid == "image-overlay":
+        from app.core.visual_production import normalize_image_overlay_layers
+
+        out["layers"] = normalize_image_overlay_layers(out.get("layers"))
+
     if eid == "numbered-phrase-reveal":
         # Schema wants string fields. Meta knobs often arrive as numbers (2) or null
         # from the craft UI; without coercion every module oneOf branch fails and
@@ -1425,12 +1931,31 @@ def build_cue_preview_payload(placement: dict[str, Any], *, fps: float = 30.0) -
         motion=placement.get("motion") if isinstance(placement.get("motion"), dict) else {},
     )
     # Drop blank asset ids, then fill golden-matching defaults (joke image card, etc.).
-    for key in ("imageAssetId", "logoAssetId"):
+    for key in ("imageAssetId", "logoAssetId", "videoAssetId"):
         if key in params and not str(params.get(key) or "").strip():
             params.pop(key, None)
     params = _ensure_engine_assets_for_preview(engine_id, params)
     # Coerce values that break visual-plan.schema.json (misleading oneOf → "assetId required").
     params = _sanitize_engine_parameters_for_plan(engine_id, params)
+    if engine_id == "image-overlay":
+        from app.core.visual_production import image_overlay_span, normalize_image_overlay_layers
+
+        params["layers"] = normalize_image_overlay_layers(
+            params.get("layers"),
+            default_reveal=start_f,
+            default_end=end_f,
+        )
+        start_f, end_f = image_overlay_span(
+            params["layers"],
+            fallback_start=start_f,
+            fallback_end=end_f,
+        )
+        if end_f <= start_f:
+            end_f = start_f + 1
+        start_sec = start_f / fps
+        end_sec = end_f / fps
+        if end_sec <= start_sec:
+            end_sec = start_sec + 1.0 / fps
 
     cue = {
         "id": f"cue-{placement.get('beatId') or 'beat'}",
@@ -1516,29 +2041,62 @@ def build_placement_live_preview(
     if full_duration <= 0:
         raise RuntimeError("Could not probe stage source duration.")
 
-    start_f = int(placement.get("startFrame") or 0)
+    graphic_start_f = int(placement.get("startFrame") or 0)
     # Graphic undock frame (placement Ends). Cue ends here; talking-head continues.
-    graphic_end_f = int(placement.get("endFrameExclusive") or start_f + 1)
-    if graphic_end_f <= start_f:
-        graphic_end_f = start_f + 1
-    # Preview composition always covers the full speech beat so trimming Ends only
-    # ends the graphic — the player keeps rolling on full-frame talking-head.
+    graphic_end_f = int(placement.get("endFrameExclusive") or graphic_start_f + 1)
+    if graphic_end_f <= graphic_start_f:
+        graphic_end_f = graphic_start_f + 1
+    if str(placement.get("engineId") or "") == "image-overlay":
+        from app.core.visual_production import image_overlay_span, normalize_image_overlay_layers
+
+        assets_bag = placement.get("assets") if isinstance(placement.get("assets"), dict) else {}
+        overlay_layers = normalize_image_overlay_layers(
+            assets_bag.get("layers"),
+            default_reveal=graphic_start_f,
+            default_end=graphic_end_f,
+        )
+        graphic_start_f, graphic_end_f = image_overlay_span(
+            overlay_layers,
+            fallback_start=graphic_start_f,
+            fallback_end=graphic_end_f,
+        )
+        if graphic_end_f <= graphic_start_f:
+            graphic_end_f = graphic_start_f + 1
+    # Preview composition always covers the full speech beat so trimming Starts /
+    # Ends only moves the graphic — the player keeps rolling on talking-head.
     mb_beat = _masterbeater_beat_by_id(root, beat_id)
+    beat_start_f = _beat_start_frame(mb_beat, fallback=graphic_start_f)
     beat_end_f = _beat_end_frame_exclusive(mb_beat, fallback=graphic_end_f)
+    if graphic_start_f < beat_start_f:
+        graphic_start_f = beat_start_f
     if beat_end_f < graphic_end_f:
         beat_end_f = graphic_end_f
-    if beat_end_f <= start_f:
-        beat_end_f = start_f + 1
+    if beat_end_f <= beat_start_f:
+        beat_end_f = beat_start_f + 1
+    if graphic_end_f <= graphic_start_f:
+        graphic_end_f = graphic_start_f + 1
 
-    start_sec = max(0.0, start_f / fps)
+    placement = dict(placement)
+    placement["startFrame"] = graphic_start_f
+    placement["endFrameExclusive"] = graphic_end_f
+    placement = _clamp_broll_end_to_clip(root, placement, fps=fps)
+    graphic_start_f = int(placement.get("startFrame") or graphic_start_f)
+    graphic_end_f = int(placement.get("endFrameExclusive") or graphic_end_f)
+    if graphic_end_f <= graphic_start_f:
+        graphic_end_f = graphic_start_f + 1
+    if beat_end_f < graphic_end_f:
+        beat_end_f = graphic_end_f
+
+    start_sec = max(0.0, graphic_start_f / fps)
+    beat_start_sec = max(0.0, beat_start_f / fps)
     graphic_end_sec = min(full_duration, graphic_end_f / fps)
     beat_end_sec = min(full_duration, beat_end_f / fps)
     if graphic_end_sec <= start_sec:
         graphic_end_sec = min(full_duration, start_sec + max(1.0 / fps, 0.5))
-    if beat_end_sec <= start_sec:
-        beat_end_sec = min(full_duration, start_sec + max(1.0 / fps, 0.5))
+    if beat_end_sec <= beat_start_sec:
+        beat_end_sec = min(full_duration, beat_start_sec + max(1.0 / fps, 0.5))
     # Tiny pad so enter/exit motion is not clipped at the edges.
-    range_start = max(0.0, start_sec - 0.05)
+    range_start = max(0.0, beat_start_sec - 0.05)
     range_end = min(full_duration, beat_end_sec + 0.08)
     if range_end <= range_start:
         range_end = min(full_duration, range_start + 0.5)
@@ -1547,6 +2105,7 @@ def build_placement_live_preview(
         placement,
         source_rel=source_rel,
         fps=fps,
+        beat_start_frame=beat_start_f,
         beat_end_frame_exclusive=beat_end_f,
     )
     preview_root = preview_workspace_for_project(root)
@@ -1581,13 +2140,14 @@ def build_placement_live_preview(
                     "engineId": engine_id,
                     "cacheKey": fingerprint,
                     "durationSec": float(receipt.get("durationSec") or (range_end - range_start)),
-                    # Preview window = full beat; graphic may undock earlier.
-                    "startFrame": start_f,
+                    # Preview window = full beat; graphic Starts/Ends may trim inside it.
+                    "startFrame": int(receipt.get("startFrame") or beat_start_f),
                     "endFrameExclusive": int(receipt.get("endFrameExclusive") or beat_end_f),
+                    "graphicStartFrame": int(receipt.get("graphicStartFrame") or graphic_start_f),
                     "graphicEndFrameExclusive": int(
                         receipt.get("graphicEndFrameExclusive") or graphic_end_f
                     ),
-                    "startSec": start_sec,
+                    "startSec": beat_start_sec,
                     "endSec": beat_end_sec,
                     "graphicEndSec": graphic_end_sec,
                     "rangeStartSec": float(receipt.get("rangeStartSec") or range_start),
@@ -1699,8 +2259,9 @@ def build_placement_live_preview(
         "durationSec": float(render_duration),
         "rangeStartSec": range_start,
         "rangeEndSec": range_end,
-        "startFrame": start_f,
+        "startFrame": beat_start_f,
         "endFrameExclusive": beat_end_f,
+        "graphicStartFrame": graphic_start_f,
         "graphicEndFrameExclusive": graphic_end_f,
         "builtAt": now,
     }
@@ -1715,10 +2276,11 @@ def build_placement_live_preview(
         "engineId": engine_id,
         "cacheKey": fingerprint,
         "durationSec": float(render_duration),
-        "startFrame": start_f,
+        "startFrame": beat_start_f,
         "endFrameExclusive": beat_end_f,
+        "graphicStartFrame": graphic_start_f,
         "graphicEndFrameExclusive": graphic_end_f,
-        "startSec": start_sec,
+        "startSec": beat_start_sec,
         "endSec": beat_end_sec,
         "graphicEndSec": graphic_end_sec,
         "rangeStartSec": range_start,
@@ -1740,7 +2302,15 @@ def final_workspace_for_project(project_root: Path) -> Path:
     return Path(project_root).expanduser().resolve() / FINAL_DIRNAME
 
 
+def a_roll_output_path_for_project(project_root: Path) -> Path:
+    """Private graphics-on-cut master. Not the published program file."""
+
+    return Path(project_root).expanduser().resolve() / A_ROLL_OUTPUT_REL
+
+
 def final_output_path_for_project(project_root: Path) -> Path:
+    """Published program delivery (Stage 4). Kept for path compatibility."""
+
     return Path(project_root).expanduser().resolve() / FINAL_OUTPUT_REL
 
 
@@ -1912,7 +2482,9 @@ def build_placement_final_plan(
 
     cues: list[dict[str, Any]] = []
     for row in beats:
-        placement = normalize_placement_engine(dict(row))
+        placement = _clamp_broll_end_to_clip(
+            root, normalize_placement_engine(dict(row)), fps=fps
+        )
         engine_id = str(placement.get("engineId") or "").strip()
         if not engine_id:
             raise ValueError(f"Placement {placement.get('beatId')!r} has no engineId.")
@@ -1990,7 +2562,7 @@ def build_placement_final_plan(
         "width": width,
         "height": height,
         "quality": quality,
-        "outputPath": str(final_output_path_for_project(root)),
+        "outputPath": str(a_roll_output_path_for_project(root)),
     }
 
 
@@ -2061,13 +2633,15 @@ def render_placement_final_for_video_project(
     cancel_check: Callable[[], bool] | None = None,
     on_process: Callable[[subprocess.Popen[str] | None], None] | None = None,
 ) -> dict[str, Any]:
-    """Full-episode Final: HyperFrames encode of locked placements + locked-cut audio remux.
+    """Private A-roll master: HyperFrames encode of locked placements + locked-cut audio remux.
 
     Does not re-normalize audio. Whatever audio is on the locked cut (including
     optional Stage 5 normalize from the transcript editor) is stream-copied.
 
-    ``force`` defaults to True so an existing ``exports/final-video.mp4`` never
-    blocks a new export (receipt reuse is opt-in for identical fingerprints only).
+    Writes ``working/placement-final/a-roll-master.mp4``. Published delivery is
+    Stage 4 program Final. ``force`` defaults to True so an existing A-roll never
+    blocks a deliberate rebuild; Stage 4 passes force=False to reuse a matching
+    fingerprint.
 
     ``cancel_check`` / ``on_process`` let the API surface cancel a running
     HyperFrames tree without a parallel encode path.
@@ -2105,8 +2679,8 @@ def render_placement_final_for_video_project(
 
     work = final_workspace_for_project(root)
     receipt_path = work / FINAL_RECEIPT
-    # Optional reuse only: Stage 3 Final always force-rebuilds so an existing
-    # exports/final-video.mp4 cannot short-circuit a deliberate re-export.
+    # Optional reuse: Stage 4 Final passes force=False so insert-only edits skip
+    # a HyperFrames re-encode when the locked placement fingerprint matches.
     if not force and output_path.is_file() and receipt_path.is_file():
         try:
             receipt = json.loads(receipt_path.read_text(encoding="utf-8-sig"))

@@ -298,6 +298,25 @@ labels, and regression tests all use the existing single path.
      therefore rejected for production; the diagnostic remains available for
      future comparisons against accumulated project history.
 
+Addendum recorded August 19, 2026: **NVIDIA Parakeet transcription is planned,
+not yet authorized to replace Whisper in production.** Large v3 + NVIDIA GPU
+remain the current default until a Parakeet adapter is proven on real VCG cuts.
+Scope when implementation is approved:
+
+- Keep the `transcribe_audio` → `WordTimestamp(text, start, end)` contract.
+  Pause analysis, splices, captions, Masterbeater word IDs, and locked-cut
+  remap must not grow a second transcript model.
+- Add Parakeet as a selectable engine (GPU-first). Keep faster-whisper as
+  fallback / CPU path until Parakeet CPU is acceptable.
+- Record engine + model id in transcript `generation` provenance.
+- Recalibrate Fine Tune / Audio Boundary Assist on Parakeet word ends. Do not
+  assume Whisper IN-point behavior transfers.
+- Do not enable automatic timestamp rewrite. Word times from the model remain
+  the first draft; human splice review stays authority.
+
+This addendum does not authorize ripping out Whisper, adding a cloud ASR, or
+changing locked-cut timing rules.
+
 ## Approved Rendered-Preview Direction
 
 ![Approved rendered cut preview](assets/rendered-cut-preview-approved.png)

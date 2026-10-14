@@ -23,9 +23,9 @@ DOC = ROOT / "docs" / "current-system.md"
 HEADING = "## API Inventory"
 HTTP_METHODS = {"get", "post", "patch", "put", "delete", "head", "options"}
 GROUPS = [
-    ("/api/visual", "Visual Production"),
+    ("/api/visual-package", "Visual Package"),
+    ("/api/visual", "Visual runtime"),
     ("/api/graphics-library", "Graphics Library"),
-    ("/api/creator-library", "Creator Library"),
     ("/api/video-project", "Video projects"),
     ("/api/audio", "Audio"),
     ("/api/projects", "Transcript projects"),

@@ -2,7 +2,7 @@
 
 **Purpose:** Track which of the active placement engines have been human-reviewed in Stage 3 with live preview and accepted as “good enough to ship” for daily production.
 
-**Active count:** 20 engines in `ENGINE_REGISTRY` (`app/core/visual_production.py`).  
+**Active count:** 22 engines in `ENGINE_REGISTRY` (`app/core/visual_production.py`).  
 (Originally framed as “18”; `speaker-side-panel` was retired → `dependency-stack`; `numbered-phrase-reveal`, `intro-credentials`, `windows-prompt-overlay` added 2026-08.)
 
 **Status legend**
@@ -51,13 +51,15 @@ Reviewed during Stage 3 placement polish (session through 2026-08).
 
 ---
 
-## Not started (3)
+## Not started (4)
 
 | Engine id | Notes |
 | --- | --- |
 | `numbered-phrase-reveal` | Shipped production engine 2026-08 (white stage, teal `numberLabel`, black upper-right dock frame, magenta char-typed `text`). Placement craft review still open; promote in Graphics Library when accepted. |
 | `intro-credentials` | Shipped 2026-08 for host intros: head docks LEFT; right name + experience bullets; large Thai Wai robot thank-you after settle. Placement craft review open. |
 | `windows-prompt-overlay` | Shipped 2026-08: same CLI typing as windows-prompt-typing, but overlay-only (no dock/mask); terminal centered horizontally. Placement craft review open. |
+| `broll-overlay` | Shipped 2026-08-19: full-frame muted plate over the locked cut; audio unchanged. Placement Choose… imports a local clip. Craft review open. |
+| `image-overlay` | Shipped 2026-08-20: one or more imported stills, sized/placed on the beat, no copy. Each still has its own Starts/Ends. Place overlay craft aid drags/resizes on the talking-head video. Craft review open. |
 
 ---
 

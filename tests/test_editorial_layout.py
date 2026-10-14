@@ -7,7 +7,6 @@ from app.core.editorial_layout import (
     speaker_bounds_for_layout,
     speaker_safety_payload,
 )
-from app.core.editorial_visual_plan import build_visual_cues_from_beats
 from app.core.file_utils import bounds_intersect
 
 
@@ -76,68 +75,3 @@ def test_speaker_safety_payload_shape() -> None:
     assert len(payload["verifiedAtSec"]) == 3
     assert len(set(payload["verifiedAtSec"])) == 3
     assert payload["speakerBounds"] is not None
-
-
-def test_build_cues_layout_aware_remaps_open() -> None:
-    plan = {
-        "schemaVersion": 2,
-        "mode": "talking-head",
-        "fps": {"numerator": 30, "denominator": 1},
-        "totalDurationSec": 12.0,
-        "beats": [
-            {
-                "id": "b1",
-                "beatType": "context",
-                "treatmentId": "dependency-stack",
-                "onScreenCopy": "WORKING IN POWERPOINT",
-                "motionKind": "treatment-enter",
-                "startSec": 0.0,
-                "endSec": 4.0,
-                "layoutId": "full-screen-talking",
-            },
-            {
-                "id": "b2",
-                "beatType": "proof",
-                "treatmentId": "tradeoff-meter",
-                "onScreenCopy": "JUST START",
-                "motionKind": "treatment-enter",
-                "startSec": 4.0,
-                "endSec": 8.0,
-                "layoutId": "full-screen-talking",
-            },
-            {
-                "id": "b3",
-                "beatType": "aftershock",
-                "treatmentId": "source-punch-zoom",
-                "onScreenCopy": None,
-                "motionKind": "punch-zoom",
-                "startSec": 8.0,
-                "endSec": 10.0,
-                "layoutId": "full-screen-talking",
-            },
-            {
-                "id": "b4",
-                "beatType": "punchline",
-                "treatmentId": "ui-callout",
-                "onScreenCopy": "WAY EASIER",
-                "motionKind": "treatment-enter",
-                "startSec": 10.0,
-                "endSec": 12.0,
-                "layoutId": "full-screen-talking",
-            },
-        ],
-    }
-    result = build_visual_cues_from_beats(plan)
-    assert result["summary"]["layoutAware"] is True
-    # Side panel must not stay as a full-height panel on full-screen talking.
-    assert result["cues"][0]["moduleId"] != "dependency-stack"
-    # Realized modules should rotate — not one shell for every beat.
-    graphic_modules = [
-        c["moduleId"]
-        for c in result["cues"]
-        if c["moduleId"] not in {"source-punch-zoom", "source-punch-zoom"}
-    ]
-    assert len(set(graphic_modules)) >= 2
-    safety = result["cues"][0]["parameters"].get("speakerSafety")
-    assert safety is not None
-    assert safety["checked"] is True

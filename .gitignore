@@ -80,6 +80,7 @@ models/
 
 .env
 .env.*
+app/pexels.json
 *.key
 *.pem
 *.p12

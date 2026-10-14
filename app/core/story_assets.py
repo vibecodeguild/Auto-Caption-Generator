@@ -14,7 +14,7 @@ from pathlib import Path
 from app.core.ffmpeg_locator import find_ffmpeg
 from app.core.file_utils import is_within, sha256_file, slug
 from app.core.process_utils import hidden_subprocess_flags
-from app.core.settings import project_root, user_data_root
+from app.core.settings import project_root, read_dotenv_key, upsert_dotenv_local, user_data_root
 from app.core.visual_production import (
     ASSET_EXTENSIONS,
     MODULE_IDS,
@@ -51,6 +51,19 @@ SCENE_LAYOUTS = {
     "computer-screen-only",
 }
 PEXELS_LICENSE_URL = "https://www.pexels.com/license/"
+PEXELS_LICENSE_NAME = "Pexels License"
+# Overlay / talking-head canvas is 1920×1080. Search and file-pick stay on that plate.
+PEXELS_TARGET_WIDTH = 1920
+PEXELS_TARGET_HEIGHT = 1080
+PEXELS_MIN_RENDER_WIDTH = 1280
+PEXELS_ASPECT = 16 / 9
+PEXELS_ASPECT_TOLERANCE = 0.18
+PEXELS_MIN_DURATION_SEC = 2.0
+PEXELS_PAGE_SIZE = 20
+PEXELS_MAX_PAGE_SIZE = 80
+PEXELS_SIZE_OPTIONS = ("large", "medium", "small")
+# Video-search docs: large=4K, medium=Full HD, small=HD. Overlay canvas is 1080p;
+# large remains the default so existing searches stay 4K-capable sources.
 TREATMENT_LIBRARY_VERSION = 1
 MAX_MEANINGFUL_CHANGE_GAP_SEC = 5.0
 # Changes that carry a protected span without putting a graphic over the footage. There is no
@@ -1822,70 +1835,213 @@ def build_nonmedia_suggestion(plan_path: Path, suggestion_id: str) -> tuple[dict
 
 
 def pexels_settings() -> dict:
-    configured = os.environ.get("PEXELS_API_KEY")
-    if configured:
-        return {"apiKey": configured, "source": "environment"}
+    value, source = read_dotenv_key("PEXELS_API_KEY")
+    if value:
+        return {"apiKey": value, "source": source}
     path = user_data_root() / "pexels.json"
-    if not path.is_file():
-        return {"apiKey": "", "source": "missing"}
-    return {"apiKey": json.loads(path.read_text(encoding="utf-8")).get("apiKey", ""), "source": "local-settings"}
+    if path.is_file():
+        try:
+            stored = str(json.loads(path.read_text(encoding="utf-8")).get("apiKey") or "").strip()
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            stored = ""
+        if stored:
+            return {"apiKey": stored, "source": "local-settings"}
+    return {"apiKey": "", "source": "missing"}
 
 
 def save_pexels_key(api_key: str) -> None:
     value = api_key.strip()
     if len(value) < 10:
         raise ValueError("Enter a valid Pexels API key.")
-    path = user_data_root() / "pexels.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"apiKey": value}, indent=2), encoding="utf-8")
+    upsert_dotenv_local("PEXELS_API_KEY", value)
 
 
-def search_pexels_videos(brief: dict, *, limit: int = 5) -> list[dict]:
+def trusted_pexels_media_url(url: str) -> bool:
+    """Allow only Pexels-served media (and the Vimeo /external/ files their API still returns)."""
+
+    parsed = urllib.parse.urlparse(str(url or ""))
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    if host == "pexels.com" or host.endswith(".pexels.com"):
+        return True
+    if host == "player.vimeo.com" and parsed.path.startswith("/external/"):
+        return True
+    return False
+
+
+def _pexels_landscape_16x9(width: int, height: int) -> bool:
+    w, h = int(width or 0), int(height or 0)
+    if w < 640 or h < 360 or w < h:
+        return False
+    return abs((w / h) - PEXELS_ASPECT) <= PEXELS_ASPECT_TOLERANCE
+
+
+def _pexels_mp4_files(video: dict) -> list[dict]:
+    files: list[dict] = []
+    for item in video.get("video_files") or []:
+        if not isinstance(item, dict) or not item.get("link"):
+            continue
+        quality = str(item.get("quality") or "").lower()
+        file_type = str(item.get("file_type") or "").lower()
+        link = str(item.get("link") or "")
+        if quality == "hls" or ".m3u8" in link:
+            continue
+        if file_type and file_type not in {"video/mp4", "mp4"}:
+            continue
+        width, height = int(item.get("width") or 0), int(item.get("height") or 0)
+        if not _pexels_landscape_16x9(width, height):
+            continue
+        if not trusted_pexels_media_url(link):
+            continue
+        files.append(item)
+    return files
+
+
+def _pick_pexels_render_file(files: list[dict]) -> dict | None:
+    """Prefer a 1920×1080 plate; never pick portrait; skip tiny sources."""
+
+    hd = [item for item in files if int(item.get("width") or 0) >= PEXELS_MIN_RENDER_WIDTH]
+    pool = hd or files
+    if not pool:
+        return None
+
+    def _score(item: dict) -> tuple[int, int]:
+        width = int(item.get("width") or 0)
+        height = int(item.get("height") or 0)
+        return (
+            abs(width - PEXELS_TARGET_WIDTH) + abs(height - PEXELS_TARGET_HEIGHT),
+            abs((width * height) - (PEXELS_TARGET_WIDTH * PEXELS_TARGET_HEIGHT)),
+        )
+
+    return sorted(pool, key=_score)[0]
+
+
+def _pick_pexels_preview_file(files: list[dict], render: dict) -> dict:
+    ordered = sorted(files, key=lambda item: int(item.get("width") or 0))
+    for item in ordered:
+        if int(item.get("width") or 0) >= 640:
+            return item
+    return render
+
+
+def download_trusted_pexels_file(url: str, destination: Path) -> None:
+    if not trusted_pexels_media_url(url):
+        raise ValueError("Pexels download URL is not trusted.")
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(str(url), headers={"User-Agent": "VCG-AutoCaption/1.0"})
+    with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
+        shutil.copyfileobj(response, output)
+
+
+def search_pexels_videos(
+    brief: dict,
+    *,
+    limit: int = PEXELS_PAGE_SIZE,
+    page: int = 1,
+) -> dict:
+    """One Pexels search page. Preserve API rank; filter to landscape 16:9 HD plates."""
+
     key = pexels_settings()["apiKey"]
     if not key:
-        raise ValueError("Add a free Pexels API key in Visual Production settings first.")
+        raise ValueError("Add PEXELS_API_KEY to .env.local at the repo root.")
     queries = [*brief.get("literalQueries", []), *brief.get("metaphoricalQueries", [])]
     queries = [str(item).strip() for item in queries if str(item).strip()]
     if not queries and str(brief.get("query") or "").strip():
         queries = [str(brief["query"]).strip()]
     if not queries:
-        raise ValueError("This stock suggestion is missing search queries.")
-    videos_by_id = {}
-    for query_index, query in enumerate(queries[:3]):
-        url = "https://api.pexels.com/v1/videos/search?" + urllib.parse.urlencode({"query": query, "orientation": "landscape", "per_page": min(15, max(limit * 2, 8))})
-        request = urllib.request.Request(url, headers={"Authorization": key, "User-Agent": "VCG-AutoCaption/1.0"})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        for rank, video in enumerate(data.get("videos", [])):
-            item = videos_by_id.setdefault(str(video.get("id")), {"video": video, "queryScore": 0})
-            item["queryScore"] += max(0, 3 - query_index) + max(0, 5 - rank) / 10
+        raise ValueError("Enter a search query.")
+    try:
+        desired = float(brief.get("desiredDurationSec") or 0)
+    except (TypeError, ValueError):
+        desired = 0.0
+    try:
+        min_duration = float(brief.get("minDurationSec") or 0)
+    except (TypeError, ValueError):
+        min_duration = 0.0
+    if min_duration <= 0:
+        min_duration = max(
+            PEXELS_MIN_DURATION_SEC,
+            min(desired, 8.0) if desired else PEXELS_MIN_DURATION_SEC,
+        )
+    try:
+        max_duration = float(brief.get("maxDurationSec") or 0)
+    except (TypeError, ValueError):
+        max_duration = 0.0
+    size = str(brief.get("size") or "large").strip().lower()
+    if size not in PEXELS_SIZE_OPTIONS:
+        size = "large"
+    page_n = max(1, int(page or 1))
+    per_page = max(1, min(PEXELS_MAX_PAGE_SIZE, int(limit or PEXELS_PAGE_SIZE)))
+    query = queries[0]
+    params = {
+        "query": query,
+        "orientation": "landscape",
+        "size": size,
+        "per_page": per_page,
+        "page": page_n,
+        "min_duration": int(min_duration),
+    }
+    if max_duration > 0:
+        params["max_duration"] = int(max_duration)
+    url = "https://api.pexels.com/v1/videos/search?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(url, headers={"Authorization": key, "User-Agent": "VCG-AutoCaption/1.0"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    try:
+        total_results = int(data.get("total_results") or 0)
+    except (TypeError, ValueError):
+        total_results = 0
+    raw_videos = [item for item in (data.get("videos") or []) if isinstance(item, dict) and item.get("id") is not None]
     candidates = []
-    desired = float(brief.get("desiredDurationSec") or 0)
-    for item in videos_by_id.values():
-        video = item["video"]
-        files = [item for item in video.get("video_files", []) if item.get("link") and item.get("width") and item.get("height")]
-        files.sort(key=lambda item: (item.get("width", 0) < 1280, abs(item.get("width", 0) - 1920)))
-        if not files:
+    for video in raw_videos:
+        files = _pexels_mp4_files(video)
+        render = _pick_pexels_render_file(files)
+        if render is None:
             continue
-        best = files[0]
+        preview = _pick_pexels_preview_file(files, render)
         duration = float(video.get("duration") or 0)
+        if duration < min_duration:
+            continue
+        if max_duration > 0 and duration > max_duration:
+            continue
+        width = int(render.get("width") or 0)
+        height = int(render.get("height") or 0)
         candidates.append({
-            "id": str(video["id"]), "provider": "pexels", "durationSec": duration,
-            "width": int(video.get("width") or best.get("width") or 0), "height": int(video.get("height") or best.get("height") or 0),
-            "previewUrl": video.get("image"), "downloadUrl": best["link"], "assetPage": video.get("url"),
+            "id": str(video["id"]),
+            "provider": "pexels",
+            "durationSec": duration,
+            "width": width,
+            "height": height,
+            "previewUrl": video.get("image"),
+            "previewPlayUrl": preview.get("link"),
+            "downloadUrl": render["link"],
+            "assetPage": video.get("url"),
             "creator": (video.get("user") or {}).get("name", "Pexels creator"),
             "creatorUrl": (video.get("user") or {}).get("url"),
-            "score": round(item["queryScore"] + (2 if duration >= desired else 0) + (2 if best.get("width", 0) >= 1280 else 0) - abs(duration - desired) / 30, 3),
+            "license": PEXELS_LICENSE_NAME,
+            "licensePage": PEXELS_LICENSE_URL,
         })
-    candidates.sort(key=lambda item: -item["score"])
-    return candidates[: max(3, min(5, limit))]
+    if total_results > 0:
+        has_next = page_n * per_page < total_results
+    else:
+        has_next = len(raw_videos) >= per_page
+    return {
+        "query": query,
+        "page": page_n,
+        "perPage": per_page,
+        "totalResults": total_results,
+        "hasPrev": page_n > 1,
+        "hasNext": has_next,
+        "candidates": candidates,
+    }
 
 
 def select_pexels_candidate(plan_path: Path, suggestion_id: str, candidate: dict, *, start_sec: float, end_sec: float) -> tuple[dict, dict]:
     if candidate.get("provider") != "pexels" or not str(candidate.get("id") or "").isdigit():
         raise ValueError("Invalid Pexels candidate.")
-    download_url = urllib.parse.urlparse(str(candidate.get("downloadUrl") or ""))
-    if download_url.scheme != "https" or not (download_url.hostname or "").lower().endswith("pexels.com"):
+    if not trusted_pexels_media_url(str(candidate.get("downloadUrl") or "")):
         raise ValueError("Pexels download URL is not trusted.")
     root = find_visual_root(plan_path)
     stock_root = root / "assets" / "stock"
@@ -1894,9 +2050,7 @@ def select_pexels_candidate(plan_path: Path, suggestion_id: str, candidate: dict
     license_root.mkdir(parents=True, exist_ok=True)
     destination = video_root / f"pexels-{candidate['id']}.mp4"
     if not destination.is_file():
-        request = urllib.request.Request(candidate["downloadUrl"], headers={"User-Agent": "VCG-AutoCaption/1.0"})
-        with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
-            shutil.copyfileobj(response, output)
+        download_trusted_pexels_file(str(candidate["downloadUrl"]), destination)
     checksum = sha256_file(destination)
     now = datetime.now(timezone.utc).isoformat()
     evidence = {
