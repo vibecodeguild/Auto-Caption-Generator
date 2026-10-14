@@ -66,6 +66,21 @@ def test_punchline_and_kinetic_slots() -> None:
     assert k["side"] == "left"
 
 
+def test_broll_overlay_assets_pass_through() -> None:
+    spec = placement_interface_summary("broll-overlay")
+    assert spec["fixedLineSlots"] == []
+    assert spec["assetKeys"] == ["videoAssetId"]
+    params = lines_to_engine_parameters(
+        "broll-overlay",
+        [],
+        assets={"videoAssetId": "city-night"},
+        meta={"clipStartSec": 2.5, "fit": "contain"},
+    )
+    assert params["videoAssetId"] == "city-night"
+    assert params["clipStartSec"] == 2.5
+    assert params["fit"] == "contain"
+
+
 def test_source_punch_zoom_has_no_lines() -> None:
     spec = placement_interface_summary("source-punch-zoom")
     assert spec["fixedLineSlots"] == []

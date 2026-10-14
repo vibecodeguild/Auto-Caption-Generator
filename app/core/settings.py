@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,6 +97,92 @@ def resource_root() -> Path:
 
 def project_root() -> Path:
     return resource_root()
+
+
+def env_file_paths() -> tuple[Path, Path]:
+    """Repo-root dotenv files. ``.env.local`` overrides ``.env`` (Next.js convention)."""
+
+    root = project_root()
+    return root / ".env", root / ".env.local"
+
+
+def _parse_dotenv(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    values: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.lower().startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def read_dotenv_key(name: str) -> tuple[str, str]:
+    """Return ``(value, source)`` for one key. Empty value means missing.
+
+    Precedence: process env, ``.env.local``, ``.env``.
+    """
+
+    existing = os.environ.get(name)
+    if existing is not None and str(existing).strip():
+        return str(existing).strip(), "environment"
+    env_path, local_path = env_file_paths()
+    local = _parse_dotenv(local_path)
+    if str(local.get(name) or "").strip():
+        return str(local[name]).strip(), "env-local"
+    dotenv = _parse_dotenv(env_path)
+    if str(dotenv.get(name) or "").strip():
+        return str(dotenv[name]).strip(), "env"
+    return "", "missing"
+
+
+def upsert_dotenv_local(name: str, value: str) -> Path:
+    """Create or update ``KEY=value`` in repo-root ``.env.local`` without clobbering other keys."""
+
+    key = str(name or "").strip()
+    if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+        raise ValueError("Invalid environment variable name.")
+    raw = str(value)
+    env_path, local_path = env_file_paths()
+    del env_path
+    lines: list[str] = []
+    if local_path.is_file():
+        lines = local_path.read_text(encoding="utf-8").splitlines()
+    found = False
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        compare = stripped[7:].strip() if stripped.lower().startswith("export ") else stripped
+        if compare and not compare.startswith("#") and "=" in compare:
+            existing_key = compare.split("=", 1)[0].strip()
+            if existing_key == key:
+                out.append(f"{key}={raw}")
+                found = True
+                continue
+        out.append(line)
+    if not found:
+        if out and out[-1].strip():
+            out.append("")
+        out.append(f"{key}={raw}")
+    local_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    os.environ[key] = raw
+    return local_path
 
 
 def runtime_root() -> Path:

@@ -15,17 +15,42 @@ import {
   type SetStateAction,
 } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ChevronUp, Loader2, Lock, LockOpen, Pause, Play, RefreshCw, SkipBack } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Film,
+  Loader2,
+  Lock,
+  LockOpen,
+  Pause,
+  Play,
+  Plus,
+  RefreshCw,
+  SkipBack,
+  Trash2,
+  Volume2,
+  VolumeX,
+} from "lucide-react";
+import { CutFrameCard } from "./cut-frame-card";
 import {
   assignmentPosterUrl,
   buildPlacementPreview,
   cancelPlacementFinal,
   getActivePlacementFinalJob,
   getPlacementFinalJob,
+  getPlacementPexelsSettings,
   getVisualPackageStatus,
   importPlacementImageDialog,
+  importPlacementMediaDialog,
+  listPlacementLibrary,
+  placementLibraryImageUrl,
+  placementLibraryVideoUrl,
+  savePlacementPexelsKey,
+  searchPlacementPexels,
+  selectPlacementPexels,
   placementPreviewCompositionUrl,
   placementPreviewSourceUrl,
+  programARollVideoUrl,
   runAssignment,
   runMasterbeater,
   runPlacement,
@@ -33,6 +58,7 @@ import {
   saveAssignmentOverride,
   saveMasterbeaterBeats,
   savePlacementBeat,
+  saveProgramInserts,
   saveScenelayerOverride,
   startPlacementFinal,
   visualPackageSourceVideoUrl,
@@ -47,7 +73,12 @@ import {
   type PlacementFinalJob,
   type PlacementLine,
   type PlacementPreview,
+  type PlacementLibraryClip,
   type PlacementStatus,
+  type ProgramInsert,
+  type ProgramLegalSlot,
+  type ProgramStatus,
+  type StockCandidate,
   type ScenelayerPick,
   type ScenelayerStatus,
   type VisualPackageTranscriptWord,
@@ -990,10 +1021,16 @@ export default function VisualPackageWorkspace({
   const [playheadFrame, setPlayheadFrame] = useState(0);
   /** Display-only mirror of the craft panel's draft lines so reveal ticks track live edits. */
   const [draftPlacementLines, setDraftPlacementLines] = useState<PlacementLine[] | null>(null);
+  /** Live Starts draft so the progress rail can mark graphic dock without waiting for save. */
+  const [draftPlacementStartFrame, setDraftPlacementStartFrame] = useState<number | null>(null);
   /** Live Ends draft so the progress rail can mark graphic undock without waiting for autosave. */
   const [draftPlacementEndFrame, setDraftPlacementEndFrame] = useState<number | null>(null);
   /** Live motion draft (e.g. punch-zoom zoomIn/Out frames) for progress ticks. */
   const [draftPlacementMotion, setDraftPlacementMotion] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
+  const [draftPlacementAssets, setDraftPlacementAssets] = useState<Record<
     string,
     unknown
   > | null>(null);
@@ -1005,13 +1042,17 @@ export default function VisualPackageWorkspace({
   // Drop live draft mirrors when leaving a beat so the rail never ticks with stale Ends.
   useEffect(() => {
     setDraftPlacementLines(null);
+    setDraftPlacementStartFrame(null);
     setDraftPlacementEndFrame(null);
     setDraftPlacementMotion(null);
+    setDraftPlacementAssets(null);
   }, [selectedId]);
   /** App audio is buffered enough to play the whole beat without hitting the cliff. */
   const [previewAudioReady, setPreviewAudioReady] = useState(false);
   /** Stage 3 craft aid: 10×10 tenths grid over the live preview (not baked into renders). */
   const [placementGridOn, setPlacementGridOn] = useState(false);
+  const [overlayDragOn, setOverlayDragOn] = useState(true);
+  const [overlayHostEl, setOverlayHostEl] = useState<HTMLDivElement | null>(null);
   /** Stall watchdog bookkeeping — last observed frame and when it last changed. */
   const stallRef = useRef({ frame: -1, changedAt: 0 });
   /** Drag-select anchor only — does not commit selection until the pointer moves or click. */
@@ -1042,7 +1083,9 @@ export default function VisualPackageWorkspace({
       : [...OBS_LAYOUT_IDS];
   const stage2 = activeStage === 2;
   const stage3 = activeStage === 3;
+  const stage4 = activeStage === 4;
   const placement: PlacementStatus | undefined = status?.placement;
+  const program: ProgramStatus | undefined = status?.program;
   const placementByBeat = placement?.byBeatId ?? {};
 
   const eligibleForBeat = useCallback(
@@ -1600,6 +1643,11 @@ export default function VisualPackageWorkspace({
 
   const stage3LivePreview =
     stage3 &&
+    !(
+      overlayDragOn &&
+      selectedId &&
+      placementByBeat[selectedId]?.engineId === "image-overlay"
+    ) &&
     Boolean(placementPreview?.available && placementPreview.cacheKey) &&
     runtimeScriptReady;
 
@@ -1612,13 +1660,13 @@ export default function VisualPackageWorkspace({
 
   /**
    * Stage 3 progress rail: end caps are always the *beat* span.
-   * Yellow ticks = line reveal frames + graphic Ends (when trimmed before beat end).
+   * Yellow ticks = line reveal frames + graphic Starts/Ends (when trimmed inside the beat).
    */
   const beatProgress = useMemo(() => {
     if (!stage3 || !selected) return null;
     const pb = placementByBeat[selected.id];
     const startFrame =
-      pb?.startFrame ?? placementPreview?.startFrame ?? selected.startFrame;
+      selected.startFrame ?? pb?.startFrame ?? placementPreview?.startFrame;
     // Right end cap = natural beat end (not the trimmed graphic end).
     const beatEndFrameExclusive =
       selected.endFrameExclusive ??
@@ -1633,10 +1681,15 @@ export default function VisualPackageWorkspace({
       return null;
     }
     const lines = draftPlacementLines ?? pb?.lines ?? [];
+    const graphicStart =
+      draftPlacementStartFrame ??
+      pb?.startFrame ??
+      placementPreview?.graphicStartFrame ??
+      null;
     const graphicEnd =
       draftPlacementEndFrame ??
       pb?.endFrameExclusive ??
-      placementPreview?.endFrameExclusive ??
+      placementPreview?.graphicEndFrameExclusive ??
       null;
     const motionBag = draftPlacementMotion ?? pb?.motion ?? {};
     const motionTicks = (["zoomInFrame", "zoomOutFrame"] as const)
@@ -1672,11 +1725,46 @@ export default function VisualPackageWorkspace({
           tick.frame >= startFrame &&
           tick.frame < beatEndFrameExclusive,
       );
+    const isImageOverlay = pb?.engineId === "image-overlay";
+    const assetsBag =
+      draftPlacementAssets && Array.isArray(draftPlacementAssets.layers)
+        ? draftPlacementAssets
+        : (pb?.assets ?? {});
+    const overlayLayers = Array.isArray(assetsBag.layers)
+      ? (assetsBag.layers as Record<string, unknown>[])
+      : [];
+    const overlayTicks = isImageOverlay
+      ? overlayLayers.flatMap((layer, index) => {
+          const timing = overlayLayerTiming(layer, startFrame, beatEndFrameExclusive);
+          return [
+            {
+              frame: timing.startFrame,
+              edge: "start" as const,
+              label: `Image ${index + 1} Starts`,
+            },
+            {
+              frame: timing.endFrameExclusive,
+              edge: "end" as const,
+              label: `Image ${index + 1} Ends`,
+            },
+          ];
+        })
+      : [];
     return {
       startFrame,
       endFrameExclusive: beatEndFrameExclusive,
       revealTicks,
+      overlayTicks,
+      graphicStartFrame:
+        !isImageOverlay &&
+        graphicStart != null &&
+        Number.isFinite(graphicStart) &&
+        graphicStart > startFrame &&
+        graphicStart < beatEndFrameExclusive
+          ? graphicStart
+          : null,
       graphicEndFrame:
+        !isImageOverlay &&
         graphicEnd != null &&
         Number.isFinite(graphicEnd) &&
         graphicEnd > startFrame &&
@@ -1691,8 +1779,10 @@ export default function VisualPackageWorkspace({
     placementByBeat,
     placementPreview,
     draftPlacementLines,
+    draftPlacementStartFrame,
     draftPlacementEndFrame,
     draftPlacementMotion,
+    draftPlacementAssets,
   ]);
 
   /**
@@ -1907,6 +1997,7 @@ export default function VisualPackageWorkspace({
         meta?: Record<string, unknown>;
         assets?: Record<string, unknown>;
         motion?: Record<string, unknown>;
+        startFrame?: number;
         endFrameExclusive?: number;
         force?: boolean;
       },
@@ -1928,6 +2019,7 @@ export default function VisualPackageWorkspace({
           meta: draft?.meta,
           assets: draft?.assets,
           motion: draft?.motion,
+          startFrame: draft?.startFrame,
           endFrameExclusive: draft?.endFrameExclusive,
           force: draft?.force,
         });
@@ -2011,6 +2103,8 @@ export default function VisualPackageWorkspace({
   }, []);
 
   const selectedPlacement = selectedId ? placementByBeat[selectedId] : undefined;
+  const overlayPlaceMode =
+    stage3 && overlayDragOn && selectedPlacement?.engineId === "image-overlay";
 
   // Build live Tier B when Stage 3 opens a beat — not on every craft keystroke.
   // Craft edits stay local until "Save & update preview"; that path rebuilds once.
@@ -2043,6 +2137,7 @@ export default function VisualPackageWorkspace({
       meta: (selectedPlacement.meta || {}) as Record<string, unknown>,
       assets: (selectedPlacement.assets || {}) as Record<string, unknown>,
       motion: (selectedPlacement.motion || {}) as Record<string, unknown>,
+      startFrame: selectedPlacement.startFrame,
       endFrameExclusive: selectedPlacement.endFrameExclusive,
       force: false,
     });
@@ -2429,7 +2524,7 @@ export default function VisualPackageWorkspace({
     setBusy(true);
     setFinalCanceling(false);
     setFinalModalOpen(true);
-    setMessage("Starting full-episode Final (graphics + locked-cut audio)…");
+    setMessage("Starting program Final (A-roll + inserts)…");
     try {
       const started = await startPlacementFinal({ quality: "standard", force: true });
       const job = started.job;
@@ -2552,6 +2647,7 @@ export default function VisualPackageWorkspace({
       meta?: Record<string, unknown>;
       assets?: Record<string, unknown>;
       motion?: Record<string, unknown>;
+      startFrame?: number;
       endFrameExclusive?: number;
       locked?: boolean;
       detail?: string;
@@ -2583,6 +2679,7 @@ export default function VisualPackageWorkspace({
               meta: patch.meta,
               assets: patch.assets,
               motion: patch.motion,
+              startFrame: patch.startFrame,
               endFrameExclusive: patch.endFrameExclusive,
               force: true,
             });
@@ -2709,6 +2806,24 @@ export default function VisualPackageWorkspace({
           {busy && stage3 ? <Loader2 size={15} className="spin" /> : <Play size={15} />}
           Place
         </button>
+        <span className="workflow-status">
+          {!hasVideoProject
+            ? "Open a private project"
+            : placement?.originalExists
+              ? `${placement.lockedCount ?? 0}/${placement.placementCount ?? 0} locked`
+              : "Place → edit lines → lock"}
+        </span>
+      </PackageWorkflowStage>
+      <PackageWorkflowStage stage={4} activeStage={activeStage} setActiveStage={setActiveStage}>
+        <span className="workflow-stage-label">Inserts</span>
+        <button
+          className="workflow-action"
+          type="button"
+          onClick={() => void refresh()}
+          disabled={busy || !hasVideoProject}
+        >
+          <RefreshCw size={15} /> Refresh
+        </button>
         <button
           className="workflow-action emphasized"
           type="button"
@@ -2717,8 +2832,8 @@ export default function VisualPackageWorkspace({
             finalRunning
               ? `Final render in progress · ${Math.round(placementFinalJob?.value ?? 0)}%`
               : placement?.finalRenderReady
-                ? "Full episode render: all locked graphics on the locked cut (audio stream-copied)"
-                : "Lock every assigned beat before final render"
+                ? "Encode A-roll (if needed), concat inserts, publish exports/final-video.mp4"
+                : "Lock every assigned beat before Final"
           }
           onClick={() => void onFinal()}
         >
@@ -2733,13 +2848,11 @@ export default function VisualPackageWorkspace({
         <span className="workflow-status">
           {!hasVideoProject
             ? "Open a private project"
-            : finalRunning
-              ? `Final ${Math.round(placementFinalJob?.value ?? 0)}%`
-              : placementFinalJob?.status === "complete"
-                ? "Final ready"
-                : placement?.originalExists
-                  ? `${placement.lockedCount ?? 0}/${placement.placementCount ?? 0} locked`
-                  : "Place → edit lines → lock"}
+            : !placement?.finalRenderReady
+              ? "Lock graphics first"
+              : finalRunning
+                ? `Final ${Math.round(placementFinalJob?.value ?? 0)}%`
+                : `${program?.insertCount ?? 0} insert${program?.insertCount === 1 ? "" : "s"}`}
         </span>
       </PackageWorkflowStage>
     </nav>
@@ -2776,7 +2889,7 @@ export default function VisualPackageWorkspace({
             if (next) selectBeat(next, false);
           }}
           aria-label="Jump to beat"
-          title="Jump to a specific beat"
+          title="Jump to a beat. Each row starts with Locked or Open."
         >
           {!selectedId || !reviewBeats.some((b) => b.id === selectedId) ? (
             <option value="" disabled>
@@ -2800,7 +2913,9 @@ export default function VisualPackageWorkspace({
               .trim();
             const snippet =
               words.length > 28 ? `${words.slice(0, 28).trimEnd()}…` : words;
+            const lockLabel = pb?.locked ? "Locked" : "Open";
             const parts = [
+              lockLabel,
               `${index + 1}/${reviewBeats.length}`,
               typeLabel,
               engine || null,
@@ -2904,6 +3019,7 @@ export default function VisualPackageWorkspace({
                 meta: (row.meta || {}) as Record<string, unknown>,
                 assets: (row.assets || {}) as Record<string, unknown>,
                 motion: (draftPlacementMotion || row.motion || {}) as Record<string, unknown>,
+                startFrame: draftPlacementStartFrame ?? row.startFrame,
                 endFrameExclusive:
                   draftPlacementEndFrame ?? row.endFrameExclusive,
                 locked: true,
@@ -2960,6 +3076,8 @@ export default function VisualPackageWorkspace({
             endFrameExclusive={beatProgress.endFrameExclusive}
             playheadFrame={playheadFrame}
             revealTicks={beatProgress.revealTicks}
+            overlayTicks={beatProgress.overlayTicks}
+            graphicStartFrame={beatProgress.graphicStartFrame}
             graphicEndFrame={beatProgress.graphicEndFrame}
             motionFrames={beatProgress.motionFrames}
           />
@@ -3001,13 +3119,27 @@ export default function VisualPackageWorkspace({
       {railHost ? createPortal(rail, railHost) : null}
       {!railHost ? <div className="visual-package-rail-fallback">{rail}</div> : null}
 
-      {activeStage > 3 ? (
+      {activeStage > 4 ? (
         <section className="visual-package-stage-body">
           <div className="visual-package-empty-state">
             <h3>Stage {activeStage} not built yet</h3>
-            <p>Later stage after placement.</p>
+            <p>Later stage after inserts.</p>
           </div>
         </section>
+      ) : stage4 ? (
+        <Stage4InsertsStudio
+          program={program}
+          ready={Boolean(placement?.finalRenderReady)}
+          unlockedCount={placement?.unlockedCount ?? 0}
+          fps={fps}
+          busy={busy}
+          cutVideoUrl={videoUrl}
+          onMessage={setMessage}
+          onBusy={setBusy}
+          onProgram={(next) =>
+            setStatus((prev) => (prev ? { ...prev, program: next } : prev))
+          }
+        />
       ) : !hasBeats && !hasTranscript ? (
         <section className="visual-package-stage-body">
           <div className="visual-package-empty-state">
@@ -3062,15 +3194,22 @@ export default function VisualPackageWorkspace({
                   meta: extras?.meta,
                   assets: extras?.assets,
                   motion: extras?.motion,
+                  startFrame: extras?.startFrame,
                   endFrameExclusive: extras?.endFrameExclusive,
                 });
               }}
               onLinesChange={setDraftPlacementLines}
+              onStartFrameChange={setDraftPlacementStartFrame}
               onEndFrameChange={setDraftPlacementEndFrame}
               onMotionChange={setDraftPlacementMotion}
+              onAssetsChange={setDraftPlacementAssets}
               transportSlot={stage3TransportCluster}
               beatJumpSlot={stage3BeatJump}
               speechHostEl={placementSpeechHostEl}
+              overlayHostEl={overlayHostEl}
+              overlayDragOn={overlayDragOn}
+              playheadFrame={playheadFrame}
+              playing={playing}
             />
           ) : null}
 
@@ -3081,7 +3220,22 @@ export default function VisualPackageWorkspace({
                 stage3 ? "is-placement-live" : "",
               ].join(" ")}
             >
-              {stage3 && stage3LivePreview && placementPreview?.cacheKey ? (
+              {overlayPlaceMode && videoUrl ? (
+                <video
+                  ref={videoRef}
+                  className="visual-package-video"
+                  src={videoUrl}
+                  controls={false}
+                  playsInline
+                  preload="metadata"
+                  onTimeUpdate={onTimeUpdate}
+                  onPlay={() => setPlaying(true)}
+                  onPause={() => setPlaying(false)}
+                  onLoadedMetadata={() => {
+                    if (selected) seekToBeat(selected, false);
+                  }}
+                />
+              ) : stage3 && stage3LivePreview && placementPreview?.cacheKey ? (
                 createElement("hyperframes-player", {
                   key: placementPreview.cacheKey,
                   ref: (element: HyperFramesPlayerElement | null) => {
@@ -3153,12 +3307,13 @@ export default function VisualPackageWorkspace({
                   onError={() => setPreviewAudioReady(true)}
                 />
               ) : null}
-              {stage3 && placementPreviewBusy ? (
+              {stage3 && placementPreviewBusy && !overlayPlaceMode ? (
                 <div className="visual-package-preview-busy" aria-live="polite">
                   <Loader2 size={16} className="spin" /> Building live graphic…
                 </div>
               ) : null}
               {stage3 &&
+              !overlayPlaceMode &&
               !placementPreviewBusy &&
               !stage3LivePreview &&
               (placementPreviewError || selectedPlacement) ? (
@@ -3176,7 +3331,10 @@ export default function VisualPackageWorkspace({
                       : "Preparing live graphic…"}
                 </div>
               ) : null}
-              {stage3 && placementPreview?.available && !placementPreviewBusy ? (
+              {stage3 &&
+              !overlayPlaceMode &&
+              placementPreview?.available &&
+              !placementPreviewBusy ? (
                 <div
                   className="visual-package-preview-badge"
                   title="Live HyperFrames composition (Tier B)"
@@ -3187,20 +3345,44 @@ export default function VisualPackageWorkspace({
               ) : null}
               {stage3 ? (
                 <>
-                  <button
-                    type="button"
-                    className={[
-                      "visual-package-placement-grid-toggle",
-                      placementGridOn ? "is-on" : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
-                    aria-pressed={placementGridOn}
-                    title="Show a 10×10 tenths grid over the preview (craft aid only)"
-                    onClick={() => setPlacementGridOn((on) => !on)}
-                  >
-                    Grid
-                  </button>
+                  <div className="visual-package-placement-craft-toggles">
+                    {selectedPlacement?.engineId === "image-overlay" ? (
+                      <button
+                        type="button"
+                        className={[
+                          "visual-package-placement-grid-toggle",
+                          overlayDragOn ? "is-on" : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                        aria-pressed={overlayDragOn}
+                        title="Show stills on the talking-head video so you can drag and resize them (craft aid; Save & update preview to bake into HyperFrames)"
+                        onClick={() => setOverlayDragOn((on) => !on)}
+                      >
+                        Place overlay
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className={[
+                        "visual-package-placement-grid-toggle",
+                        placementGridOn ? "is-on" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      aria-pressed={placementGridOn}
+                      title="Show a 10×10 tenths grid over the preview (craft aid only)"
+                      onClick={() => setPlacementGridOn((on) => !on)}
+                    >
+                      Grid
+                    </button>
+                  </div>
+                  {overlayPlaceMode ? (
+                    <div
+                      className="visual-package-overlay-drag-host"
+                      ref={setOverlayHostEl}
+                    />
+                  ) : null}
                   {placementGridOn ? (
                     <div
                       className="visual-package-placement-grid"
@@ -4007,6 +4189,1149 @@ export default function VisualPackageWorkspace({
   );
 }
 
+function isLegalInsertT(tFrame: number, slots: ProgramLegalSlot[]): boolean {
+  return slots.some((slot) => tFrame >= slot.startFrame && tFrame <= slot.endFrameExclusive);
+}
+
+function nextFreeLegalT(
+  from: number,
+  slots: ProgramLegalSlot[],
+  occupied: Set<number>,
+  cutEnd: number,
+): number | null {
+  const start = Math.max(0, Math.min(cutEnd, Math.round(from)));
+  for (let t = start; t <= cutEnd; t++) {
+    if (isLegalInsertT(t, slots) && !occupied.has(t)) return t;
+  }
+  for (let t = start - 1; t >= 0; t--) {
+    if (isLegalInsertT(t, slots) && !occupied.has(t)) return t;
+  }
+  return null;
+}
+
+function nudgeLegalInsertT(
+  current: number,
+  delta: number,
+  slots: ProgramLegalSlot[],
+  cutEnd: number,
+): number {
+  if (!delta || !slots.length) return current;
+  const dir = delta > 0 ? 1 : -1;
+  let remaining = Math.abs(delta);
+  let t = current;
+  while (remaining > 0) {
+    let next = t + dir;
+    while (next >= 0 && next <= cutEnd && !isLegalInsertT(next, slots)) next += dir;
+    if (next < 0 || next > cutEnd || !isLegalInsertT(next, slots)) return t;
+    t = next;
+    remaining -= 1;
+  }
+  return t;
+}
+
+function blockedBeatSpans(slots: ProgramLegalSlot[], cutEnd: number): ProgramLegalSlot[] {
+  const blocked: ProgramLegalSlot[] = [];
+  const ordered = [...slots].sort(
+    (a, b) => a.startFrame - b.startFrame || a.endFrameExclusive - b.endFrameExclusive,
+  );
+  let cursor = 0;
+  for (const slot of ordered) {
+    if (cursor < slot.startFrame) {
+      blocked.push({ startFrame: cursor, endFrameExclusive: slot.startFrame });
+    }
+    const afterSlot =
+      slot.startFrame === slot.endFrameExclusive ? slot.startFrame + 1 : slot.endFrameExclusive;
+    cursor = Math.max(cursor, afterSlot);
+  }
+  if (cursor < cutEnd) {
+    blocked.push({ startFrame: cursor, endFrameExclusive: cutEnd });
+  }
+  return blocked.filter((span) => span.endFrameExclusive > span.startFrame);
+}
+
+function Stage4InsertsStudio({
+  program,
+  ready,
+  unlockedCount,
+  fps,
+  busy,
+  cutVideoUrl,
+  onMessage,
+  onBusy,
+  onProgram,
+}: {
+  program?: ProgramStatus;
+  ready: boolean;
+  unlockedCount: number;
+  fps: number;
+  busy: boolean;
+  cutVideoUrl: string | null;
+  onMessage: (text: string) => void;
+  onBusy: (value: boolean) => void;
+  onProgram: (next: ProgramStatus) => void;
+}) {
+  const inserts = program?.inserts ?? [];
+  const slots = program?.legalSlots ?? [];
+  const [selectedT, setSelectedT] = useState<number>(slots[0]?.startFrame ?? 0);
+  const [selectedInsertId, setSelectedInsertId] = useState<string | null>(inserts[0]?.id ?? null);
+  const [clipStartDraft, setClipStartDraft] = useState("0");
+  const [durationDraft, setDurationDraft] = useState("");
+  const [nameDraft, setNameDraft] = useState("");
+  const [library, setLibrary] = useState<PlacementLibraryClip[]>([]);
+  const [pexelsOpen, setPexelsOpen] = useState(false);
+  const [pexelsQuery, setPexelsQuery] = useState("");
+  const [pexelsCandidates, setPexelsCandidates] = useState<StockCandidate[]>([]);
+  const [pexelsConfigured, setPexelsConfigured] = useState<boolean | null>(null);
+  const [pexelsKeyDraft, setPexelsKeyDraft] = useState("");
+  const [pexelsBusy, setPexelsBusy] = useState(false);
+  const [pexelsError, setPexelsError] = useState<string | null>(null);
+  const [pexelsPreviewId, setPexelsPreviewId] = useState<string | null>(null);
+  const [pexelsSelectingId, setPexelsSelectingId] = useState<string | null>(null);
+  const [pexelsPage, setPexelsPage] = useState(1);
+  const [pexelsTotal, setPexelsTotal] = useState(0);
+  const [pexelsHasPrev, setPexelsHasPrev] = useState(false);
+  const [pexelsHasNext, setPexelsHasNext] = useState(false);
+  const cutVideoRef = useRef<HTMLVideoElement | null>(null);
+  const clipVideoRef = useRef<HTMLVideoElement | null>(null);
+  const timelineViewportRef = useRef<HTMLDivElement | null>(null);
+  const [programLayer, setProgramLayer] = useState<"cut" | "insert">("cut");
+  const [programPlaying, setProgramPlaying] = useState(false);
+  const programPlayRef = useRef<{
+    pieces: { kind: "aroll" | "insert"; localStart: number; localEnd: number }[];
+    index: number;
+    raf: number | null;
+    advancing: boolean;
+  } | null>(null);
+  const [timelineZoom, setTimelineZoom] = useState(1);
+  const [playheadFrame, setPlayheadFrame] = useState(0);
+  const playheadFrameRef = useRef(0);
+  const [timelineScrubbing, setTimelineScrubbing] = useState(false);
+  const timelineScrubbingRef = useRef(false);
+  const cutEnd = Math.max(1, program?.cutEndFrameExclusive ?? 1);
+  const blocked = useMemo(() => blockedBeatSpans(slots, cutEnd), [slots, cutEnd]);
+
+  useEffect(() => {
+    if (!slots.length) return;
+    const legal = slots.some(
+      (slot) => selectedT >= slot.startFrame && selectedT <= slot.endFrameExclusive,
+    );
+    if (!legal) setSelectedT(slots[0].startFrame);
+  }, [slots, selectedT]);
+
+  useEffect(() => {
+    const current = inserts.find((row) => row.id === selectedInsertId);
+    if (!current && inserts[0]) setSelectedInsertId(inserts[0].id);
+    if (current) {
+      setClipStartDraft(String(current.clipStartSec ?? 0));
+      setDurationDraft(
+        current.durationSec != null ? String(current.durationSec) : "",
+      );
+      setNameDraft(current.displayName || "");
+      setSelectedT(current.tFrame);
+      setPlayheadFrame(current.tFrame);
+    }
+  }, [inserts, selectedInsertId]);
+
+  useEffect(() => {
+    void listPlacementLibrary()
+      .then((data) => setLibrary(data.clips || []))
+      .catch(() => setLibrary([]));
+  }, [inserts.length]);
+
+  useEffect(() => {
+    if (!pexelsOpen) return;
+    void getPlacementPexelsSettings()
+      .then((settings) => setPexelsConfigured(settings.configured))
+      .catch(() => setPexelsConfigured(false));
+  }, [pexelsOpen]);
+
+  const runStage4PexelsSearch = async (page = 1) => {
+    const q = pexelsQuery.trim();
+    if (!q) {
+      setPexelsError("Enter a search query.");
+      return;
+    }
+    setPexelsBusy(true);
+    setPexelsError(null);
+    setPexelsPreviewId(null);
+    try {
+      const data = await searchPlacementPexels(q, { page });
+      setPexelsConfigured(Boolean(data.configured));
+      setPexelsCandidates(data.candidates || []);
+      setPexelsPage(Number(data.page) || page);
+      setPexelsTotal(Number(data.totalResults) || 0);
+      setPexelsHasPrev(Boolean(data.hasPrev));
+      setPexelsHasNext(Boolean(data.hasNext));
+      if (!data.configured) {
+        setPexelsError("Add PEXELS_API_KEY to .env.local at the repo root.");
+      } else if (!(data.candidates || []).length) {
+        setPexelsError(
+          data.hasNext
+            ? "No landscape 16:9 HD clips on this page. Try Next."
+            : "No landscape 16:9 HD clips matched. Try a simpler query.",
+        );
+      }
+    } catch (error) {
+      setPexelsCandidates([]);
+      setPexelsHasNext(false);
+      setPexelsError(error instanceof Error ? error.message : "Pexels search failed.");
+    } finally {
+      setPexelsBusy(false);
+    }
+  };
+
+  const persist = async (next: ProgramInsert[]) => {
+    const saved = await saveProgramInserts(next);
+    onProgram(saved);
+    return saved;
+  };
+
+  const addClip = async (assetId: string, displayName: string) => {
+    const occupied = new Set(inserts.map((row) => row.tFrame));
+    const wanted = playheadFrameRef.current;
+    const dropT = nextFreeLegalT(wanted, slots, occupied, cutEnd);
+    if (dropT == null) {
+      onMessage("No free legal T left. Move or remove an insert first.");
+      return;
+    }
+    onBusy(true);
+    try {
+      const before = new Set(inserts.map((row) => row.id));
+      const saved = await persist([
+        ...inserts,
+        {
+          id: "",
+          tFrame: dropT,
+          videoAssetId: assetId,
+          clipStartSec: 0,
+          muted: false,
+          displayName,
+        },
+      ]);
+      const created = (saved.inserts || []).find((row) => !before.has(row.id));
+      if (created?.id) {
+        setSelectedInsertId(created.id);
+        setSelectedT(dropT);
+        setPlayheadFrame(dropT);
+        playheadFrameRef.current = dropT;
+        setProgramLayer("cut");
+      }
+      onMessage(
+        dropT === wanted
+          ? `Inserted ${displayName} at f ${dropT}.`
+          : `Inserted ${displayName} at f ${dropT} (f ${wanted} already has an insert).`,
+      );
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "Could not add insert.");
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  const selected = inserts.find((row) => row.id === selectedInsertId);
+  const clipStartSec = Math.max(0, Number(selected?.clipStartSec) || 0);
+  const clipFullSec = Math.max(0, Number(selected?.clipDurationSec) || 0);
+  const clipUsedSec = Math.max(
+    0,
+    Number(selected?.durationSec) || Math.max(0, clipFullSec - clipStartSec),
+  );
+  const clipStartFrame = Math.round(clipStartSec * fps);
+  const clipFullFrames = Math.max(1, Math.round(clipFullSec * fps));
+  const cutSrc = program?.aRollExists ? programARollVideoUrl() : cutVideoUrl;
+  const clipSrc = selected?.videoAssetId ? placementLibraryVideoUrl(selected.videoAssetId) : null;
+
+  const stopProgramPlay = useCallback(() => {
+    const session = programPlayRef.current;
+    if (session?.raf != null) cancelAnimationFrame(session.raf);
+    programPlayRef.current = null;
+    setProgramPlaying(false);
+    cutVideoRef.current?.pause();
+    clipVideoRef.current?.pause();
+  }, []);
+
+  useEffect(() => () => stopProgramPlay(), [stopProgramPlay]);
+
+  useEffect(() => {
+    if (programPlaying) return;
+    const el = cutVideoRef.current;
+    if (!el) return;
+    const seconds = playheadFrame / Math.max(fps, 1);
+    if (Math.abs(el.currentTime - seconds) > 1 / Math.max(fps, 1)) {
+      el.currentTime = seconds;
+    }
+  }, [playheadFrame, fps, programPlaying, cutSrc]);
+
+  const frameFromPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = (event.clientX - rect.left) / Math.max(1, rect.width);
+    return Math.max(0, Math.min(cutEnd, Math.round(ratio * cutEnd)));
+  };
+
+  const scrollTimelineToFrame = (frame: number) => {
+    const viewport = timelineViewportRef.current;
+    if (!viewport || cutEnd <= 0) return;
+    const target = (frame / cutEnd) * viewport.scrollWidth - viewport.clientWidth / 2;
+    viewport.scrollLeft = Math.max(0, target);
+  };
+
+  const jumpPlayheadToFrame = (frame: number) => {
+    const next = Math.max(0, Math.min(cutEnd, Math.round(frame)));
+    stopProgramPlay();
+    setProgramLayer("cut");
+    playheadFrameRef.current = next;
+    setPlayheadFrame(next);
+    setSelectedT(next);
+    scrollTimelineToFrame(next);
+  };
+
+  const activateInsert = (insertId: string) => {
+    const row = inserts.find((item) => item.id === insertId);
+    if (!row) return;
+    stopProgramPlay();
+    setProgramLayer("cut");
+    setSelectedInsertId(row.id);
+    setSelectedT(row.tFrame);
+    playheadFrameRef.current = row.tFrame;
+    setPlayheadFrame(row.tFrame);
+    scrollTimelineToFrame(row.tFrame);
+  };
+
+  const applyT = async (next: number) => {
+    const clamped = Math.max(0, Math.min(cutEnd, Math.round(next)));
+    if (!isLegalInsertT(clamped, slots)) {
+      onMessage("T must sit in a gap or on a beat boundary.");
+      return;
+    }
+    setSelectedT(clamped);
+    setPlayheadFrame(clamped);
+    playheadFrameRef.current = clamped;
+    if (!selected || selected.tFrame === clamped) return;
+    if (inserts.some((row) => row.id !== selected.id && row.tFrame === clamped)) {
+      onMessage(`f ${clamped} already has an insert.`);
+      return;
+    }
+    onBusy(true);
+    try {
+      await persist(
+        inserts.map((row) => (row.id === selected.id ? { ...row, tFrame: clamped } : row)),
+      );
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "Could not move insert.");
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  const resolveTNudge = (requested: number) => {
+    if (!requested) return 0;
+    const occupied = new Set(
+      inserts.filter((row) => row.id !== selectedInsertId).map((row) => row.tFrame),
+    );
+    const dir = requested > 0 ? 1 : -1;
+    let left = Math.abs(requested);
+    let t = selectedT;
+    while (left > 0) {
+      const next = nudgeLegalInsertT(t, dir, slots, cutEnd);
+      if (next === t) return t - selectedT;
+      t = next;
+      if (!occupied.has(t)) left -= 1;
+    }
+    return t - selectedT;
+  };
+
+  const applyClipIn = async (nextFrame: number) => {
+    if (!selected) return;
+    const maxFrame = Math.max(0, clipFullFrames - 1);
+    const frame = Math.max(0, Math.min(maxFrame, Math.round(nextFrame)));
+    const sec = frame / Math.max(fps, 1);
+    const remaining = Math.max(1 / Math.max(fps, 1), clipFullSec - sec);
+    const used = Math.min(Math.max(clipUsedSec, 1 / Math.max(fps, 1)), remaining);
+    setClipStartDraft(String(sec));
+    setDurationDraft(String(used));
+    if (Math.abs(sec - clipStartSec) < 1 / Math.max(fps * 2, 2)) return;
+    onBusy(true);
+    try {
+      await persist(
+        inserts.map((row) =>
+          row.id === selected.id ? { ...row, clipStartSec: sec, durationSec: used } : row,
+        ),
+      );
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "Could not set clip in-point.");
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  const applyClipLength = async (nextFrames: number) => {
+    if (!selected) return;
+    const maxFrames = Math.max(1, clipFullFrames - clipStartFrame);
+    const frames = Math.max(1, Math.min(maxFrames, Math.round(nextFrames)));
+    const sec = frames / Math.max(fps, 1);
+    setDurationDraft(String(sec));
+    if (Math.abs(sec - clipUsedSec) < 1 / Math.max(fps * 2, 2)) return;
+    onBusy(true);
+    try {
+      await persist(
+        inserts.map((row) => (row.id === selected.id ? { ...row, durationSec: sec } : row)),
+      );
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "Could not set clip length.");
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  const playThroughInsert = async () => {
+    if (!selected?.videoAssetId || !cutSrc || !clipSrc) {
+      onMessage("Select an insert clip first.");
+      return;
+    }
+    stopProgramPlay();
+    const cut = cutVideoRef.current;
+    const clip = clipVideoRef.current;
+    if (!cut || !clip) return;
+
+    const tSec = selected.tFrame / Math.max(fps, 1);
+    const cutEndSec = cutEnd / Math.max(fps, 1);
+    const preroll = 3;
+    const postroll = 3;
+    const used = Math.max(clipUsedSec, 1 / Math.max(fps, 1));
+    const pieces = (
+      [
+        {
+          kind: "aroll" as const,
+          localStart: Math.max(0, tSec - preroll),
+          localEnd: tSec,
+        },
+        {
+          kind: "insert" as const,
+          localStart: clipStartSec,
+          localEnd: clipStartSec + used,
+        },
+        {
+          kind: "aroll" as const,
+          localStart: tSec,
+          localEnd: Math.min(cutEndSec, tSec + postroll),
+        },
+      ] as { kind: "aroll" | "insert"; localStart: number; localEnd: number }[]
+    ).filter((piece) => piece.localEnd - piece.localStart >= 1 / Math.max(fps, 1));
+
+    const seekPlay = (video: HTMLVideoElement, time: number) =>
+      new Promise<void>((resolve, reject) => {
+        const finish = () => {
+          video.play().then(() => resolve()).catch(reject);
+        };
+        if (Math.abs(video.currentTime - time) < 0.04 && video.readyState >= 2) {
+          finish();
+          return;
+        }
+        const onSeeked = () => {
+          video.removeEventListener("seeked", onSeeked);
+          finish();
+        };
+        video.addEventListener("seeked", onSeeked);
+        video.currentTime = time;
+      });
+
+    const show = (kind: "aroll" | "insert") => {
+      setProgramLayer(kind === "insert" ? "insert" : "cut");
+      if (kind === "insert") {
+        cut.pause();
+        clip.muted = Boolean(selected.muted);
+      } else {
+        clip.pause();
+        cut.muted = false;
+      }
+    };
+
+    const startPiece = async (index: number) => {
+      const piece = pieces[index];
+      if (!piece) {
+        stopProgramPlay();
+        setProgramLayer("cut");
+        setPlayheadFrame(selected.tFrame);
+        playheadFrameRef.current = selected.tFrame;
+        return;
+      }
+      const video = piece.kind === "insert" ? clip : cut;
+      show(piece.kind);
+      if (piece.kind === "insert") {
+        setPlayheadFrame(selected.tFrame);
+        playheadFrameRef.current = selected.tFrame;
+      }
+      await seekPlay(video, piece.localStart);
+    };
+
+    programPlayRef.current = { pieces, index: 0, raf: null, advancing: false };
+    setProgramPlaying(true);
+    setProgramLayer("cut");
+    try {
+      if (clip.readyState < 2) {
+        await new Promise<void>((resolve, reject) => {
+          const ok = () => {
+            clip.removeEventListener("loadeddata", ok);
+            clip.removeEventListener("error", fail);
+            resolve();
+          };
+          const fail = () => {
+            clip.removeEventListener("loadeddata", ok);
+            clip.removeEventListener("error", fail);
+            reject(new Error("Insert clip failed to load."));
+          };
+          clip.addEventListener("loadeddata", ok);
+          clip.addEventListener("error", fail);
+        });
+      }
+      await startPiece(0);
+    } catch (error) {
+      stopProgramPlay();
+      onMessage(error instanceof Error ? error.message : "Could not play through the insert.");
+      return;
+    }
+
+    const tick = () => {
+      const session = programPlayRef.current;
+      if (!session) return;
+      const piece = session.pieces[session.index];
+      if (!piece) {
+        stopProgramPlay();
+        return;
+      }
+      const video = piece.kind === "insert" ? clipVideoRef.current : cutVideoRef.current;
+      if (!video) {
+        stopProgramPlay();
+        return;
+      }
+      if (piece.kind === "aroll") {
+        const frame = Math.max(0, Math.min(cutEnd, Math.round(video.currentTime * fps)));
+        playheadFrameRef.current = frame;
+        setPlayheadFrame(frame);
+      }
+      if (session.advancing) {
+        session.raf = requestAnimationFrame(tick);
+        return;
+      }
+      const atEnd =
+        video.ended || video.currentTime >= piece.localEnd - 1 / Math.max(fps, 2);
+      if (atEnd) {
+        session.advancing = true;
+        session.index += 1;
+        void startPiece(session.index)
+          .catch((error) => {
+            stopProgramPlay();
+            onMessage(error instanceof Error ? error.message : "Play-through failed.");
+          })
+          .finally(() => {
+            if (programPlayRef.current) {
+              programPlayRef.current.advancing = false;
+              programPlayRef.current.raf = requestAnimationFrame(tick);
+            }
+          });
+        return;
+      }
+      session.raf = requestAnimationFrame(tick);
+    };
+    programPlayRef.current.raf = requestAnimationFrame(tick);
+  };
+
+  if (!ready) {
+    return (
+      <section className="visual-package-stage-body">
+        <div className="visual-package-empty-state">
+          <h3>Lock graphics before inserts</h3>
+          <p>
+            Stage 4 splits the show after every assigned placement is locked.
+            {unlockedCount ? ` ${unlockedCount} still unlocked.` : ""}
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="visual-package-stage-body visual-package-stage-4">
+      <div className="program-inserts-layout">
+        <div className="program-inserts-main">
+          <div className="program-preview-stack">
+            <div className="program-preview-mode" aria-label="Program preview">
+              <button
+                type="button"
+                className="workflow-action emphasized"
+                disabled={!selected?.videoAssetId || busy}
+                onClick={() => {
+                  if (programPlaying) stopProgramPlay();
+                  else void playThroughInsert();
+                }}
+                title="Play 3s of talking head, the insert, then 3s of talking head"
+              >
+                {programPlaying ? <Pause size={15} /> : <Play size={15} />}
+                {programPlaying ? "Pause" : "Play through insert"}
+              </button>
+              <span className="muted">
+                {programPlaying
+                  ? programLayer === "insert"
+                    ? "Insert playing"
+                    : "Talking head"
+                  : "Plays the join: talking head → clip → talking head"}
+              </span>
+            </div>
+            <div
+              className={[
+                "visual-package-player-frame",
+                "program-join-player",
+                programLayer === "insert" ? "is-insert" : "",
+              ].join(" ")}
+            >
+              {cutSrc ? (
+                <video
+                  ref={cutVideoRef}
+                  className={[
+                    "visual-package-video",
+                    "program-layer-cut",
+                    programLayer === "cut" ? "is-active" : "",
+                  ].join(" ")}
+                  src={cutSrc}
+                  playsInline
+                  preload="auto"
+                />
+              ) : (
+                <div className="visual-package-video-missing">No locked cut to preview.</div>
+              )}
+              {clipSrc ? (
+                <video
+                  ref={clipVideoRef}
+                  className={[
+                    "visual-package-video",
+                    "program-layer-clip",
+                    programLayer === "insert" ? "is-active" : "",
+                  ].join(" ")}
+                  src={clipSrc}
+                  playsInline
+                  preload="auto"
+                />
+              ) : null}
+              {programLayer === "insert" ? (
+                <span className="program-layer-badge">Insert</span>
+              ) : null}
+            </div>
+          </div>
+          <div className="rendered-timeline-shell program-cut-timeline">
+            <div className="rendered-timeline-toolbar">
+              <span className="rendered-timeline-toolbar-label">
+                <strong>Cut timeline</strong>
+              </span>
+              <div className="rendered-timeline-transport" aria-label="Cut transport">
+                <button
+                  type="button"
+                  className="rendered-timeline-play-toggle"
+                  disabled={!selected?.videoAssetId || busy}
+                  title={
+                    programPlaying
+                      ? "Pause join preview"
+                      : "Play talking head into this insert and back out"
+                  }
+                  onClick={() => {
+                    if (programPlaying) stopProgramPlay();
+                    else void playThroughInsert();
+                  }}
+                >
+                  {programPlaying ? <Pause size={15} /> : <Play size={15} />}
+                </button>
+                <span className="muted">
+                  {programPlaying
+                    ? programLayer === "insert"
+                      ? "Insert"
+                      : "Talking head"
+                    : "Play through the join to check T"}
+                </span>
+              </div>
+              <div className="rendered-timeline-zoom-controls" aria-label="Timeline zoom controls">
+                <button
+                  type="button"
+                  title="Zoom timeline out"
+                  onClick={() => setTimelineZoom((z) => Math.max(1, z / 1.5))}
+                  disabled={timelineZoom <= 1.001}
+                >
+                  −
+                </button>
+                <button type="button" title="Reset timeline zoom" onClick={() => setTimelineZoom(1)}>
+                  {timelineZoom < 10 ? timelineZoom.toFixed(1) : timelineZoom.toFixed(0)}×
+                </button>
+                <button
+                  type="button"
+                  title="Zoom timeline in"
+                  onClick={() => setTimelineZoom((z) => Math.min(48, z * 1.5))}
+                >
+                  +
+                </button>
+              </div>
+            </div>
+            <div className="rendered-timeline-viewport" ref={timelineViewportRef}>
+              <div
+                className="rendered-timeline"
+                aria-label="Locked-cut insert timeline"
+                style={{ width: `${timelineZoom * 100}%` }}
+                onPointerDown={(event) => {
+                  if ((event.target as HTMLElement).closest(".program-insert-span")) return;
+                  timelineScrubbingRef.current = true;
+                  setTimelineScrubbing(true);
+                  stopProgramPlay();
+                  setProgramLayer("cut");
+                  const frame = frameFromPointer(event);
+                  playheadFrameRef.current = frame;
+                  setPlayheadFrame(frame);
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                }}
+                onPointerMove={(event) => {
+                  if (!timelineScrubbingRef.current) return;
+                  const frame = frameFromPointer(event);
+                  playheadFrameRef.current = frame;
+                  setPlayheadFrame(frame);
+                }}
+                onPointerUp={() => {
+                  timelineScrubbingRef.current = false;
+                  setTimelineScrubbing(false);
+                }}
+                onPointerCancel={() => {
+                  timelineScrubbingRef.current = false;
+                  setTimelineScrubbing(false);
+                }}
+              >
+                <div className="rendered-timeline-track" />
+                <div
+                  className="timeline-keep-range"
+                  style={{ left: "0%", width: "100%" }}
+                  title="A-roll (locked cut)"
+                />
+                {blocked.map((span) => (
+                  <div
+                    key={`block-${span.startFrame}-${span.endFrameExclusive}`}
+                    className="program-beat-block"
+                    style={{
+                      left: `${(span.startFrame / cutEnd) * 100}%`,
+                      width: `${Math.max(0.15, ((span.endFrameExclusive - span.startFrame) / cutEnd) * 100)}%`,
+                    }}
+                    title={`Graphic beat · f ${span.startFrame}–${span.endFrameExclusive} (no T inside)`}
+                  />
+                ))}
+                {inserts.map((row) => {
+                  const usedSec = Math.max(
+                    0,
+                    Number(row.durationSec) ||
+                      Math.max(0, Number(row.clipDurationSec || 0) - Number(row.clipStartSec || 0)),
+                  );
+                  const durationFrames = Math.max(1, Math.round(usedSec * fps));
+                  return (
+                    <button
+                      key={row.id}
+                      type="button"
+                      className={[
+                        "program-insert-span",
+                        row.id === selectedInsertId ? "is-selected" : "",
+                      ].join(" ")}
+                      style={{
+                        left: `${(row.tFrame / cutEnd) * 100}%`,
+                        width: `${(durationFrames / cutEnd) * 100}%`,
+                      }}
+                      title={`${row.displayName} · T f ${row.tFrame} · ${durationFrames.toLocaleString()} frames (${usedSec.toFixed(1)}s)${row.muted ? " · muted" : ""}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        activateInsert(row.id);
+                      }}
+                    >
+                      <span>{durationFrames.toLocaleString()}f</span>
+                    </button>
+                  );
+                })}
+                <div
+                  className={["rendered-timeline-playhead", timelineScrubbing ? "scrubbing" : ""].join(" ")}
+                  style={{ left: `${(playheadFrame / cutEnd) * 100}%` }}
+                  role="slider"
+                  aria-label="Cut playhead"
+                  aria-valuemin={0}
+                  aria-valuemax={cutEnd}
+                  aria-valuenow={playheadFrame}
+                >
+                  <span />
+                </div>
+              </div>
+            </div>
+            <div className="program-nudge-row">
+              <CutFrameCard
+                title={selected ? "Insert T" : "Drop T"}
+                frame={selectedT}
+                fps={fps}
+                minFrame={0}
+                maxFrame={cutEnd}
+                resolveDelta={resolveTNudge}
+                onNudge={(delta) => {
+                  stopProgramPlay();
+                  setProgramLayer("cut");
+                  void applyT(selectedT + delta);
+                }}
+              />
+              {selected ? (
+                <CutFrameCard
+                  title="Clip in"
+                  frame={clipStartFrame}
+                  fps={fps}
+                  minFrame={0}
+                  maxFrame={Math.max(0, clipFullFrames - 1)}
+                  onNudge={(delta) => {
+                    stopProgramPlay();
+                    void applyClipIn(clipStartFrame + delta);
+                  }}
+                />
+              ) : null}
+              {selected ? (
+                <CutFrameCard
+                  title="Clip length"
+                  frame={Math.max(1, Math.round(clipUsedSec * fps))}
+                  fps={fps}
+                  minFrame={1}
+                  maxFrame={Math.max(1, clipFullFrames - clipStartFrame)}
+                  onNudge={(delta) => {
+                    stopProgramPlay();
+                    void applyClipLength(Math.round(clipUsedSec * fps) + delta);
+                  }}
+                />
+              ) : null}
+            </div>
+          </div>
+        </div>
+        <aside className="program-inserts-side">
+          <h3>Legal T</h3>
+          <p className="muted">Gaps and beat boundaries only. Selected T: f {selectedT}</p>
+          <div className="program-slots">
+            {slots.map((slot) => {
+              const zero = slot.startFrame === slot.endFrameExclusive;
+              const active = selectedT >= slot.startFrame && selectedT <= slot.endFrameExclusive;
+              return (
+                <button
+                  key={`${slot.startFrame}-${slot.endFrameExclusive}`}
+                  type="button"
+                  className={[
+                    "program-slot",
+                    active || (playheadFrame >= slot.startFrame && playheadFrame <= slot.endFrameExclusive)
+                      ? "is-selected"
+                      : "",
+                  ].join(" ")}
+                  onClick={() => jumpPlayheadToFrame(slot.startFrame)}
+                >
+                  {zero
+                    ? `f ${slot.startFrame}`
+                    : `f ${slot.startFrame}–${slot.endFrameExclusive}`}
+                </button>
+              );
+            })}
+          </div>
+          <label className="program-t-input">
+            T frame
+            <input
+              type="number"
+              value={selectedT}
+              onChange={(event) => setSelectedT(Number(event.target.value) || 0)}
+            />
+          </label>
+          <div className="program-add-row">
+            <button
+              type="button"
+              className="workflow-action emphasized"
+              disabled={busy}
+              onClick={() => void importPlacementMediaDialog().then((asset) => {
+                if (asset.mediaType && asset.mediaType !== "video") {
+                  onMessage("Inserts need a video clip.");
+                  return;
+                }
+                return addClip(asset.assetId, asset.sourceName || asset.fileName);
+              })}
+            >
+              <Plus size={15} /> Import clip
+            </button>
+            <button
+              type="button"
+              className="workflow-action"
+              disabled={busy}
+              onClick={() => setPexelsOpen((open) => !open)}
+            >
+              <Film size={15} /> Pexels
+            </button>
+          </div>
+          {library.length > 0 ? (
+            <label className="program-library-pick">
+              Project library
+              <select
+                value=""
+                disabled={busy}
+                onChange={(event) => {
+                  const clip = library.find((item) => item.assetId === event.target.value);
+                  if (clip) void addClip(clip.assetId, clip.attribution || clip.fileName);
+                }}
+              >
+                <option value="">Add frozen clip…</option>
+                {library.map((clip) => (
+                  <option key={clip.assetId} value={clip.assetId}>
+                    {clip.attribution || clip.fileName}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          {pexelsOpen ? (
+            <div className="visual-package-pexels">
+              <p className="visual-package-pexels-legal">
+                Landscape 16:9 HD clips. Click a still to preview, then Use this.
+              </p>
+              {pexelsConfigured === false ? (
+                <div className="visual-package-pexels-key">
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    placeholder=".env.local · PEXELS_API_KEY"
+                    value={pexelsKeyDraft}
+                    disabled={busy || pexelsBusy}
+                    onChange={(event) => setPexelsKeyDraft(event.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="visual-package-placement-knob-action"
+                    disabled={busy || pexelsBusy || pexelsKeyDraft.trim().length < 10}
+                    onClick={() => {
+                      void savePlacementPexelsKey(pexelsKeyDraft)
+                        .then((settings) => {
+                          setPexelsConfigured(Boolean(settings.configured));
+                          setPexelsKeyDraft("");
+                          onMessage("Pexels key saved.");
+                        })
+                        .catch((error: unknown) => {
+                          setPexelsError(
+                            error instanceof Error ? error.message : "Could not save Pexels key.",
+                          );
+                        });
+                    }}
+                  >
+                    Save key
+                  </button>
+                </div>
+              ) : null}
+              <div className="visual-package-pexels-search">
+                <input
+                  type="text"
+                  placeholder="Search clips"
+                  value={pexelsQuery}
+                  disabled={busy || pexelsBusy}
+                  onChange={(event) => setPexelsQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void runStage4PexelsSearch(1);
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="visual-package-placement-knob-action"
+                  disabled={busy || pexelsBusy || !pexelsQuery.trim()}
+                  onClick={() => void runStage4PexelsSearch(1)}
+                >
+                  {pexelsBusy ? "Searching…" : "Search"}
+                </button>
+              </div>
+              {pexelsError ? <p className="visual-package-pexels-error">{pexelsError}</p> : null}
+              {pexelsCandidates.length || pexelsHasPrev || pexelsHasNext ? (
+                <div className="visual-package-pexels-pager">
+                  <button
+                    type="button"
+                    className="visual-package-placement-knob-action"
+                    disabled={busy || pexelsBusy || !pexelsHasPrev}
+                    onClick={() => void runStage4PexelsSearch(Math.max(1, pexelsPage - 1))}
+                  >
+                    Prev
+                  </button>
+                  <span className="visual-package-pexels-page">
+                    Page {pexelsPage}
+                    {pexelsTotal > 0 ? ` · ${pexelsTotal.toLocaleString()} on Pexels` : ""}
+                  </span>
+                  <button
+                    type="button"
+                    className="visual-package-placement-knob-action"
+                    disabled={busy || pexelsBusy || !pexelsHasNext}
+                    onClick={() => void runStage4PexelsSearch(pexelsPage + 1)}
+                  >
+                    Next
+                  </button>
+                </div>
+              ) : null}
+              <div className="visual-package-pexels-grid">
+                {pexelsCandidates.map((candidate) => {
+                  const playing = pexelsPreviewId === candidate.id;
+                  const selecting = pexelsSelectingId === candidate.id;
+                  return (
+                    <div key={candidate.id} className="visual-package-pexels-card">
+                      <button
+                        type="button"
+                        className="visual-package-pexels-thumb"
+                        disabled={busy}
+                        onClick={() => setPexelsPreviewId(playing ? null : candidate.id)}
+                        title="Play preview"
+                      >
+                        {playing && candidate.previewPlayUrl ? (
+                          <video
+                            src={candidate.previewPlayUrl}
+                            poster={candidate.previewUrl}
+                            muted
+                            playsInline
+                            autoPlay
+                            loop
+                          />
+                        ) : (
+                          <img src={candidate.previewUrl} alt="" />
+                        )}
+                      </button>
+                      <div className="visual-package-pexels-meta">
+                        <span>
+                          {candidate.width}×{candidate.height} · {Math.round(candidate.durationSec)}s
+                        </span>
+                        <span className="visual-package-pexels-creator">{candidate.creator}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="visual-package-placement-knob-action"
+                        disabled={busy || selecting || pexelsBusy}
+                        onClick={() => {
+                          setPexelsSelectingId(candidate.id);
+                          setPexelsError(null);
+                          onBusy(true);
+                          void selectPlacementPexels(candidate)
+                            .then((asset) =>
+                              addClip(
+                                asset.assetId,
+                                asset.attribution || asset.sourceName || asset.fileName,
+                              ),
+                            )
+                            .then(() => {
+                              setPexelsOpen(false);
+                              setPexelsPreviewId(null);
+                            })
+                            .catch((error: unknown) => {
+                              setPexelsError(
+                                error instanceof Error
+                                  ? error.message
+                                  : "Could not download that clip.",
+                              );
+                            })
+                            .finally(() => {
+                              setPexelsSelectingId(null);
+                              onBusy(false);
+                            });
+                        }}
+                      >
+                        {selecting ? "Downloading…" : "Use this"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+          <h3>Inserts</h3>
+          {inserts.length === 0 ? (
+            <p className="muted">No inserts. Final still publishes the A-roll master.</p>
+          ) : (
+            <ul className="program-insert-list">
+              {inserts.map((row) => (
+                <li key={row.id}>
+                  <button
+                    type="button"
+                    className={row.id === selectedInsertId ? "is-selected" : ""}
+                    onClick={() => activateInsert(row.id)}
+                  >
+                    f {row.tFrame} · {row.displayName}
+                    {row.muted ? " · muted" : ""}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {selected ? (
+            <div className="program-insert-editor">
+              <label>
+                Display name
+                <input
+                  value={nameDraft}
+                  onChange={(event) => setNameDraft(event.target.value)}
+                  onBlur={() => {
+                    if (nameDraft.trim() === (selected.displayName || "")) return;
+                    void persist(
+                      inserts.map((row) =>
+                        row.id === selected.id ? { ...row, displayName: nameDraft.trim() || row.displayName } : row,
+                      ),
+                    );
+                  }}
+                />
+              </label>
+              <label>
+                Clip in-point (sec)
+                <input
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  value={clipStartDraft}
+                  onChange={(event) => setClipStartDraft(event.target.value)}
+                  onBlur={() => {
+                    const next = Math.max(0, Number(clipStartDraft) || 0);
+                    void applyClipIn(Math.round(next * fps));
+                  }}
+                />
+              </label>
+              <label>
+                Clip length (sec)
+                <input
+                  type="number"
+                  min={0.1}
+                  step={0.1}
+                  value={durationDraft}
+                  onChange={(event) => setDurationDraft(event.target.value)}
+                  onBlur={() => {
+                    const next = Math.max(0.001, Number(durationDraft) || 0);
+                    void applyClipLength(Math.round(next * fps));
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                className="workflow-action"
+                onClick={() =>
+                  void persist(
+                    inserts.map((row) =>
+                      row.id === selected.id ? { ...row, muted: !row.muted } : row,
+                    ),
+                  )
+                }
+              >
+                {selected.muted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                {selected.muted ? "Muted" : "Audio on"}
+              </button>
+              <button
+                type="button"
+                className="workflow-action"
+                onClick={() =>
+                  void persist(inserts.filter((row) => row.id !== selected.id)).then((saved) => {
+                    setSelectedInsertId(saved.inserts?.[0]?.id ?? null);
+                  })
+                }
+              >
+                <Trash2 size={15} /> Remove
+              </button>
+            </div>
+          ) : null}
+        </aside>
+      </div>
+    </section>
+  );
+}
+
 function formatFinalDuration(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "—";
   const total = Math.round(seconds);
@@ -4047,7 +5372,7 @@ function PlacementFinalProgressModal({
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="placement-final-title">
       <div className={failed ? "progress-modal failed" : "progress-modal"}>
-        <span className="eyebrow">Placement Final</span>
+        <span className="eyebrow">Program Final</span>
         <h2 id="placement-final-title">{title}</h2>
         <p>{job.message || (active ? "Rendering full-episode graphics…" : "Done.")}</p>
         {job.output_path ? <p className="modal-path">{job.output_path}</p> : null}
@@ -4066,9 +5391,9 @@ function PlacementFinalProgressModal({
         </div>
         <p className="placement-final-progress-hint">
           {active
-            ? "Same HyperFrames engines as placement preview · GPU encode + parallel capture when available"
+            ? "A-roll master (reused when graphics are unchanged) then insert concat"
             : complete
-              ? "Published to exports/final-video.mp4 (locked-cut audio stream-copied)"
+              ? "Published to exports/final-video.mp4 (program clock)"
               : canceled
                 ? "No final video was published. You can start Final again when ready."
                 : "Check the message above, then try again."}
@@ -4096,8 +5421,8 @@ function PlacementFinalProgressModal({
 
 /**
  * Stage 3 beat progress rail under the preview.
- * End caps = full beat span. Yellow ticks = line revealFrames, graphic Ends
- * (when earlier than beat end), and motion anchors (punch-zoom in/out).
+ * End caps = full beat span. Yellow ticks = line revealFrames, graphic Starts/Ends
+ * (when trimmed inside the beat), and motion anchors (punch-zoom in/out).
  * Fill tracks playheadFrame.
  */
 function PlacementBeatProgress({
@@ -4105,6 +5430,8 @@ function PlacementBeatProgress({
   endFrameExclusive,
   playheadFrame,
   revealTicks = [],
+  overlayTicks = [],
+  graphicStartFrame = null,
   graphicEndFrame = null,
   motionFrames = [],
 }: {
@@ -4113,6 +5440,9 @@ function PlacementBeatProgress({
   playheadFrame: number;
   /** Line reveals with human labels (Title, Stop 1, …) for tick tooltips. */
   revealTicks?: { frame: number; label: string }[];
+  overlayTicks?: { frame: number; edge: "start" | "end"; label: string }[];
+  /** Placement graphic dock frame when later than beat start. */
+  graphicStartFrame?: number | null;
   /** Placement graphic undock frame when earlier than beat end. */
   graphicEndFrame?: number | null;
   /** Camera / motion anchor frames (e.g. punch zoom in/out). */
@@ -4122,7 +5452,7 @@ function PlacementBeatProgress({
   const fraction = Math.max(0, Math.min(1, (playheadFrame - startFrame) / span));
   const ticks: {
     frame: number;
-    kind: "reveal" | "end" | "motion";
+    kind: "reveal" | "start" | "end" | "motion";
     key: string;
     title: string;
   }[] = [];
@@ -4135,6 +5465,33 @@ function PlacementBeatProgress({
         title: `${tick.label} · f ${tick.frame}`,
       });
     }
+  }
+  for (const [index, tick] of overlayTicks.entries()) {
+    const atStart = tick.frame >= startFrame;
+    const atEnd =
+      tick.edge === "end"
+        ? tick.frame <= endFrameExclusive
+        : tick.frame < endFrameExclusive;
+    if (atStart && atEnd) {
+      ticks.push({
+        frame: tick.frame,
+        kind: tick.edge === "end" ? "end" : "start",
+        key: `overlay-${tick.edge}-${index}-${tick.frame}`,
+        title: `${tick.label} · f ${tick.frame}`,
+      });
+    }
+  }
+  if (
+    graphicStartFrame != null &&
+    graphicStartFrame > startFrame &&
+    graphicStartFrame < endFrameExclusive
+  ) {
+    ticks.push({
+      frame: graphicStartFrame,
+      kind: "start",
+      key: `start-${graphicStartFrame}`,
+      title: `Starts · f ${graphicStartFrame}`,
+    });
   }
   if (
     graphicEndFrame != null &&
@@ -4171,6 +5528,7 @@ function PlacementBeatProgress({
             key={tick.key}
             className={[
               "visual-package-beat-progress-tick",
+              tick.kind === "start" ? "is-graphic-start" : "",
               tick.kind === "end" ? "is-graphic-end" : "",
               tick.kind === "motion" ? "is-motion" : "",
             ].join(" ")}
@@ -4224,6 +5582,211 @@ function linesFingerprint(lines: PlacementLine[]): string {
     .join("\n");
 }
 
+function roundOverlayUnit(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function clampOverlayLayer(layer: Record<string, unknown>): Record<string, unknown> {
+  const width = Math.max(0.05, Math.min(1, Number(layer.width) || 0.4));
+  const height = Math.max(0.05, Math.min(1, Number(layer.height) || 0.4));
+  const x = Math.max(0, Math.min(1 - width, Number(layer.x) || 0));
+  const y = Math.max(0, Math.min(1 - height, Number(layer.y) || 0));
+  return {
+    ...layer,
+    x: roundOverlayUnit(x),
+    y: roundOverlayUnit(y),
+    width: roundOverlayUnit(width),
+    height: roundOverlayUnit(height),
+  };
+}
+
+function overlayLayerTiming(
+  layer: Record<string, unknown>,
+  beatStart: number,
+  beatEnd: number,
+): { startFrame: number; endFrameExclusive: number } {
+  const startRaw = Number(layer.startFrame ?? layer.revealFrame ?? beatStart);
+  const start = Math.max(
+    beatStart,
+    Math.min(
+      Math.max(beatStart, beatEnd - 1),
+      Math.round(Number.isFinite(startRaw) ? startRaw : beatStart),
+    ),
+  );
+  const hasEnd = layer.endFrameExclusive != null && layer.endFrameExclusive !== "";
+  const endRaw = Number(hasEnd ? layer.endFrameExclusive : beatEnd);
+  let end = Math.round(Number.isFinite(endRaw) ? endRaw : beatEnd);
+  end = Math.max(start + 1, Math.min(Math.max(beatEnd, start + 1), end));
+  return {
+    startFrame: start,
+    endFrameExclusive: end,
+  };
+}
+
+function overlayUnionSpan(
+  layers: Record<string, unknown>[],
+  beatStart: number,
+  beatEnd: number,
+): { startFrame: number; endFrameExclusive: number } {
+  if (layers.length === 0) {
+    return { startFrame: beatStart, endFrameExclusive: Math.max(beatStart + 1, beatEnd) };
+  }
+  let minStart = beatEnd;
+  let maxEnd = beatStart;
+  for (const layer of layers) {
+    const timing = overlayLayerTiming(layer, beatStart, beatEnd);
+    minStart = Math.min(minStart, timing.startFrame);
+    maxEnd = Math.max(maxEnd, timing.endFrameExclusive);
+  }
+  return {
+    startFrame: Math.max(beatStart, minStart),
+    endFrameExclusive: Math.min(beatEnd, Math.max(minStart + 1, maxEnd)),
+  };
+}
+
+function ImageOverlayDragSurface({
+  host,
+  layers,
+  selectedIndex,
+  disabled,
+  playheadFrame,
+  playing,
+  beatStartFrame,
+  beatEndFrame,
+  onSelect,
+  onChange,
+}: {
+  host: HTMLDivElement | null;
+  layers: Record<string, unknown>[];
+  selectedIndex: number;
+  disabled?: boolean;
+  playheadFrame: number;
+  playing?: boolean;
+  beatStartFrame: number;
+  beatEndFrame: number;
+  onSelect: (index: number) => void;
+  onChange: (index: number, patch: Record<string, unknown>) => void;
+}) {
+  const dragRef = useRef<{
+    index: number;
+    handle: "move" | "nw" | "ne" | "sw" | "se";
+    startX: number;
+    startY: number;
+    origin: { x: number; y: number; width: number; height: number };
+  } | null>(null);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  useEffect(() => {
+    const applyPointer = (event: PointerEvent) => {
+      const drag = dragRef.current;
+      if (!drag || !host) return;
+      const rect = host.getBoundingClientRect();
+      const dx = (event.clientX - drag.startX) / Math.max(1, rect.width);
+      const dy = (event.clientY - drag.startY) / Math.max(1, rect.height);
+      const o = drag.origin;
+      const next = { x: o.x, y: o.y, width: o.width, height: o.height };
+      if (drag.handle === "move") {
+        next.x = o.x + dx;
+        next.y = o.y + dy;
+      } else {
+        if (drag.handle.includes("e")) next.width = o.width + dx;
+        if (drag.handle.includes("s")) next.height = o.height + dy;
+        if (drag.handle.includes("w")) {
+          next.x = o.x + dx;
+          next.width = o.width - dx;
+        }
+        if (drag.handle.includes("n")) {
+          next.y = o.y + dy;
+          next.height = o.height - dy;
+        }
+      }
+      onChangeRef.current(drag.index, clampOverlayLayer(next));
+    };
+    const endDrag = () => {
+      dragRef.current = null;
+    };
+    window.addEventListener("pointermove", applyPointer);
+    window.addEventListener("pointerup", endDrag);
+    window.addEventListener("pointercancel", endDrag);
+    return () => {
+      window.removeEventListener("pointermove", applyPointer);
+      window.removeEventListener("pointerup", endDrag);
+      window.removeEventListener("pointercancel", endDrag);
+    };
+  }, [host]);
+
+  if (!host) return null;
+
+  const beginDrag = (
+    event: ReactPointerEvent<HTMLElement>,
+    index: number,
+    handle: "move" | "nw" | "ne" | "sw" | "se",
+    box: Record<string, unknown>,
+  ) => {
+    if (disabled) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect(index);
+    dragRef.current = {
+      index,
+      handle,
+      startX: event.clientX,
+      startY: event.clientY,
+      origin: {
+        x: Number(box.x),
+        y: Number(box.y),
+        width: Number(box.width),
+        height: Number(box.height),
+      },
+    };
+  };
+
+  return createPortal(
+    <div className="visual-package-overlay-drag-surface" aria-label="Drag still overlays">
+      {layers.map((layer, index) => {
+        const assetId = String(layer.imageAssetId || "");
+        if (!assetId) return null;
+        const timing = overlayLayerTiming(layer, beatStartFrame, beatEndFrame);
+        const active =
+          playheadFrame >= timing.startFrame && playheadFrame < timing.endFrameExclusive;
+        const selected = index === selectedIndex;
+        // Paused + selected: keep the still solid so it can be dragged/resized.
+        // Playing: follow Starts/Ends so timing can be checked on the talking-head.
+        const show = active || (selected && !playing);
+        if (!show) return null;
+        const box = clampOverlayLayer(layer);
+        return (
+          <div
+            key={`drag-${index}-${assetId}`}
+            className={[
+              "visual-package-overlay-drag-box",
+              selected ? "is-selected" : "",
+            ].join(" ")}
+            style={{
+              left: `${Number(box.x) * 100}%`,
+              top: `${Number(box.y) * 100}%`,
+              width: `${Number(box.width) * 100}%`,
+              height: `${Number(box.height) * 100}%`,
+            }}
+            onPointerDown={(event) => beginDrag(event, index, "move", box)}
+          >
+            <img src={placementLibraryImageUrl(assetId)} alt="" draggable={false} />
+            {(["nw", "ne", "sw", "se"] as const).map((handle) => (
+              <span
+                key={handle}
+                className={`visual-package-overlay-handle is-${handle}`}
+                onPointerDown={(event) => beginDrag(event, index, handle, box)}
+              />
+            ))}
+          </div>
+        );
+      })}
+    </div>,
+    host,
+  );
+}
+
 /**
  * Stage 3 left craft panel (mockup images/6.jpg).
  * Primary surface for copy + reveal timing; live preview sits to the right.
@@ -4246,11 +5809,17 @@ function PlacementEditorPanel({
   onSeekReveal,
   onDraftPreview,
   onLinesChange,
+  onStartFrameChange,
   onEndFrameChange,
   onMotionChange,
+  onAssetsChange,
   transportSlot,
   beatJumpSlot,
   speechHostEl = null,
+  overlayHostEl = null,
+  overlayDragOn = true,
+  playheadFrame = 0,
+  playing = false,
 }: {
   selected: MasterbeaterBeat | null;
   placement?: PlacementBeat;
@@ -4258,6 +5827,7 @@ function PlacementEditorPanel({
   interfaceSpec?: {
     listSlot?: string | null;
     listMax?: number;
+    fixedLineSlots?: string[];
     notes?: string;
     /** Engine-declared knobs (ENGINE_REGISTRY) — rendered generically, never hardcoded. */
     metaKeys?: string[];
@@ -4280,6 +5850,7 @@ function PlacementEditorPanel({
     meta?: Record<string, unknown>;
     assets?: Record<string, unknown>;
     motion?: Record<string, unknown>;
+    startFrame?: number;
     endFrameExclusive?: number;
     locked?: boolean;
     detail?: string;
@@ -4291,36 +5862,69 @@ function PlacementEditorPanel({
       meta?: Record<string, unknown>;
       assets?: Record<string, unknown>;
       motion?: Record<string, unknown>;
+      startFrame?: number;
       endFrameExclusive?: number;
     },
   ) => void;
   /** Display-only mirror for the parent (progress rail ticks); not part of save/preview flow. */
   onLinesChange?: (lines: PlacementLine[]) => void;
+  /** Live Starts draft for the progress rail graphic-start tick. */
+  onStartFrameChange?: (startFrame: number | null) => void;
   /** Live Ends draft for the progress rail graphic-end tick. */
   onEndFrameChange?: (endFrameExclusive: number | null) => void;
   /** Live motion draft (punch-zoom frames, etc.) for progress rail ticks. */
   onMotionChange?: (motion: Record<string, unknown> | null) => void;
+  onAssetsChange?: (assets: Record<string, unknown> | null) => void;
   /** Transport cluster (progress + readout + buttons) rendered under the nudges. */
   transportSlot?: ReactNode;
   /** Header jump control — full-width row under title + lock. */
   beatJumpSlot?: ReactNode;
   /** Right-column host under the graphic card; word chips portal here when set. */
   speechHostEl?: HTMLDivElement | null;
+  overlayHostEl?: HTMLDivElement | null;
+  overlayDragOn?: boolean;
+  playheadFrame?: number;
+  playing?: boolean;
 }) {
-  type ArmedKind = "line" | "end" | "zoomIn" | "zoomOut";
+  type ArmedKind = "line" | "start" | "end" | "zoomIn" | "zoomOut" | "layerStart" | "layerEnd";
   const [draftLines, setDraftLines] = useState<PlacementLine[]>([]);
   const [armedIndex, setArmedIndex] = useState(0);
   /** One armed target for the shared hero nudges. */
   const [armedKind, setArmedKind] = useState<ArmedKind>("line");
+  const [overlayLayerIndex, setOverlayLayerIndex] = useState(0);
   /** Engine-declared knob drafts (meta/assets bags) — generic, driven by interfaceSpec. */
   const [metaDraft, setMetaDraft] = useState<Record<string, unknown>>({});
   const [assetsDraft, setAssetsDraft] = useState<Record<string, unknown>>({});
   const [motionDraft, setMotionDraft] = useState<Record<string, unknown>>({});
+  /** Graphic start frame (placement startFrame). Default = beat start. */
+  const [startFrameDraft, setStartFrameDraft] = useState<number | null>(null);
   /** Graphic end frame (placement endFrameExclusive). Default = beat end. */
   const [endFrameDraft, setEndFrameDraft] = useState<number | null>(null);
+  /** Overlay B-roll: duration of the chosen clip, seconds (import or probed). */
+  const [clipDurationSec, setClipDurationSec] = useState<number | null>(null);
+  const [pexelsOpen, setPexelsOpen] = useState(false);
+  const [pexelsQuery, setPexelsQuery] = useState("");
+  const [pexelsBusy, setPexelsBusy] = useState(false);
+  const [pexelsError, setPexelsError] = useState<string | null>(null);
+  const [pexelsConfigured, setPexelsConfigured] = useState<boolean | null>(null);
+  const [pexelsKeyDraft, setPexelsKeyDraft] = useState("");
+  const [pexelsCandidates, setPexelsCandidates] = useState<StockCandidate[]>([]);
+  const [pexelsPage, setPexelsPage] = useState(1);
+  const [pexelsTotal, setPexelsTotal] = useState(0);
+  const [pexelsHasPrev, setPexelsHasPrev] = useState(false);
+  const [pexelsHasNext, setPexelsHasNext] = useState(false);
+  const [pexelsPreviewId, setPexelsPreviewId] = useState<string | null>(null);
+  const [pexelsSelectingId, setPexelsSelectingId] = useState<string | null>(null);
+  const [clipPickerTab, setClipPickerTab] = useState<"library" | "search">("library");
+  const [libraryClips, setLibraryClips] = useState<PlacementLibraryClip[]>([]);
+  const [libraryPreviewId, setLibraryPreviewId] = useState<string | null>(null);
+  const [pexelsSize, setPexelsSize] = useState<"large" | "medium" | "small">("large");
+  const [pexelsMinSec, setPexelsMinSec] = useState("");
+  const [pexelsMaxSec, setPexelsMaxSec] = useState("");
   /** Canonical fingerprint of the lines we last sent to the server (echo detection). */
   const lastSentLines = useRef<string>("");
-  /** Last end frame we saved — skip clobber when server echoes our write. */
+  /** Last start/end frames we saved — skip clobber when server echoes our write. */
+  const lastSentStartFrame = useRef<number | null>(null);
   const lastSentEndFrame = useRef<number | null>(null);
   const lastSentMotion = useRef<string>("");
   const lastSentMeta = useRef<string>("");
@@ -4334,13 +5938,14 @@ function PlacementEditorPanel({
     meta: Record<string, unknown>;
     assets: Record<string, unknown>;
     motion: Record<string, unknown>;
+    startFrame?: number;
     endFrameExclusive?: number;
     dirty: boolean;
   } | null>(null);
   const locked = Boolean(placement?.locked);
   /** Only re-sync draft from server when beat/lock/server lines actually change — not object identity. */
   const serverLinesKey = placement
-    ? `${placement.beatId}|${placement.locked ? "1" : "0"}|${JSON.stringify(placement.lines || [])}|${placement.endFrameExclusive ?? ""}|${JSON.stringify(placement.motion || {})}|${JSON.stringify(placement.meta || {})}|${JSON.stringify(placement.assets || {})}`
+    ? `${placement.beatId}|${placement.locked ? "1" : "0"}|${JSON.stringify(placement.lines || [])}|${placement.startFrame ?? ""}|${placement.endFrameExclusive ?? ""}|${JSON.stringify(placement.motion || {})}|${JSON.stringify(placement.meta || {})}|${JSON.stringify(placement.assets || {})}`
     : "";
 
   useEffect(() => {
@@ -4351,8 +5956,11 @@ function PlacementEditorPanel({
       setMetaDraft({});
       setAssetsDraft({});
       setMotionDraft({});
+      setStartFrameDraft(null);
       setEndFrameDraft(null);
+      setClipDurationSec(null);
       lastSentLines.current = "";
+      lastSentStartFrame.current = null;
       lastSentEndFrame.current = null;
       lastSentMotion.current = "";
       lastSentMeta.current = "";
@@ -4364,20 +5972,39 @@ function PlacementEditorPanel({
     prevBeatId.current = placement.beatId;
     if (beatChanged) {
       lastSentLines.current = "";
+      lastSentStartFrame.current = null;
       lastSentEndFrame.current = null;
       lastSentMotion.current = "";
       lastSentMeta.current = "";
       lastSentAssets.current = "";
-      // Punch-zoom has no copy lines — arm Zoom in by default.
+      // Motion-only / overlay: arm the first timing target (no copy lines).
       setArmedKind(
-        placement.engineId === "source-punch-zoom" ? "zoomIn" : "line",
+        placement.engineId === "source-punch-zoom"
+          ? "zoomIn"
+          : placement.engineId === "broll-overlay" ||
+              placement.engineId === "brand-cta-lockup"
+            ? "start"
+            : "line",
       );
+      setPexelsOpen(false);
+      setPexelsCandidates([]);
+      setPexelsPage(1);
+      setPexelsTotal(0);
+      setPexelsHasPrev(false);
+      setPexelsHasNext(false);
+      setPexelsError(null);
+      setPexelsPreviewId(null);
+      setPexelsSelectingId(null);
+      setClipPickerTab("library");
+      setLibraryClips([]);
+      setLibraryPreviewId(null);
     }
     const incoming = (placement.lines || []).map((line) => ({
       slot: line.slot,
       text: line.text || "",
       revealFrame: line.revealFrame ?? 0,
     }));
+    const serverStart = Number(placement.startFrame ?? 0) || 0;
     const serverEnd = Number(placement.endFrameExclusive ?? 0) || 0;
     const serverMotion = { ...(placement.motion || {}) };
     // Seed absolute frame anchors for older punch-zoom placements that only had settleSec.
@@ -4399,17 +6026,28 @@ function PlacementEditorPanel({
     // reset the armed line — only real external changes (beat switch, re-Place,
     // unlock reset) re-sync the draft.
     const linesEcho = !beatChanged && linesFingerprint(incoming) === lastSentLines.current;
+    const startEcho =
+      !beatChanged && lastSentStartFrame.current != null && serverStart === lastSentStartFrame.current;
     const endEcho = !beatChanged && lastSentEndFrame.current != null && serverEnd === lastSentEndFrame.current;
     const motionEcho = !beatChanged && lastSentMotion.current !== "" && serverMotionKey === lastSentMotion.current;
     const metaEcho = !beatChanged && lastSentMeta.current !== "" && serverMetaKey === lastSentMeta.current;
     const assetsEcho = !beatChanged && lastSentAssets.current !== "" && serverAssetsKey === lastSentAssets.current;
-    if (linesEcho && endEcho && motionEcho && metaEcho && assetsEcho) return;
+    if (linesEcho && startEcho && endEcho && motionEcho && metaEcho && assetsEcho) return;
     if (!linesEcho) {
       setDraftLines(incoming);
       if (beatChanged) setArmedIndex(0);
     }
+    if (!startEcho || beatChanged) {
+      setStartFrameDraft(serverStart > 0 ? serverStart : 0);
+    }
     if (!endEcho || beatChanged) {
       setEndFrameDraft(serverEnd > 0 ? serverEnd : null);
+    }
+    const probed = Number(placement.clipDurationSec);
+    if (Number.isFinite(probed) && probed > 0) {
+      setClipDurationSec(probed);
+    } else if (beatChanged) {
+      setClipDurationSec(null);
     }
     if (!motionEcho || beatChanged) {
       setMotionDraft(serverMotion);
@@ -4429,6 +6067,10 @@ function PlacementEditorPanel({
   }, [draftLines, onLinesChange]);
 
   useEffect(() => {
+    onStartFrameChange?.(startFrameDraft);
+  }, [startFrameDraft, onStartFrameChange]);
+
+  useEffect(() => {
     onEndFrameChange?.(endFrameDraft);
   }, [endFrameDraft, onEndFrameChange]);
 
@@ -4436,16 +6078,27 @@ function PlacementEditorPanel({
     onMotionChange?.(motionDraft);
   }, [motionDraft, onMotionChange]);
 
+  useEffect(() => {
+    onAssetsChange?.(assetsDraft);
+  }, [assetsDraft, onAssetsChange]);
+
   // Prefer server interface; fall back to slot shape so list engines still edit if status lags.
-  const listSlot =
-    interfaceSpec?.listSlot ||
-    (() => {
-      const sample = (placement?.lines || []).find((l) => String(l.slot || "").includes("."));
-      if (!sample?.slot) return null;
-      return String(sample.slot).split(".")[0] || null;
-    })();
+  const noCopyLines =
+    placement?.engineId === "broll-overlay" ||
+    placement?.engineId === "source-punch-zoom" ||
+    placement?.engineId === "brand-cta-lockup" ||
+    ((interfaceSpec?.fixedLineSlots?.length ?? -1) === 0 && !interfaceSpec?.listSlot);
+  const listSlot = noCopyLines
+    ? null
+    : interfaceSpec?.listSlot ||
+      (() => {
+        const sample = (placement?.lines || []).find((l) => String(l.slot || "").includes("."));
+        if (!sample?.slot) return null;
+        return String(sample.slot).split(".")[0] || null;
+      })();
   const listMax = interfaceSpec?.listMax ?? (listSlot === "nodes" ? 6 : listSlot ? 12 : 0);
-  const armed = draftLines[armedIndex] || null;
+  const visibleLines = noCopyLines ? [] : draftLines;
+  const armed = visibleLines[armedIndex] || null;
   const editDisabled = locked; // never block craft on preview rebuild
   const motionKeys = interfaceSpec?.motionKeys || [];
   const hasZoomIn = motionKeys.includes("zoomInFrame");
@@ -4458,6 +6111,7 @@ function PlacementEditorPanel({
         meta?: Record<string, unknown>;
         assets?: Record<string, unknown>;
         motion?: Record<string, unknown>;
+        startFrame?: number;
         endFrameExclusive?: number;
       },
     ) => {
@@ -4465,14 +6119,36 @@ function PlacementEditorPanel({
       delete meta.holdSec;
       const assets = normalizeKnobBag(knobs?.assets ?? assetsDraft);
       const motion = normalizeKnobBag(knobs?.motion ?? motionDraft);
+      const startFrame =
+        knobs?.startFrame ??
+        startFrameDraft ??
+        placement?.startFrame ??
+        undefined;
       const endFrame =
         knobs?.endFrameExclusive ??
         endFrameDraft ??
         placement?.endFrameExclusive ??
         undefined;
-      return { lines, meta, assets, motion, endFrameExclusive: endFrame };
+      return {
+        lines: noCopyLines ? [] : lines,
+        meta,
+        assets,
+        motion,
+        startFrame,
+        endFrameExclusive: endFrame,
+      };
     },
-    [draftLines, metaDraft, assetsDraft, motionDraft, endFrameDraft, placement?.endFrameExclusive],
+    [
+      draftLines,
+      metaDraft,
+      assetsDraft,
+      motionDraft,
+      startFrameDraft,
+      endFrameDraft,
+      placement?.startFrame,
+      placement?.endFrameExclusive,
+      noCopyLines,
+    ],
   );
 
   const isDirty = useMemo(() => {
@@ -4482,16 +6158,22 @@ function PlacementEditorPanel({
       text: line.text || "",
       revealFrame: line.revealFrame ?? 0,
     }));
-    if (linesFingerprint(draftLines) !== linesFingerprint(serverLines)) return true;
+    const payload = craftPayload();
+    if (linesFingerprint(payload.lines) !== linesFingerprint(noCopyLines ? [] : serverLines)) {
+      return true;
+    }
+    if (noCopyLines && serverLines.length > 0) return true;
+    const serverStart = Number(placement.startFrame ?? 0) || 0;
+    const draftStart = Number(startFrameDraft ?? placement.startFrame ?? 0) || 0;
+    if (draftStart !== serverStart) return true;
     const serverEnd = Number(placement.endFrameExclusive ?? 0) || 0;
     const draftEnd = Number(endFrameDraft ?? 0) || 0;
     if (draftEnd !== serverEnd) return true;
-    const payload = craftPayload();
     if (JSON.stringify(payload.motion) !== JSON.stringify(placement.motion || {})) return true;
     if (JSON.stringify(payload.meta) !== JSON.stringify(placement.meta || {})) return true;
     if (JSON.stringify(payload.assets) !== JSON.stringify(placement.assets || {})) return true;
     return false;
-  }, [placement, locked, draftLines, endFrameDraft, craftPayload]);
+  }, [placement, locked, startFrameDraft, endFrameDraft, craftPayload, noCopyLines]);
 
   /** Explicit commit: one save + one preview rebuild. No per-keystroke races. */
   const commitCraft = useCallback(
@@ -4499,6 +6181,9 @@ function PlacementEditorPanel({
       if (locked || !placement) return;
       const payload = craftPayload();
       lastSentLines.current = linesFingerprint(payload.lines);
+      if (payload.startFrame != null) {
+        lastSentStartFrame.current = payload.startFrame;
+      }
       if (payload.endFrameExclusive != null) {
         lastSentEndFrame.current = payload.endFrameExclusive;
       }
@@ -4510,6 +6195,7 @@ function PlacementEditorPanel({
         meta: payload.meta,
         assets: payload.assets,
         motion: payload.motion,
+        startFrame: payload.startFrame,
         endFrameExclusive: payload.endFrameExclusive,
         detail,
       });
@@ -4530,6 +6216,7 @@ function PlacementEditorPanel({
       meta: payload.meta,
       assets: payload.assets,
       motion: payload.motion,
+      startFrame: payload.startFrame,
       endFrameExclusive: payload.endFrameExclusive,
       dirty: isDirty,
     };
@@ -4541,6 +6228,7 @@ function PlacementEditorPanel({
       const snap = draftSnapshotRef.current;
       if (!snap?.dirty || !snap.beatId) return;
       lastSentLines.current = linesFingerprint(snap.lines);
+      if (snap.startFrame != null) lastSentStartFrame.current = snap.startFrame;
       if (snap.endFrameExclusive != null) lastSentEndFrame.current = snap.endFrameExclusive;
       lastSentMotion.current = JSON.stringify(snap.motion);
       lastSentMeta.current = JSON.stringify(snap.meta);
@@ -4550,6 +6238,7 @@ function PlacementEditorPanel({
         meta: snap.meta,
         assets: snap.assets,
         motion: snap.motion,
+        startFrame: snap.startFrame,
         endFrameExclusive: snap.endFrameExclusive,
         detail: "flush on leave (auto)",
       });
@@ -4572,31 +6261,118 @@ function PlacementEditorPanel({
     [],
   );
 
-  /** Placement span end — when the graphic undocks back to full talking-head. */
-  const spanStartFrame = placement?.startFrame ?? selected?.startFrame ?? 0;
+  /** Beat span vs graphic span. Starts/Ends trim the graphic inside the beat. */
+  const beatStartFrame = selected?.startFrame ?? placement?.startFrame ?? 0;
+  const spanStartFrame = startFrameDraft ?? placement?.startFrame ?? beatStartFrame;
   const beatEndFrame =
     selected?.endFrameExclusive ??
     (selected?.endFrame != null ? selected.endFrame + 1 : undefined) ??
     placement?.endFrameExclusive ??
     spanStartFrame + 1;
   const minEndFrame = (() => {
-    const latestReveal = draftLines.reduce(
+    const latestReveal = visibleLines.reduce(
       (max, line) => Math.max(max, Number(line.revealFrame) || 0),
       spanStartFrame,
     );
     return Math.max(spanStartFrame + 1, latestReveal + 1);
   })();
+  const isBroll = placement?.engineId === "broll-overlay";
+  const isImageOverlay = placement?.engineId === "image-overlay";
+  const overlayLayers: Record<string, unknown>[] = Array.isArray(assetsDraft.layers)
+    ? (assetsDraft.layers as Record<string, unknown>[])
+    : [];
+  const setOverlayLayers = (layers: Record<string, unknown>[]) => {
+    const next = layers.map((layer) => {
+      const timing = overlayLayerTiming(layer, beatStartFrame, beatEndFrame);
+      return { ...layer, ...timing, revealFrame: timing.startFrame };
+    });
+    updateKnobs({ assets: { ...assetsDraft, layers: next } });
+    const span = overlayUnionSpan(next, beatStartFrame, beatEndFrame);
+    setStartFrameDraft(span.startFrame);
+    setEndFrameDraft(span.endFrameExclusive);
+  };
+  const armedOverlayTiming =
+    overlayLayers[overlayLayerIndex] != null
+      ? overlayLayerTiming(overlayLayers[overlayLayerIndex], beatStartFrame, beatEndFrame)
+      : null;
+  const clipStartSec = Number(metaDraft.clipStartSec ?? 0) || 0;
+  const clipEndCap =
+    isBroll && clipDurationSec != null && clipDurationSec > 0 && fps > 0
+      ? Math.max(
+          spanStartFrame + 1,
+          Math.min(
+            beatEndFrame,
+            spanStartFrame +
+              Math.max(
+                1,
+                Math.round((clipDurationSec - Math.max(0, clipStartSec)) * fps),
+              ),
+          ),
+        )
+      : null;
+  const graphicMaxEnd = clipEndCap ?? beatEndFrame;
+  const maxStartFrame = Math.max(beatStartFrame, (endFrameDraft ?? graphicMaxEnd) - 1);
+
+  const setStartFrame = useCallback(
+    (raw: number) => {
+      if (locked) return;
+      const next = Math.max(beatStartFrame, Math.min(maxStartFrame, Math.round(raw)));
+      setStartFrameDraft(next);
+      if (!noCopyLines) {
+        setDraftLines((prev) =>
+          prev.map((line) => ({
+            ...line,
+            revealFrame: Math.max(next, Number(line.revealFrame) || 0),
+          })),
+        );
+      }
+      if (isBroll && clipDurationSec != null && clipDurationSec > 0 && fps > 0) {
+        const cap = Math.max(
+          next + 1,
+          Math.min(
+            beatEndFrame,
+            next + Math.max(1, Math.round((clipDurationSec - Math.max(0, clipStartSec)) * fps)),
+          ),
+        );
+        setEndFrameDraft((prev) => {
+          const current = prev ?? beatEndFrame;
+          return current > cap ? cap : current;
+        });
+      }
+      onSeekReveal(next);
+    },
+    [
+      locked,
+      beatStartFrame,
+      maxStartFrame,
+      noCopyLines,
+      onSeekReveal,
+      isBroll,
+      clipDurationSec,
+      fps,
+      beatEndFrame,
+      clipStartSec,
+    ],
+  );
 
   const setEndFrame = useCallback(
     (raw: number) => {
       if (locked) return;
-      const next = Math.max(minEndFrame, Math.min(beatEndFrame, Math.round(raw)));
+      const next = Math.max(minEndFrame, Math.min(graphicMaxEnd, Math.round(raw)));
       setEndFrameDraft(next);
       // Seek to the last frame still inside the graphic (end is exclusive).
       onSeekReveal(Math.max(spanStartFrame, next - 1));
     },
-    [locked, minEndFrame, beatEndFrame, onSeekReveal, spanStartFrame],
+    [locked, minEndFrame, graphicMaxEnd, onSeekReveal, spanStartFrame],
   );
+
+  useEffect(() => {
+    if (locked || clipEndCap == null) return;
+    setEndFrameDraft((prev) => {
+      if (prev == null) return clipEndCap;
+      return prev > clipEndCap ? clipEndCap : prev;
+    });
+  }, [locked, clipEndCap]);
 
   const setMotionFrame = useCallback(
     (key: "zoomInFrame" | "zoomOutFrame", raw: number) => {
@@ -4631,6 +6407,10 @@ function PlacementEditorPanel({
     setArmedIndex(index);
   };
 
+  const armStart = () => {
+    setArmedKind("start");
+  };
+
   const armEnd = () => {
     setArmedKind("end");
   };
@@ -4638,6 +6418,10 @@ function PlacementEditorPanel({
   /** Shared hero nudges — only the armed target moves. */
   const nudgeArmed = (delta: number) => {
     if (locked) return;
+    if (armedKind === "start") {
+      setStartFrame((startFrameDraft ?? beatStartFrame) + delta);
+      return;
+    }
     if (armedKind === "end") {
       if (endFrameDraft == null) return;
       setEndFrame(endFrameDraft + delta);
@@ -4653,6 +6437,15 @@ function PlacementEditorPanel({
       setMotionFrame("zoomOutFrame", cur + delta);
       return;
     }
+    if (armedKind === "layerStart" || armedKind === "layerEnd") {
+      const layer = overlayLayers[overlayLayerIndex];
+      if (!layer) return;
+      const timing = overlayLayerTiming(layer, beatStartFrame, beatEndFrame);
+      const nextFrame =
+        armedKind === "layerStart" ? timing.startFrame + delta : timing.endFrameExclusive + delta;
+      setArmedFrame(nextFrame);
+      return;
+    }
     if (!armed || armedIndex < 0) return;
     // Reveal must stay inside the graphic span (respect live Ends draft).
     const spanEnd = (endFrameDraft ?? placement?.endFrameExclusive ?? spanStartFrame + 1) - 1;
@@ -4663,6 +6456,10 @@ function PlacementEditorPanel({
 
   const setArmedFrame = (frame: number) => {
     if (locked) return;
+    if (armedKind === "start") {
+      setStartFrame(frame);
+      return;
+    }
     if (armedKind === "end") {
       setEndFrame(frame);
       return;
@@ -4673,6 +6470,39 @@ function PlacementEditorPanel({
     }
     if (armedKind === "zoomOut") {
       setMotionFrame("zoomOutFrame", frame);
+      return;
+    }
+    if (armedKind === "layerStart" || armedKind === "layerEnd") {
+      const layer = overlayLayers[overlayLayerIndex];
+      if (!layer) return;
+      const timing = overlayLayerTiming(layer, beatStartFrame, beatEndFrame);
+      const next =
+        armedKind === "layerStart"
+          ? overlayLayerTiming(
+              {
+                ...layer,
+                startFrame: frame,
+                endFrameExclusive:
+                  timing.endFrameExclusive <= frame ? beatEndFrame : timing.endFrameExclusive,
+              },
+              beatStartFrame,
+              beatEndFrame,
+            )
+          : overlayLayerTiming(
+              { ...layer, startFrame: timing.startFrame, endFrameExclusive: frame },
+              beatStartFrame,
+              beatEndFrame,
+            );
+      setOverlayLayers(
+        overlayLayers.map((item, i) =>
+          i === overlayLayerIndex
+            ? { ...item, ...next, revealFrame: next.startFrame }
+            : item,
+        ),
+      );
+      onSeekReveal(
+        armedKind === "layerStart" ? next.startFrame : Math.max(next.startFrame, next.endFrameExclusive - 1),
+      );
       return;
     }
     if (!armed || armedIndex < 0) return;
@@ -4689,20 +6519,30 @@ function PlacementEditorPanel({
     return Number.isFinite(n) ? n : "";
   };
   const heroFrameValue: string | number =
-    armedKind === "end"
-      ? (endFrameDraft ?? "")
-      : armedKind === "zoomIn"
-        ? motionFrameDisplay("zoomInFrame")
-        : armedKind === "zoomOut"
-          ? motionFrameDisplay("zoomOutFrame")
-          : (armed?.revealFrame ?? "");
+    armedKind === "start"
+      ? (startFrameDraft ?? beatStartFrame)
+      : armedKind === "end"
+        ? (endFrameDraft ?? "")
+        : armedKind === "zoomIn"
+          ? motionFrameDisplay("zoomInFrame")
+          : armedKind === "zoomOut"
+            ? motionFrameDisplay("zoomOutFrame")
+            : armedKind === "layerStart"
+              ? (armedOverlayTiming?.startFrame ?? "")
+              : armedKind === "layerEnd"
+                ? (armedOverlayTiming?.endFrameExclusive ?? "")
+            : (armed?.revealFrame ?? "");
   const heroCanNudge =
     !editDisabled &&
-    (armedKind === "end"
-      ? endFrameDraft != null
-      : armedKind === "zoomIn" || armedKind === "zoomOut"
-        ? true
-        : Boolean(armed));
+    (armedKind === "start"
+      ? true
+      : armedKind === "end"
+        ? endFrameDraft != null
+        : armedKind === "zoomIn" || armedKind === "zoomOut"
+          ? true
+          : armedKind === "layerStart" || armedKind === "layerEnd"
+            ? armedOverlayTiming != null
+          : Boolean(armed));
 
   const metaKeys = interfaceSpec?.metaKeys || [];
   const assetKeys = interfaceSpec?.assetKeys || [];
@@ -4713,6 +6553,7 @@ function PlacementEditorPanel({
     if (key === "y") return "Y (top)";
     if (key === "width") return "Width";
     if (key === "height") return "Height";
+    if (key === "clipStartSec") return "Clip in-point (sec)";
     return key
       .replace(/([A-Z])/g, " $1")
       .replace(/^./, (c) => c.toUpperCase())
@@ -4723,13 +6564,128 @@ function PlacementEditorPanel({
     updateKnobs({ meta: { ...metaDraft, [key]: raw } });
   };
 
+  const applyImportedClip = (
+    key: string,
+    result: { assetId: string; durationSec?: number },
+  ) => {
+    updateKnobs({ assets: { ...assetsDraft, [key]: result.assetId } });
+    if (result.durationSec != null) {
+      const dur = Number(result.durationSec);
+      if (Number.isFinite(dur) && dur > 0) setClipDurationSec(dur);
+    }
+  };
+
   const pickImageForKey = async (key: string) => {
     try {
-      const result = await importPlacementImageDialog();
-      updateKnobs({ assets: { ...assetsDraft, [key]: result.assetId } });
+      const result = key.toLowerCase().includes("video")
+        ? await importPlacementMediaDialog()
+        : await importPlacementImageDialog();
+      applyImportedClip(key, result);
     } catch (error) {
       // Cancelled dialog surfaces as a 400 — quiet; real failures still logged.
-      console.warn("[visual-package] image import:", error);
+      console.warn("[visual-package] media import:", error);
+    }
+  };
+
+  const pexelsMinDurationSec =
+    fps > 0 ? Math.max(2, (beatEndFrame - beatStartFrame) / fps) : 2;
+
+  const loadPlacementLibrary = async () => {
+    try {
+      const data = await listPlacementLibrary();
+      setLibraryClips(data.clips || []);
+    } catch (error) {
+      setLibraryClips([]);
+      setPexelsError(error instanceof Error ? error.message : "Could not load frozen clips.");
+    }
+  };
+
+  const openPexels = async () => {
+    setPexelsOpen(true);
+    setPexelsError(null);
+    setClipPickerTab("library");
+    if (!pexelsQuery.trim()) {
+      const words = String(selected?.wordsText || selected?.label || "").trim();
+      setPexelsQuery(words.split(/\s+/).slice(0, 8).join(" "));
+    }
+    void loadPlacementLibrary();
+    try {
+      const settings = await getPlacementPexelsSettings();
+      setPexelsConfigured(Boolean(settings.configured));
+    } catch (error) {
+      setPexelsConfigured(false);
+      setPexelsError(error instanceof Error ? error.message : "Could not read Pexels settings.");
+    }
+  };
+
+  const runPexelsSearch = async (page = 1) => {
+    const q = pexelsQuery.trim();
+    if (!q) {
+      setPexelsError("Enter a search query.");
+      return;
+    }
+    setClipPickerTab("search");
+    setPexelsBusy(true);
+    setPexelsError(null);
+    setPexelsPreviewId(null);
+    const minSec = Number(pexelsMinSec);
+    const maxSec = Number(pexelsMaxSec);
+    try {
+      const data = await searchPlacementPexels(q, {
+        minDurationSec: Number.isFinite(minSec) && minSec > 0 ? minSec : pexelsMinDurationSec,
+        maxDurationSec: Number.isFinite(maxSec) && maxSec > 0 ? maxSec : 0,
+        size: pexelsSize,
+        page,
+      });
+      setPexelsConfigured(Boolean(data.configured));
+      setPexelsCandidates(data.candidates || []);
+      setPexelsPage(Number(data.page) || page);
+      setPexelsTotal(Number(data.totalResults) || 0);
+      setPexelsHasPrev(Boolean(data.hasPrev));
+      setPexelsHasNext(Boolean(data.hasNext));
+      if (!data.configured) {
+        setPexelsError("Add PEXELS_API_KEY to .env.local at the repo root.");
+      } else if (!(data.candidates || []).length) {
+        setPexelsError(
+          data.hasNext
+            ? "No landscape 16:9 HD clips on this page. Try Next."
+            : "No landscape 16:9 HD clips matched. Try a simpler query.",
+        );
+      }
+    } catch (error) {
+      setPexelsCandidates([]);
+      setPexelsHasNext(false);
+      setPexelsError(error instanceof Error ? error.message : "Pexels search failed.");
+    } finally {
+      setPexelsBusy(false);
+    }
+  };
+
+  const savePexelsKeyAndSearch = async () => {
+    setPexelsError(null);
+    try {
+      await savePlacementPexelsKey(pexelsKeyDraft);
+      setPexelsConfigured(true);
+      setPexelsKeyDraft("");
+      await runPexelsSearch();
+    } catch (error) {
+      setPexelsError(error instanceof Error ? error.message : "Could not save Pexels key.");
+    }
+  };
+
+  const usePexelsCandidate = async (key: string, candidate: StockCandidate) => {
+    setPexelsSelectingId(candidate.id);
+    setPexelsError(null);
+    try {
+      const result = await selectPlacementPexels(candidate);
+      applyImportedClip(key, result);
+      await loadPlacementLibrary();
+      setClipPickerTab("library");
+      setPexelsOpen(false);
+    } catch (error) {
+      setPexelsError(error instanceof Error ? error.message : "Could not download that clip.");
+    } finally {
+      setPexelsSelectingId(null);
     }
   };
 
@@ -4740,13 +6696,22 @@ function PlacementEditorPanel({
 
   const setTimingFromWord = (word: VisualPackageTranscriptWord) => {
     if (locked) return;
-    // Word chips drive whatever timing target is armed (line reveal, Ends, zoom).
+    // Word chips drive whatever timing target is armed (Starts, Ends, line, zoom).
+    if (armedKind === "start") {
+      // Starts is inclusive: the graphic covers this word.
+      setArmedFrame(wordStartFrame(word));
+      return;
+    }
     if (armedKind === "end") {
       // Ends is exclusive: undock as this word starts (graphic no longer covers it).
       setArmedFrame(wordStartFrame(word));
       return;
     }
     if (armedKind === "zoomIn" || armedKind === "zoomOut") {
+      setArmedFrame(wordStartFrame(word));
+      return;
+    }
+    if (armedKind === "layerStart" || armedKind === "layerEnd") {
       setArmedFrame(wordStartFrame(word));
       return;
     }
@@ -4757,9 +6722,12 @@ function PlacementEditorPanel({
   /** Chips are live whenever a timing target is armed (not only copy lines). */
   const wordChipsEnabled =
     !editDisabled &&
-    (armedKind === "end" ||
+    (armedKind === "start" ||
+      armedKind === "end" ||
       armedKind === "zoomIn" ||
       armedKind === "zoomOut" ||
+      armedKind === "layerStart" ||
+      armedKind === "layerEnd" ||
       (armedKind === "line" && Boolean(armed)));
 
   const addListLine = () => {
@@ -4828,15 +6796,17 @@ function PlacementEditorPanel({
   };
 
   const heroTargetLabel =
-    armedKind === "end"
-      ? "Ends (undock)"
-      : armedKind === "zoomIn"
-        ? "Zoom in"
-        : armedKind === "zoomOut"
-          ? "Zoom out"
-          : armed
-            ? slotLabel(armed.slot, armedIndex)
-            : "arm a timing target";
+    armedKind === "start"
+      ? "Starts"
+      : armedKind === "end"
+        ? "Ends (undock)"
+        : armedKind === "zoomIn"
+          ? "Zoom in"
+          : armedKind === "zoomOut"
+            ? "Zoom out"
+            : armed
+              ? slotLabel(armed.slot, armedIndex)
+              : "arm a timing target";
 
   const editor = (
     <aside className="visual-package-placement-editor" aria-label="Placement craft panel">
@@ -4915,13 +6885,13 @@ function PlacementEditorPanel({
       ) : (
         <>
           <div className="visual-package-placement-lines" role="list">
-            {draftLines.length === 0 && !hasZoomIn && !hasZoomOut ? (
+            {visibleLines.length === 0 && !hasZoomIn && !hasZoomOut && !noCopyLines ? (
               <p className="visual-package-layout-review-hint">
                 Motion-only engine — no copy lines. Scrub live preview and Lock when ready.
               </p>
             ) : null}
-            {draftLines.length > 0 ? (
-              draftLines.map((line, index) => {
+            {visibleLines.length > 0 ? (
+              visibleLines.map((line, index) => {
                 const isList = Boolean(listSlot && line.slot.startsWith(`${listSlot}.`));
                 const isArmed = armedKind === "line" && index === armedIndex;
                 return (
@@ -5080,7 +7050,71 @@ function PlacementEditorPanel({
               </div>
             ) : null}
 
-            {/* Ends is a peer of Title: click to arm, then use the shared hero nudges. */}
+            {/* Starts / Ends are peers of Title: arm, then use word chips + hero nudges.
+                Image overlay uses per-still Starts/Ends on each card instead. */}
+            {!isImageOverlay ? (
+            <>
+            <div
+              role="listitem"
+              className={[
+                "visual-package-placement-line-row",
+                armedKind === "start" ? "is-armed" : "",
+              ].join(" ")}
+              onClick={() => {
+                armStart();
+                onSeekReveal(spanStartFrame);
+              }}
+            >
+              <span
+                className="visual-package-placement-slot"
+                title="Frame where the graphic appears (inclusive). Click a spoken word to set it."
+              >
+                Starts
+              </span>
+              <span className="visual-package-placement-end-hint">
+                {spanStartFrame > beatStartFrame
+                  ? `After beat start (beat f ${beatStartFrame})`
+                  : "Dock at beat start (default)"}
+              </span>
+              <button
+                type="button"
+                className={[
+                  "visual-package-placement-line-frame",
+                  armedKind === "start" ? "is-armed" : "",
+                ].join(" ")}
+                title="Arm Starts and jump to dock"
+                disabled={editDisabled}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  armStart();
+                  onSeekReveal(spanStartFrame);
+                }}
+              >
+                f {spanStartFrame}
+              </button>
+              {armedKind === "start" ? (
+                <span className="visual-package-placement-armed-check" aria-hidden>
+                  ✓
+                </span>
+              ) : (
+                <span className="visual-package-placement-armed-check muted" aria-hidden />
+              )}
+              {spanStartFrame > beatStartFrame ? (
+                <button
+                  type="button"
+                  className="visual-package-placement-reset-end-inline"
+                  disabled={editDisabled}
+                  title={`Reset to beat start f ${beatStartFrame}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    armStart();
+                    setStartFrame(beatStartFrame);
+                  }}
+                >
+                  Reset
+                </button>
+              ) : null}
+            </div>
             <div
               role="listitem"
               className={[
@@ -5096,14 +7130,22 @@ function PlacementEditorPanel({
             >
               <span
                 className="visual-package-placement-slot"
-                title="Frame where the graphic undocks back to full talking-head"
+                title={
+                  isBroll
+                    ? "Frame where the overlay leaves. Default = end of the chosen clip. Click a spoken word to cut earlier."
+                    : "Frame where the graphic undocks back to full talking-head"
+                }
               >
                 Ends
               </span>
               <span className="visual-package-placement-end-hint">
-                {endFrameDraft != null && endFrameDraft < beatEndFrame
-                  ? `Undock before beat end (beat f ${beatEndFrame})`
-                  : "Undock at beat end (default)"}
+                {isBroll && clipEndCap != null
+                  ? endFrameDraft != null && endFrameDraft < clipEndCap
+                    ? `Before clip end (clip f ${clipEndCap})`
+                    : "End of clip (default)"
+                  : endFrameDraft != null && endFrameDraft < beatEndFrame
+                    ? `Undock before beat end (beat f ${beatEndFrame})`
+                    : "Undock at beat end (default)"}
               </span>
               <button
                 type="button"
@@ -5130,49 +7172,666 @@ function PlacementEditorPanel({
               ) : (
                 <span className="visual-package-placement-armed-check muted" aria-hidden />
               )}
-              {endFrameDraft != null && endFrameDraft < beatEndFrame ? (
+              {endFrameDraft != null && endFrameDraft < graphicMaxEnd ? (
                 <button
                   type="button"
                   className="visual-package-placement-reset-end-inline"
                   disabled={editDisabled}
-                  title={`Reset to beat end f ${beatEndFrame}`}
+                  title={
+                    isBroll && clipEndCap != null
+                      ? `Reset to clip end f ${clipEndCap}`
+                      : `Reset to beat end f ${beatEndFrame}`
+                  }
                   onClick={(e) => {
                     e.stopPropagation();
                     armEnd();
-                    setEndFrame(beatEndFrame);
+                    setEndFrame(graphicMaxEnd);
                   }}
                 >
                   Reset
                 </button>
               ) : null}
             </div>
+            </>
+            ) : null}
+
+            {isImageOverlay ? (
+              <div className="visual-package-image-overlay" role="group" aria-label="Image overlays">
+                <p className="visual-package-layout-review-hint">
+                  Each still has its own Starts/Ends. Arm a row, then use word chips or nudges.
+                  <strong> Place overlay</strong> shows the selected still on the talking-head
+                  video so you can drag or resize it.
+                </p>
+                {overlayDragOn && overlayHostEl ? (
+                  <ImageOverlayDragSurface
+                    host={overlayHostEl}
+                    layers={overlayLayers}
+                    selectedIndex={overlayLayerIndex}
+                    disabled={editDisabled}
+                    playheadFrame={playheadFrame}
+                    playing={playing}
+                    beatStartFrame={beatStartFrame}
+                    beatEndFrame={beatEndFrame}
+                    onSelect={(index) => {
+                      setOverlayLayerIndex(index);
+                      if (armedKind !== "layerStart" && armedKind !== "layerEnd") {
+                        setArmedKind("layerStart");
+                      }
+                    }}
+                    onChange={(index, patch) => {
+                      setOverlayLayers(
+                        overlayLayers.map((item, i) =>
+                          i === index ? { ...item, ...patch } : item,
+                        ),
+                      );
+                    }}
+                  />
+                ) : null}
+                {overlayLayers.map((layer, index) => {
+                  const assetId = String(layer.imageAssetId || "");
+                  const timing = overlayLayerTiming(layer, beatStartFrame, beatEndFrame);
+                  const patchLayer = (next: Record<string, unknown>) => {
+                    setOverlayLayers(
+                      overlayLayers.map((item, i) => (i === index ? { ...item, ...next } : item)),
+                    );
+                  };
+                  const armLayerStart = () => {
+                    setOverlayLayerIndex(index);
+                    setArmedKind("layerStart");
+                    onSeekReveal(timing.startFrame);
+                  };
+                  const armLayerEnd = () => {
+                    setOverlayLayerIndex(index);
+                    setArmedKind("layerEnd");
+                    onSeekReveal(Math.max(timing.startFrame, timing.endFrameExclusive - 1));
+                  };
+                  return (
+                    <div
+                      key={`overlay-${index}`}
+                      className={[
+                        "visual-package-image-overlay-card",
+                        index === overlayLayerIndex ? "is-selected" : "",
+                      ].join(" ")}
+                      onClick={() => {
+                        setOverlayLayerIndex(index);
+                        if (armedKind !== "layerStart" && armedKind !== "layerEnd") {
+                          setArmedKind("layerStart");
+                        }
+                      }}
+                    >
+                      <div className="visual-package-image-overlay-head">
+                        <strong>Image {index + 1}</strong>
+                        <button
+                          type="button"
+                          className="visual-package-placement-remove"
+                          disabled={editDisabled}
+                          onClick={() =>
+                            setOverlayLayers(overlayLayers.filter((_, i) => i !== index))
+                          }
+                        >
+                          ×
+                        </button>
+                      </div>
+                      {assetId ? (
+                        <img
+                          className="visual-package-image-overlay-thumb"
+                          src={placementLibraryImageUrl(assetId)}
+                          alt=""
+                        />
+                      ) : (
+                        <div className="visual-package-image-overlay-thumb is-empty">No still</div>
+                      )}
+                      <button
+                        type="button"
+                        className="visual-package-placement-knob-action"
+                        disabled={editDisabled}
+                        onClick={() => {
+                          void importPlacementImageDialog()
+                            .then((result) => {
+                              patchLayer({
+                                imageAssetId: result.assetId,
+                                x: layer.x ?? 0.55,
+                                y: layer.y ?? 0.08,
+                                width: layer.width ?? 0.4,
+                                height: layer.height ?? 0.4,
+                                startFrame: timing.startFrame,
+                                endFrameExclusive: timing.endFrameExclusive,
+                                revealFrame: timing.startFrame,
+                              });
+                            })
+                            .catch((error) => {
+                              console.warn("[visual-package] image import:", error);
+                            });
+                        }}
+                      >
+                        {assetId ? "Replace image…" : "Choose image…"}
+                      </button>
+                      <div
+                        role="listitem"
+                        className={[
+                          "visual-package-placement-line-row",
+                          armedKind === "layerStart" && overlayLayerIndex === index
+                            ? "is-armed"
+                            : "",
+                        ].join(" ")}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          armLayerStart();
+                        }}
+                      >
+                        <span
+                          className="visual-package-placement-slot"
+                          title="Frame where this still appears (inclusive)."
+                        >
+                          Starts
+                        </span>
+                        <span className="visual-package-placement-end-hint">
+                          {timing.startFrame > beatStartFrame
+                            ? `After beat start (beat f ${beatStartFrame})`
+                            : "At beat start"}
+                        </span>
+                        <button
+                          type="button"
+                          className={[
+                            "visual-package-placement-line-frame",
+                            armedKind === "layerStart" && overlayLayerIndex === index
+                              ? "is-armed"
+                              : "",
+                          ].join(" ")}
+                          title="Arm this still's Starts"
+                          disabled={editDisabled}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            armLayerStart();
+                          }}
+                        >
+                          f {timing.startFrame}
+                        </button>
+                        {armedKind === "layerStart" && overlayLayerIndex === index ? (
+                          <span className="visual-package-placement-armed-check" aria-hidden>
+                            ✓
+                          </span>
+                        ) : (
+                          <span className="visual-package-placement-armed-check muted" aria-hidden />
+                        )}
+                        {timing.startFrame > beatStartFrame ? (
+                          <button
+                            type="button"
+                            className="visual-package-placement-reset-end-inline"
+                            disabled={editDisabled}
+                            title={`Reset to beat start f ${beatStartFrame}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setOverlayLayerIndex(index);
+                              setArmedKind("layerStart");
+                              patchLayer({
+                                startFrame: beatStartFrame,
+                                endFrameExclusive: timing.endFrameExclusive,
+                                revealFrame: beatStartFrame,
+                              });
+                              onSeekReveal(beatStartFrame);
+                            }}
+                          >
+                            Reset
+                          </button>
+                        ) : null}
+                      </div>
+                      <div
+                        role="listitem"
+                        className={[
+                          "visual-package-placement-line-row",
+                          armedKind === "layerEnd" && overlayLayerIndex === index
+                            ? "is-armed"
+                            : "",
+                        ].join(" ")}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          armLayerEnd();
+                        }}
+                      >
+                        <span
+                          className="visual-package-placement-slot"
+                          title="Frame where this still leaves (exclusive)."
+                        >
+                          Ends
+                        </span>
+                        <span className="visual-package-placement-end-hint">
+                          {timing.endFrameExclusive < beatEndFrame
+                            ? `Before beat end (beat f ${beatEndFrame})`
+                            : "At beat end"}
+                        </span>
+                        <button
+                          type="button"
+                          className={[
+                            "visual-package-placement-line-frame",
+                            armedKind === "layerEnd" && overlayLayerIndex === index
+                              ? "is-armed"
+                              : "",
+                          ].join(" ")}
+                          title="Arm this still's Ends"
+                          disabled={editDisabled}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            armLayerEnd();
+                          }}
+                        >
+                          f {timing.endFrameExclusive}
+                        </button>
+                        {armedKind === "layerEnd" && overlayLayerIndex === index ? (
+                          <span className="visual-package-placement-armed-check" aria-hidden>
+                            ✓
+                          </span>
+                        ) : (
+                          <span className="visual-package-placement-armed-check muted" aria-hidden />
+                        )}
+                        {timing.endFrameExclusive < beatEndFrame ? (
+                          <button
+                            type="button"
+                            className="visual-package-placement-reset-end-inline"
+                            disabled={editDisabled}
+                            title={`Reset to beat end f ${beatEndFrame}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setOverlayLayerIndex(index);
+                              setArmedKind("layerEnd");
+                              patchLayer({
+                                startFrame: timing.startFrame,
+                                endFrameExclusive: beatEndFrame,
+                                revealFrame: timing.startFrame,
+                              });
+                              onSeekReveal(Math.max(timing.startFrame, beatEndFrame - 1));
+                            }}
+                          >
+                            Reset
+                          </button>
+                        ) : null}
+                      </div>
+                      <div className="visual-package-image-overlay-knobs">
+                        {(["x", "y", "width", "height"] as const).map((key) => (
+                          <label key={key}>
+                            {key === "x"
+                              ? "X"
+                              : key === "y"
+                                ? "Y"
+                                : key === "width"
+                                  ? "W"
+                                  : "H"}
+                            <input
+                              type="number"
+                              min={0}
+                              max={1}
+                              step={0.01}
+                              disabled={editDisabled}
+                              value={Number(clampOverlayLayer(layer)[key] ?? 0)}
+                              onChange={(event) =>
+                                patchLayer(
+                                  clampOverlayLayer({
+                                    ...layer,
+                                    [key]: Number(event.target.value),
+                                  }),
+                                )
+                              }
+                            />
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+                <button
+                  type="button"
+                  className="visual-package-placement-knob-action"
+                  disabled={editDisabled || overlayLayers.length >= 6}
+                  onClick={() =>
+                    setOverlayLayers([
+                      ...overlayLayers,
+                      {
+                        imageAssetId: "",
+                        x: 0.55,
+                        y: 0.08 + overlayLayers.length * 0.04,
+                        width: 0.4,
+                        height: 0.4,
+                        startFrame: beatStartFrame,
+                        endFrameExclusive: beatEndFrame,
+                        revealFrame: beatStartFrame,
+                      },
+                    ])
+                  }
+                >
+                  Add image
+                </button>
+              </div>
+            ) : null}
 
             {/* Image / other knobs — not frame-armed; neutral chrome. */}
-            {assetKeys.length > 0 || metaKeys.filter((k) => k !== "holdSec").length > 0 ? (
+            {assetKeys.filter((key) => key !== "layers").length > 0 || metaKeys.filter((k) => k !== "holdSec").length > 0 ? (
               <div
                 className="visual-package-placement-knobs"
                 role="group"
                 aria-label="Graphic knobs"
               >
-                {assetKeys.map((key) => (
-                  <div className="visual-package-placement-knob" key={key}>
-                    <span className="visual-package-placement-knob-label">{knobLabel(key)}</span>
-                    <span
-                      className="visual-package-placement-knob-value"
-                      title={String(assetsDraft[key] ?? "")}
-                    >
-                      {String(assetsDraft[key] || "demo")}
-                    </span>
-                    <button
-                      type="button"
-                      className="visual-package-placement-knob-action"
-                      disabled={editDisabled}
-                      onClick={() => void pickImageForKey(key)}
-                    >
-                      Choose…
-                    </button>
-                  </div>
-                ))}
+                {assetKeys.filter((key) => key !== "layers").map((key) => {
+                  const isVideoKey = key.toLowerCase().includes("video");
+                  return (
+                    <div key={key}>
+                      <div className="visual-package-placement-knob">
+                        <span className="visual-package-placement-knob-label">{knobLabel(key)}</span>
+                        <span
+                          className="visual-package-placement-knob-value"
+                          title={String(assetsDraft[key] ?? "")}
+                        >
+                          {String(assetsDraft[key] || (isVideoKey ? "choose clip" : "demo"))}
+                        </span>
+                        <span className="visual-package-placement-knob-actions">
+                          <button
+                            type="button"
+                            className="visual-package-placement-knob-action"
+                            disabled={editDisabled}
+                            onClick={() => void pickImageForKey(key)}
+                          >
+                            Choose…
+                          </button>
+                          {isVideoKey ? (
+                            <button
+                              type="button"
+                              className="visual-package-placement-knob-action"
+                              disabled={editDisabled}
+                              onClick={() => void openPexels()}
+                            >
+                              Pexels
+                            </button>
+                          ) : null}
+                        </span>
+                      </div>
+                      {isVideoKey && pexelsOpen ? (
+                        <div className="visual-package-pexels" role="region" aria-label="Pexels search">
+                          <p className="visual-package-pexels-legal">
+                            Frozen clips stay in this project. Pexels search is landscape
+                            16:9 · muted overlay.{" "}
+                            <a
+                              href="https://www.pexels.com/license/"
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Pexels License
+                            </a>
+                          </p>
+                          <div className="visual-package-pexels-tabs" role="tablist">
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={clipPickerTab === "library"}
+                              className={[
+                                "visual-package-placement-knob-action",
+                                clipPickerTab === "library" ? "is-selected" : "",
+                              ].join(" ")}
+                              disabled={editDisabled}
+                              onClick={() => {
+                                setClipPickerTab("library");
+                                void loadPlacementLibrary();
+                              }}
+                            >
+                              Library ({libraryClips.length})
+                            </button>
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={clipPickerTab === "search"}
+                              className={[
+                                "visual-package-placement-knob-action",
+                                clipPickerTab === "search" ? "is-selected" : "",
+                              ].join(" ")}
+                              disabled={editDisabled}
+                              onClick={() => setClipPickerTab("search")}
+                            >
+                              Pexels
+                            </button>
+                          </div>
+                          {clipPickerTab === "library" ? (
+                            <div className="visual-package-pexels-grid">
+                              {libraryClips.length === 0 ? (
+                                <p className="visual-package-pexels-legal">
+                                  No frozen clips yet. Search Pexels or Choose a file.
+                                </p>
+                              ) : (
+                                libraryClips.map((clip) => {
+                                  const playing = libraryPreviewId === clip.assetId;
+                                  return (
+                                    <div key={clip.assetId} className="visual-package-pexels-card">
+                                      <button
+                                        type="button"
+                                        className="visual-package-pexels-thumb"
+                                        disabled={editDisabled}
+                                        onClick={() =>
+                                          setLibraryPreviewId(playing ? null : clip.assetId)
+                                        }
+                                        title="Play preview"
+                                      >
+                                        {playing ? (
+                                          <video
+                                            src={placementLibraryVideoUrl(clip.assetId)}
+                                            poster={clip.previewUrl || undefined}
+                                            muted
+                                            playsInline
+                                            autoPlay
+                                            loop
+                                          />
+                                        ) : clip.previewUrl ? (
+                                          <img src={clip.previewUrl} alt="" />
+                                        ) : (
+                                          <video
+                                            src={placementLibraryVideoUrl(clip.assetId)}
+                                            muted
+                                            playsInline
+                                            preload="metadata"
+                                          />
+                                        )}
+                                      </button>
+                                      <div className="visual-package-pexels-meta">
+                                        <span>
+                                          {clip.width && clip.height
+                                            ? `${clip.width}×${clip.height} · `
+                                            : ""}
+                                          {clip.durationSec
+                                            ? `${Math.round(clip.durationSec)}s`
+                                            : clip.fileName}
+                                        </span>
+                                        <span className="visual-package-pexels-creator">
+                                          {clip.attribution || clip.fileName}
+                                        </span>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        className="visual-package-placement-knob-action"
+                                        disabled={editDisabled}
+                                        onClick={() => {
+                                          applyImportedClip(key, {
+                                            assetId: clip.assetId,
+                                            durationSec: clip.durationSec ?? undefined,
+                                          });
+                                          setPexelsOpen(false);
+                                        }}
+                                      >
+                                        Use this
+                                      </button>
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
+                          ) : null}
+                          {clipPickerTab === "search" && pexelsConfigured === false ? (
+                            <div className="visual-package-pexels-key">
+                              <input
+                                type="password"
+                                autoComplete="off"
+                                placeholder=".env.local · PEXELS_API_KEY"
+                                value={pexelsKeyDraft}
+                                disabled={editDisabled || pexelsBusy}
+                                onChange={(event) => setPexelsKeyDraft(event.target.value)}
+                              />
+                              <button
+                                type="button"
+                                className="visual-package-placement-knob-action"
+                                disabled={editDisabled || pexelsBusy || pexelsKeyDraft.trim().length < 10}
+                                onClick={() => void savePexelsKeyAndSearch()}
+                              >
+                                Save key
+                              </button>
+                            </div>
+                          ) : null}
+                          {clipPickerTab === "search" ? (
+                          <div className="visual-package-pexels-search">
+                            <input
+                              type="text"
+                              placeholder="Search clips"
+                              value={pexelsQuery}
+                              disabled={editDisabled || pexelsBusy}
+                              onChange={(event) => setPexelsQuery(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  void runPexelsSearch();
+                                }
+                              }}
+                            />
+                            <button
+                              type="button"
+                              className="visual-package-placement-knob-action"
+                              disabled={editDisabled || pexelsBusy || !pexelsQuery.trim()}
+                              onClick={() => void runPexelsSearch()}
+                            >
+                              {pexelsBusy ? "Searching…" : "Search"}
+                            </button>
+                          </div>
+                          ) : null}
+                          {clipPickerTab === "search" ? (
+                          <div className="visual-package-pexels-filters">
+                            <label>
+                              Size
+                              <select
+                                value={pexelsSize}
+                                disabled={editDisabled || pexelsBusy}
+                                onChange={(event) =>
+                                  setPexelsSize(event.target.value as "large" | "medium" | "small")
+                                }
+                              >
+                                <option value="large">4K+</option>
+                                <option value="medium">Full HD</option>
+                                <option value="small">HD</option>
+                              </select>
+                            </label>
+                            <label>
+                              Min s
+                              <input
+                                type="number"
+                                min={0}
+                                step={1}
+                                placeholder={`${Math.round(pexelsMinDurationSec)}`}
+                                value={pexelsMinSec}
+                                disabled={editDisabled || pexelsBusy}
+                                onChange={(event) => setPexelsMinSec(event.target.value)}
+                              />
+                            </label>
+                            <label>
+                              Max s
+                              <input
+                                type="number"
+                                min={0}
+                                step={1}
+                                placeholder="any"
+                                value={pexelsMaxSec}
+                                disabled={editDisabled || pexelsBusy}
+                                onChange={(event) => setPexelsMaxSec(event.target.value)}
+                              />
+                            </label>
+                          </div>
+                          ) : null}
+                          {pexelsError ? (
+                            <p className="visual-package-pexels-error">{pexelsError}</p>
+                          ) : null}
+                          {clipPickerTab === "search" &&
+                          (pexelsCandidates.length || pexelsHasPrev || pexelsHasNext) ? (
+                            <div className="visual-package-pexels-pager">
+                              <button
+                                type="button"
+                                className="visual-package-placement-knob-action"
+                                disabled={editDisabled || pexelsBusy || !pexelsHasPrev}
+                                onClick={() => void runPexelsSearch(Math.max(1, pexelsPage - 1))}
+                              >
+                                Prev
+                              </button>
+                              <span className="visual-package-pexels-page">
+                                Page {pexelsPage}
+                                {pexelsTotal > 0
+                                  ? ` · ${pexelsTotal.toLocaleString()} on Pexels`
+                                  : ""}
+                              </span>
+                              <button
+                                type="button"
+                                className="visual-package-placement-knob-action"
+                                disabled={editDisabled || pexelsBusy || !pexelsHasNext}
+                                onClick={() => void runPexelsSearch(pexelsPage + 1)}
+                              >
+                                Next
+                              </button>
+                            </div>
+                          ) : null}
+                          {clipPickerTab === "search" ? (
+                          <div className="visual-package-pexels-grid">
+                            {pexelsCandidates.map((candidate) => {
+                              const playing = pexelsPreviewId === candidate.id;
+                              const selecting = pexelsSelectingId === candidate.id;
+                              return (
+                                <div key={candidate.id} className="visual-package-pexels-card">
+                                  <button
+                                    type="button"
+                                    className="visual-package-pexels-thumb"
+                                    disabled={editDisabled}
+                                    onClick={() =>
+                                      setPexelsPreviewId(playing ? null : candidate.id)
+                                    }
+                                    title="Play preview"
+                                  >
+                                    {playing && candidate.previewPlayUrl ? (
+                                      <video
+                                        src={candidate.previewPlayUrl}
+                                        poster={candidate.previewUrl}
+                                        muted
+                                        playsInline
+                                        autoPlay
+                                        loop
+                                      />
+                                    ) : (
+                                      <img src={candidate.previewUrl} alt="" />
+                                    )}
+                                  </button>
+                                  <div className="visual-package-pexels-meta">
+                                    <span>
+                                      {candidate.width}×{candidate.height} · {Math.round(candidate.durationSec)}s
+                                    </span>
+                                    <span className="visual-package-pexels-creator">
+                                      {candidate.creator}
+                                    </span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="visual-package-placement-knob-action"
+                                    disabled={editDisabled || selecting || pexelsBusy}
+                                    onClick={() => void usePexelsCandidate(key, candidate)}
+                                  >
+                                    {selecting ? "Downloading…" : "Use this"}
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
                 {metaKeys
                   .filter((key) => key !== "holdSec")
                   .map((key) => {
@@ -5237,11 +7896,13 @@ function PlacementEditorPanel({
           {/* Shared hero frame control — drives only the armed target. */}
           <div className="visual-package-placement-frame-hero" aria-label="Frame fine-tune">
             <span className="visual-package-placement-speech-label" style={{ width: "100%", textAlign: "center" }}>
-              {armedKind === "end"
-                ? "Graphic end"
-                : armedKind === "zoomIn" || armedKind === "zoomOut"
-                  ? "Camera timing"
-                  : "Reveal timing"}{" "}
+              {armedKind === "start"
+                ? "Graphic start"
+                : armedKind === "end"
+                  ? "Graphic end"
+                  : armedKind === "zoomIn" || armedKind === "zoomOut"
+                    ? "Camera timing"
+                    : "Reveal timing"}{" "}
               · {heroTargetLabel}
               {previewBusy ? " · updating live preview…" : ""}
             </span>
@@ -5277,13 +7938,19 @@ function PlacementEditorPanel({
                 disabled={!heroCanNudge}
                 onChange={(e) => setArmedFrame(Number(e.target.value) || 0)}
                 title={
-                  armedKind === "end"
-                    ? "Graphic end frame (exclusive) — when the card undocks"
-                    : armedKind === "zoomIn"
-                      ? "Frame when zoom-in starts (absolute on locked cut)"
-                      : armedKind === "zoomOut"
-                        ? "Frame when zoom-out starts (absolute on locked cut)"
-                        : "Reveal frame (absolute on locked cut) for the armed line"
+                  armedKind === "start"
+                    ? "Graphic start frame (inclusive) — when the overlay docks"
+                    : armedKind === "end"
+                      ? "Graphic end frame (exclusive) — when the card undocks"
+                      : armedKind === "zoomIn"
+                        ? "Frame when zoom-in starts (absolute on locked cut)"
+                        : armedKind === "zoomOut"
+                          ? "Frame when zoom-out starts (absolute on locked cut)"
+                          : armedKind === "layerStart"
+                            ? "Frame when this still appears (inclusive)"
+                            : armedKind === "layerEnd"
+                              ? "Frame when this still leaves (exclusive)"
+                          : "Reveal frame (absolute on locked cut) for the armed line"
                 }
               />
             </label>
@@ -5336,21 +8003,35 @@ function PlacementEditorPanel({
                 (armedKind === "line" &&
                   armed != null &&
                   Math.abs((armed.revealFrame || 0) - frame) <= 1) ||
+                (armedKind === "start" &&
+                  Math.abs((startFrameDraft ?? beatStartFrame) - frame) <= 1) ||
                 (armedKind === "end" &&
                   endFrameDraft != null &&
                   Math.abs(endFrameDraft - frame) <= 1) ||
                 (armedKind === "zoomIn" &&
                   Math.abs(Number(motionDraft.zoomInFrame ?? NaN) - frame) <= 1) ||
                 (armedKind === "zoomOut" &&
-                  Math.abs(Number(motionDraft.zoomOutFrame ?? NaN) - frame) <= 1);
+                  Math.abs(Number(motionDraft.zoomOutFrame ?? NaN) - frame) <= 1) ||
+                (armedKind === "layerStart" &&
+                  armedOverlayTiming != null &&
+                  Math.abs(armedOverlayTiming.startFrame - frame) <= 1) ||
+                (armedKind === "layerEnd" &&
+                  armedOverlayTiming != null &&
+                  Math.abs(armedOverlayTiming.endFrameExclusive - frame) <= 1);
               const chipTitle =
-                armedKind === "end"
-                  ? `Set Ends (undock) · f ${frame} · ${frameToClock(frame, fps)}`
-                  : armedKind === "zoomIn"
-                    ? `Set zoom-in · f ${frame} · ${frameToClock(frame, fps)}`
-                    : armedKind === "zoomOut"
-                      ? `Set zoom-out · f ${frame} · ${frameToClock(frame, fps)}`
-                      : `Set reveal · f ${frame} · ${frameToClock(frame, fps)}`;
+                armedKind === "start"
+                  ? `Set Starts · f ${frame} · ${frameToClock(frame, fps)}`
+                  : armedKind === "end"
+                    ? `Set Ends (undock) · f ${frame} · ${frameToClock(frame, fps)}`
+                    : armedKind === "zoomIn"
+                      ? `Set zoom-in · f ${frame} · ${frameToClock(frame, fps)}`
+                      : armedKind === "zoomOut"
+                        ? `Set zoom-out · f ${frame} · ${frameToClock(frame, fps)}`
+                        : armedKind === "layerStart"
+                          ? `Set Image ${overlayLayerIndex + 1} Starts · f ${frame} · ${frameToClock(frame, fps)}`
+                          : armedKind === "layerEnd"
+                            ? `Set Image ${overlayLayerIndex + 1} Ends · f ${frame} · ${frameToClock(frame, fps)}`
+                        : `Set reveal · f ${frame} · ${frameToClock(frame, fps)}`;
               return (
                 <button
                   key={word.id}

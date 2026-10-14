@@ -18,16 +18,16 @@ the web application unless a desktop-specific fix is intentional.
 ## Current Status
 
 The local web application is functional, but it is still a development build,
-not a packaged end-user release. Its four workspaces are implemented and share
-one local API process.
+not a packaged end-user release. Its current workspaces share one local API
+process.
 
 | Workspace | Current capability |
 | --- | --- |
 | Transcript Edit | Run the five-stage workflow: choose/transcribe source media, validate and remove long pauses, fine-tune and manually review splices, review the complete rendered cut, then export with optional audio normalization. |
 | Caption Generator | Inherit the active project cut and export folder, prepare a timed browser preview, customize grouping and visual style, save custom styles, and render a captioned MP4. |
 | Audio Normalizer | Inherit the active project cut and export folder, analyze loudness, make Original/Corrected A/B previews, and export a normalized MP4. |
-| Visual Production | Build reusable graphics and imported-animation cues on the active project, render review ranges, generate the Codex visual-planning handoff, and render the final MP4. |
-| Visual Storytelling | Search reusable private callback footage before Pexels, prepare 3–5 B-roll candidates, review AI briefs and graphics together, freeze approved media, and retain stock evidence and credits. |
+| Visual Package | Masterbeater beats, scenelayer, assignment, placement, overlay B-roll, Stage 4 insert clips, and one delivery Final on the program clock. |
+| Graphics Library | Author, sample, and promote golden usages for assignment. |
 
 For a detailed implementation inventory, data-flow description, and API list,
 see [Current System](docs/current-system.md). For the known gaps and recommended
@@ -243,10 +243,11 @@ between the two interfaces is not guaranteed.
   record for moving away from a PySide6-first UI
 - [Transcript Editor Design](docs/transcript-editor-design.md): original product
   model, with current implementation status noted at the top
-- [Visual Production Workflow](docs/visual-production-workflow.md): separate
-  post-cut graphics, imported media, review, and rendering contract
-- [Visual Storytelling Assets](docs/visual-storytelling-assets.md): Creator
-  Library, callback footage, Pexels B-roll, review queue, and provenance plan
-  post-cut graphics workflow, reusable module contracts, and private workspace
-  boundary
+- [VCG Graphics Process](docs/vcg-graphics-process/README.md): current Visual
+  Package authority (beats, assignment, placement, overlay B-roll, insert clips)
+- [Visual Production Workflow](docs/visual-production-workflow.md): historical
+  Cook / Visual Production tab contract — superseded as a product surface
+- [Visual Storytelling Assets](docs/visual-storytelling-assets.md): historical
+  Pexels / Creator Library / B-roll planner notes — overlay B-roll is now an
+  engine; insert clips are the post-lock program edit list
 - [Security Policy](SECURITY.md): vulnerability reporting and trust boundary

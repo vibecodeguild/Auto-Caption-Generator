@@ -23,6 +23,7 @@ from app.core import visual_production
 from app.core.placement import (
     OUTPUT_FILENAME,
     REVIEWED_FILENAME,
+    broll_clip_end_frame_exclusive,
     build_cue_preview_payload,
     build_placement_final_plan,
     draft_lines_for_engine,
@@ -32,9 +33,10 @@ from app.core.placement import (
     render_placement_final_for_video_project,
     run_placement_for_video_project,
     save_placement_beat_for_video_project,
+    write_placement_original,
     write_placement_reviewed,
 )
-from app.core.placement_roles import placement_interface_summary
+from app.core.placement_roles import lines_to_engine_parameters, placement_interface_summary
 from app.core.scenelayer import write_scenelayer_original, write_scenelayer_reviewed
 
 
@@ -669,7 +671,9 @@ def test_build_placement_final_plan_requires_all_locked(tmp_path: Path, monkeypa
     for cue in plan["cues"]:
         assert 0.0 <= float(cue["startSec"]) < float(cue["endSec"]) <= 5.0
     assert Path(assembled["planPath"]).is_file()
-    assert Path(assembled["outputPath"]).as_posix().endswith("exports/final-video.mp4")
+    assert Path(assembled["outputPath"]).as_posix().endswith(
+        "working/placement-final/a-roll-master.mp4"
+    )
 
 
 def test_build_placement_final_render_command_uses_gpu_and_workers(monkeypatch) -> None:
@@ -717,7 +721,7 @@ def test_render_placement_final_reuses_receipt(tmp_path: Path, monkeypatch) -> N
     project = manifest_path.parent
     locked = project / "locked.mp4"
     locked.write_bytes(b"fake")
-    out = project / "exports" / "final-video.mp4"
+    out = project / "working" / "placement-final" / "a-roll-master.mp4"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(b"published")
 
@@ -767,7 +771,7 @@ def test_render_placement_final_reuses_receipt(tmp_path: Path, monkeypatch) -> N
     assert result["reused"] is True
     assert Path(result["outputPath"]).resolve() == out.resolve()
 
-    # force=True (Stage 3 default) must not short-circuit on an existing final-video.mp4.
+    # force=True must not short-circuit on an existing A-roll master.
     def _force_skips_reuse(*_a, **_k):
         assert out.is_file()
         raise RuntimeError("FORCE_REBUILD_REACHED")
@@ -781,14 +785,14 @@ def test_render_placement_final_reuses_receipt(tmp_path: Path, monkeypatch) -> N
 
 
 def test_render_placement_final_defaults_to_force_rebuild(tmp_path: Path, monkeypatch) -> None:
-    """Default force=True: existing final-video.mp4 + receipt must not silently reuse."""
+    """Default force=True: existing A-roll master + receipt must not silently reuse."""
 
     library = tmp_path / "library"
     manifest_path, manifest = _setup_project(tmp_path, library)
     project = manifest_path.parent
     locked = project / "locked.mp4"
     locked.write_bytes(b"fake")
-    out = project / "exports" / "final-video.mp4"
+    out = project / "working" / "placement-final" / "a-roll-master.mp4"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(b"old-published")
 
@@ -829,3 +833,321 @@ def test_render_placement_final_defaults_to_force_rebuild(tmp_path: Path, monkey
     )
     with pytest.raises(RuntimeError, match="DEFAULT_FORCE_REBUILD"):
         render_placement_final_for_video_project(manifest_path, manifest)
+
+
+def test_broll_cue_uses_start_and_end_frames() -> None:
+    payload = build_cue_preview_payload(
+        {
+            "beatId": "b1",
+            "engineId": "broll-overlay",
+            "startFrame": 30,
+            "endFrameExclusive": 90,
+            "lines": [],
+            "assets": {"videoAssetId": "clip"},
+            "meta": {"clipStartSec": 1.5, "fit": "cover"},
+        },
+        fps=30,
+    )
+    assert payload["startSec"] == 1.0
+    assert payload["endSec"] == 3.0
+    assert payload["parameters"]["videoAssetId"] == "clip"
+    assert payload["parameters"]["clipStartSec"] == 1.5
+
+
+def test_broll_clip_end_uses_remaining_media_then_beat_cap() -> None:
+    # 3s remaining after a 1s in-point at 30fps = 90 frames from start 10.
+    assert (
+        broll_clip_end_frame_exclusive(
+            start_frame=10,
+            clip_start_sec=1.0,
+            clip_duration_sec=4.0,
+            fps=30.0,
+            beat_end_exclusive=200,
+        )
+        == 100
+    )
+    # Clip longer than the beat → beat end wins.
+    assert (
+        broll_clip_end_frame_exclusive(
+            start_frame=0,
+            clip_start_sec=0.0,
+            clip_duration_sec=10.0,
+            fps=30.0,
+            beat_end_exclusive=60,
+        )
+        == 60
+    )
+
+
+def test_image_overlay_preview_cue_matches_schema() -> None:
+    from app.core.visual_production import validate_visual_plan
+
+    cue = build_cue_preview_payload(
+        {
+            "beatId": "b-img",
+            "engineId": "image-overlay",
+            "startFrame": 10,
+            "endFrameExclusive": 90,
+            "lines": [],
+            "assets": {
+                "layers": [
+                    {
+                        "imageAssetId": "slide-1",
+                        "x": 0.55,
+                        "y": 0.1,
+                        "width": 0.4,
+                        "height": 0.4,
+                        "revealFrame": 12,
+                    },
+                    {
+                        "imageAssetId": "slide-2",
+                        "x": 0.1,
+                        "y": 0.1,
+                        "width": 0.3,
+                        "height": 0.3,
+                        "startFrame": 40,
+                        "endFrameExclusive": 70,
+                    },
+                ]
+            },
+        },
+        fps=30.0,
+    )
+    assert cue["moduleId"] == "image-overlay"
+    assert cue["kind"] == "module"
+    layers = cue["parameters"]["layers"]
+    assert layers[0]["startFrame"] == 12
+    assert layers[0]["endFrameExclusive"] == 90
+    assert layers[1]["startFrame"] == 40
+    assert layers[1]["endFrameExclusive"] == 70
+    plan = {
+        "schemaVersion": 2,
+        "project": {"id": "preview", "name": "preview"},
+        "source": {"video": "locked.mp4", "transcript": ""},
+        "composition": {
+            "width": 1920,
+            "height": 1080,
+            "fps": 30,
+            "durationSec": 10,
+            "brandId": "vcg-white-editorial",
+        },
+        "assets": [],
+        "customCompositions": [],
+        "protectedFootage": [],
+        "cues": [
+            {
+                "id": cue["id"],
+                "kind": "module",
+                "moduleId": "image-overlay",
+                "startSec": cue["startSec"],
+                "endSec": cue["endSec"],
+                "enabled": True,
+                "parameters": cue["parameters"],
+                "semanticItems": cue["semanticItems"],
+            }
+        ],
+        "revisions": {"activeRevision": None, "items": []},
+        "productionGates": {
+            "representativeApproval": None,
+            "fullReviewApproval": None,
+            "layoutInspection": None,
+            "deliveryReopen": None,
+        },
+        "reviews": [],
+        "reviewHistory": [],
+    }
+    validate_visual_plan(plan, Path("."))
+
+
+def test_image_overlay_cue_span_covers_later_still() -> None:
+    cue = build_cue_preview_payload(
+        {
+            "beatId": "b-img-2",
+            "engineId": "image-overlay",
+            "startFrame": 10,
+            "endFrameExclusive": 30,
+            "lines": [],
+            "assets": {
+                "layers": [
+                    {
+                        "imageAssetId": "slide-1",
+                        "x": 0.5,
+                        "y": 0.1,
+                        "width": 0.4,
+                        "height": 0.4,
+                        "startFrame": 10,
+                        "endFrameExclusive": 30,
+                    },
+                    {
+                        "imageAssetId": "slide-2",
+                        "x": 0.1,
+                        "y": 0.1,
+                        "width": 0.3,
+                        "height": 0.3,
+                        "startFrame": 40,
+                        "endFrameExclusive": 80,
+                    },
+                ]
+            },
+        },
+        fps=30.0,
+    )
+    assert cue["startFrame"] == 10
+    assert cue["endFrameExclusive"] == 80
+    assert cue["parameters"]["layers"][1]["startFrame"] == 40
+    assert cue["parameters"]["layers"][1]["endFrameExclusive"] == 80
+
+
+def test_image_overlay_has_no_copy_lines() -> None:
+    spec = placement_interface_summary("image-overlay")
+    assert spec["fixedLineSlots"] == []
+    assert spec["assetKeys"] == ["layers"]
+    lines = draft_lines_for_engine(
+        "image-overlay",
+        {"wordsText": "this speech stays on the cut"},
+        start_frame=10,
+        end_frame_exclusive=90,
+    )
+    assert lines == []
+    params = lines_to_engine_parameters(
+        "image-overlay",
+        [],
+        assets={
+            "layers": [
+                {
+                    "imageAssetId": "slide-1",
+                    "x": 0.55,
+                    "y": 0.1,
+                    "width": 0.4,
+                    "height": 0.4,
+                    "revealFrame": 12,
+                }
+            ]
+        },
+    )
+    assert params["layers"][0]["imageAssetId"] == "slide-1"
+    assert params["layers"][0]["x"] == 0.55
+
+
+def test_broll_overlay_has_no_copy_lines() -> None:
+    spec = placement_interface_summary("broll-overlay")
+    assert spec["fixedLineSlots"] == []
+    assert spec["assetKeys"] == ["videoAssetId"]
+    lines = draft_lines_for_engine(
+        "broll-overlay",
+        {"wordsText": "this speech stays on the cut"},
+        start_frame=10,
+        end_frame_exclusive=90,
+    )
+    assert lines == []
+
+
+def test_broll_overlay_drops_leftover_copy_lines_on_save(tmp_path: Path) -> None:
+    from app.core.placement import _filter_lines_to_engine_slots
+    from app.core.video_project import VIDEO_PROJECT_SUFFIX
+
+    leftover = [
+        {"slot": "text", "text": "Here's Why", "revealFrame": 10},
+        {"slot": "nodes.0", "text": "One", "revealFrame": 20},
+    ]
+    assert _filter_lines_to_engine_slots("broll-overlay", leftover) == []
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / ".vcg-private").write_text("private\n", encoding="utf-8")
+    manifest = root / f"show{VIDEO_PROJECT_SUFFIX}"
+    manifest.write_text("{}", encoding="utf-8")
+    beat_row = {
+        "beatId": "b1",
+        "engineId": "broll-overlay",
+        "startFrame": 10,
+        "endFrameExclusive": 90,
+        "lines": leftover,
+        "locked": False,
+    }
+    write_placement_original(root, {"schemaVersion": 1, "beats": [beat_row]})
+    save_placement_beat_for_video_project(
+        manifest,
+        {},
+        {"beatId": "b1", "startFrame": 25, "endFrameExclusive": 80, "lines": leftover},
+    )
+    reviewed = load_placement_reviewed(root)
+    assert reviewed is not None
+    beat = reviewed["beats"][0]
+    assert beat["lines"] == []
+    assert beat["startFrame"] == 25
+    assert beat["endFrameExclusive"] == 80
+
+
+def test_save_clamps_broll_end_to_clip_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.video_project import VIDEO_PROJECT_SUFFIX
+
+    monkeypatch.setattr(
+        "app.core.visual_production.probe_visual_source",
+        lambda _path: {"durationSec": 2.0, "width": 1920, "height": 1080, "fps": 30},
+    )
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / ".vcg-private").write_text("private\n", encoding="utf-8")
+    media = root / "assets" / "placement"
+    media.mkdir(parents=True)
+    (media / "clip.mp4").write_bytes(b"fake-mp4")
+    manifest = root / f"show{VIDEO_PROJECT_SUFFIX}"
+    manifest.write_text("{}", encoding="utf-8")
+    write_placement_original(
+        root,
+        {
+            "schemaVersion": 1,
+            "beats": [
+                {
+                    "beatId": "b1",
+                    "engineId": "broll-overlay",
+                    "startFrame": 0,
+                    "endFrameExclusive": 300,
+                    "lines": [],
+                    "assets": {"videoAssetId": "clip"},
+                    "meta": {"clipStartSec": 0, "fit": "cover"},
+                    "locked": False,
+                }
+            ],
+        },
+    )
+    save_placement_beat_for_video_project(
+        manifest,
+        {},
+        {"beatId": "b1", "endFrameExclusive": 300},
+    )
+    reviewed = load_placement_reviewed(root)
+    assert reviewed is not None
+    # 2.0s × 30fps from start 0 → exclusive 60, not the 300-frame beat.
+    assert reviewed["beats"][0]["endFrameExclusive"] == 60
+    save_placement_beat_for_video_project(
+        manifest,
+        {},
+        {"beatId": "b1", "endFrameExclusive": 40},
+    )
+    reviewed = load_placement_reviewed(root)
+    assert reviewed is not None
+    # Earlier human pick is kept.
+    assert reviewed["beats"][0]["endFrameExclusive"] == 40
+
+
+def test_import_placement_media_copies_video(tmp_path: Path) -> None:
+    from app.core.placement import import_placement_media
+    from app.core.video_project import VIDEO_PROJECT_SUFFIX
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / ".vcg-private").write_text("private\n", encoding="utf-8")
+    manifest = root / f"show{VIDEO_PROJECT_SUFFIX}"
+    manifest.write_text("{}", encoding="utf-8")
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"fake-mp4")
+
+    result = import_placement_media(manifest, source)
+
+    assert result["assetId"] == "clip"
+    assert result["mediaType"] == "video"
+    copied = root / "assets" / "placement" / "clip.mp4"
+    assert copied.is_file()
+    assert copied.read_bytes() == b"fake-mp4"

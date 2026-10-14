@@ -133,9 +133,10 @@ representative sample frame beside its actual scene source frame.
 
 ## Pexels Version One
 
-Pexels is the only stock provider in this round. Its API key is stored in local
-application settings or supplied through `PEXELS_API_KEY`; it is never written
-to a project, plan, log, or public repository.
+Pexels is the only stock provider in this round. Its API key is `PEXELS_API_KEY`
+in repo-root `.env.local` (overrides `.env`), or already set in the process
+environment. It is never written to a project, plan, log, or public repository.
+`.env.local` is gitignored.
 
 Each structured B-roll brief carries literal queries, metaphorical queries,
 avoid terms, narrative purpose, timing, and desired duration. Candidate ranking

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import mimetypes
 import subprocess
@@ -53,32 +54,6 @@ from app.core.splice_generation import (
 )
 from app.core.splice_preview import source_splice_preview_segments
 from app.core.style_library import delete_user_style, is_built_in_style, load_style_library, save_user_style
-from app.core.story_assets import (
-    build_review_prompt,
-    build_nonmedia_suggestion,
-    create_recipe_suggestion,
-    credits_text,
-    creator_asset_path,
-    default_creator_library,
-    decide_suggestion,
-    freeze_creator_asset,
-    import_creator_asset,
-    load_creator_library,
-    load_visual_catalog,
-    load_visual_suggestions,
-    pexels_settings,
-    prepare_suggestion_approval_evidence,
-    recipe_preview_path,
-    suggestion_approval_frame_path,
-    treatment_motion_preview_path,
-    save_pexels_key,
-    search_creator_library,
-    search_pexels_videos,
-    select_pexels_candidate,
-    update_creator_asset,
-    update_suggestion,
-    update_treatment_metadata,
-)
 from app.core.graphics_library import (
     INDEX_FILENAME,
     LEGACY_INDEX_FILENAME,
@@ -103,13 +78,23 @@ from app.core.assignment import (
     save_assignment_override_for_video_project,
 )
 from app.core.placement import (
+    a_roll_output_path_for_project,
     build_placement_live_preview,
     final_job_path_for_project,
     final_output_path_for_project,
     import_placement_image,
-    render_placement_final_for_video_project,
+    import_placement_media,
     run_placement_for_video_project,
     save_placement_beat_for_video_project,
+    list_placement_clips,
+    placement_library_image_path,
+    placement_library_video_path,
+    search_placement_pexels,
+    select_placement_pexels,
+)
+from app.core.program_edits import (
+    render_program_final_for_video_project,
+    save_program_edits_for_video_project,
 )
 from app.core.scenelayer import (
     run_scenelayer_for_video_project,
@@ -123,62 +108,14 @@ from app.core.transcriber import transcribe_audio
 from app.core.transcript_history import build_edit_analysis, build_generation_metadata, with_initial_repeat_suggestions
 from app.core.transcript_remap import remap_transcript
 from app.core.transcript_model import TranscriptProject
-from app.core.creator_production import transcript_word_timing_hash
-from app.core.creator_production import (
-    accept_review_note,
-    create_approval_record,
-    next_artifact_version,
-    save_review_note,
-    utc_now,
-    write_versioned_artifact,
-)
-from app.core.creator_project import (
-    promote_creator_artifact,
-    transition_creator_project,
-    upgrade_creator_workflow_package,
-    verify_live_workflow_package_matches_lock,
-)
 from app.core.file_utils import sha256_file, validate_input_video
 from app.core.video_cutter import CutCanceled, frame_intervals_to_seconds, run_cut
-from app.core.visual_production import (
-    active_visual_master,
-    active_visual_revision,
-    active_visual_runtime,
-    approve_full_review,
-    approve_representative_scene,
-    build_hyperframes_composition,
-    create_visual_plan_in_video_project,
-    create_visual_project,
-    find_visual_root,
-    import_visual_asset,
-    load_visual_plan,
-    render_visual_plan,
-    resolve_project_path,
-    save_visual_plan,
-    scene_frame_preview,
-    verify_delivered_revision_reopened,
-    visual_production_gate_report,
-    visual_plan_response,
-)
-from app.core.creator_project import (
-    available_channel_profiles,
-    ensure_capture_layout_catalog,
-    initialize_creator_project,
-    resolve_hyperframes_animation_source,
-    verify_creator_project,
-)
-from app.core.creator_jobs import CreatorJobStore
-from app.core.creator_evidence import save_source_evidence, source_evidence_draft
-from app.core.creator_render_jobs import CreatorRenderJobStore
-from app.core.creator_rendering import resolve_creator_renderer_assets
-from app.core.creator_studio import create_studio_handoff, persist_studio_edits
-from app.core.creator_production import read_frozen_bytes
+from app.core.visual_production import load_visual_plan
 from app.core.video_project import (
     DEFAULT_PROJECT_PATHS,
     VIDEO_PROJECT_SUFFIX,
     add_source_clips,
     artifact_current,
-    build_visual_plan_prompt,
     create_video_project_from_sources,
     load_video_project,
     mark_artifact_current,
@@ -198,7 +135,6 @@ from app.core.windows_dialog import (
     choose_video_file as _windows_choose_video_file,
     choose_video_files as _windows_choose_video_files,
     choose_visual_asset_file as _windows_choose_visual_asset_file,
-    choose_visual_plan_file as _windows_choose_visual_plan_file,
 )
 
 
@@ -233,12 +169,6 @@ class ApiState:
     transcription_jobs: dict[str, TranscriptionJob]
     visual_plan_path: Path | None = None
     visual_plan: dict | None = None
-    visual_render_jobs: dict[str, VisualRenderJob]
-    visual_render_start_lock: threading.Lock
-    creator_job_stores: dict[str, CreatorJobStore]
-    creator_job_lock: threading.Lock
-    creator_render_job_threads: dict[str, threading.Thread]
-    creator_render_job_stores: dict[str, CreatorRenderJobStore]
 
     def __init__(self) -> None:
         self.video_project_path = None
@@ -271,12 +201,6 @@ class ApiState:
         self.transcription_jobs = {}
         self.visual_plan_path = None
         self.visual_plan = None
-        self.visual_render_jobs = {}
-        self.visual_render_start_lock = threading.Lock()
-        self.creator_job_stores = {}
-        self.creator_job_lock = threading.Lock()
-        self.creator_render_job_threads = {}
-        self.creator_render_job_stores = {}
 
 
 class TranscriptionJob:
@@ -318,7 +242,7 @@ class TranscriptionJob:
 
 
 class PlacementFinalJob:
-    """Background full-episode Final encode for Visual Package Stage 3."""
+    """Background Stage 4 program Final (A-roll master + insert concat)."""
 
     def __init__(self, job_id: str, project_root: Path, quality: str = "standard") -> None:
         self.job_id = job_id
@@ -366,7 +290,7 @@ class PlacementFinalJob:
         return {
             "job_id": self.job_id,
             "project_root": str(self.project_root),
-            "purpose": "placement-final",
+            "purpose": "program-final",
             "quality": self.quality,
             "status": self.status,
             "stage": self.stage,
@@ -615,105 +539,6 @@ class ExportCutJob:
             return self._snapshot_unlocked()
 
 
-class VisualRenderJob:
-    def __init__(self, job_id: str, plan_path: Path, purpose: str) -> None:
-        self.job_id = job_id
-        self.plan_path = plan_path.resolve()
-        self.purpose = purpose
-        self.status = "running"
-        self.value = 0
-        self.stage = "queued"
-        self.message = "Final export queued..." if purpose == "final" else "Visual render queued..."
-        self.output_path: str | None = None
-        self.error: str | None = None
-        self.started_at = datetime.now(timezone.utc).isoformat()
-        self.updated_at = self.started_at
-        self.started_monotonic = time.monotonic()
-        self.lock = threading.Lock()
-        self._persist()
-
-    @property
-    def state_path(self) -> Path:
-        return self.plan_path.parent / "render-job.json"
-
-    def _stage_for(self, value: int, message: str) -> str:
-        lowered = message.lower()
-        if value >= 100:
-            return "complete"
-        if "verif" in lowered:
-            return "verifying"
-        if "audio" in lowered:
-            return "audio"
-        if "render" in lowered and value >= 40:
-            return "rendering"
-        if "lint" in lowered or "layout" in lowered or "gate" in lowered:
-            return "validating"
-        return "preparing"
-
-    def _snapshot_unlocked(self) -> dict:
-        elapsed = max(0.0, time.monotonic() - self.started_monotonic)
-        eta = None
-        if self.status == "running" and 0 < self.value < 100:
-            eta = max(0.0, elapsed * (100 - self.value) / self.value)
-        return {
-            "job_id": self.job_id,
-            "plan_path": str(self.plan_path),
-            "purpose": self.purpose,
-            "status": self.status,
-            "stage": self.stage,
-            "value": self.value,
-            "message": self.message,
-            "output_path": self.output_path,
-            "error": self.error,
-            "started_at": self.started_at,
-            "updated_at": self.updated_at,
-            "elapsed_seconds": round(elapsed, 1),
-            "eta_seconds": round(eta, 1) if eta is not None else None,
-        }
-
-    def _persist(self) -> None:
-        try:
-            snapshot = self._snapshot_unlocked()
-            temporary = self.state_path.with_suffix(".json.tmp")
-            temporary.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
-            temporary.replace(self.state_path)
-        except OSError:
-            # The in-memory job remains authoritative while the API is running.
-            pass
-
-    def update(self, value: int, message: str) -> None:
-        with self.lock:
-            bounded_value = max(0, min(100, value))
-            if bounded_value == self.value and message == self.message:
-                return
-            self.value = bounded_value
-            self.message = message
-            self.stage = self._stage_for(self.value, message)
-            self.updated_at = datetime.now(timezone.utc).isoformat()
-            self._persist()
-
-    def complete(self, output_path: Path) -> None:
-        with self.lock:
-            self.status = "complete"
-            self.value = 100
-            self.stage = "complete"
-            self.message = "Final video verified and ready." if self.purpose == "final" else "Visual render complete."
-            self.output_path = str(output_path)
-            self.updated_at = datetime.now(timezone.utc).isoformat()
-            self._persist()
-
-    def fail(self, error: str) -> None:
-        with self.lock:
-            self.status = "failed"
-            self.stage = "failed"
-            self.error = error
-            self.message = error
-            self.updated_at = datetime.now(timezone.utc).isoformat()
-            self._persist()
-
-    def snapshot(self, job_id: str) -> dict:
-        with self.lock:
-            return self._snapshot_unlocked()
 
 
 state = ApiState()
@@ -934,94 +759,40 @@ class AudioPreviewRequest(AudioAnalyzeRequest):
     duration_seconds: float = 20.0
 
 
-class VisualPlanSaveRequest(BaseModel):
-    plan: dict
 
 
-class VisualRenderRequest(BaseModel):
-    start_sec: float | None = None
-    end_sec: float | None = None
-    quality: str = "standard"
-    purpose: str | None = None
 
 
-class VisualRepresentativeApprovalRequest(BaseModel):
-    cue_id: str
 
 
-class VisualReopenVerificationRequest(BaseModel):
-    revision_number: int
-    plan_hash: str
 
 
-class CreatorProductionJobRequest(BaseModel):
-    task_kind: str
-    requested_resource_ids: list[str] = Field(default_factory=list)
-    input_artifact_keys: list[str] = Field(default_factory=list)
-    task_parameters: dict = Field(default_factory=dict)
 
 
-class CreatorProductionClaimRequest(BaseModel):
-    task_id: str
-    visible_skill_ids: list[str] = Field(default_factory=list)
 
 
-class CreatorProductionCompleteRequest(BaseModel):
-    task_id: str
-    output: dict | None = None
-    technical_capability_ids: list[str] = Field(default_factory=list)
 
 
-class CreatorProductionInitializeRequest(BaseModel):
-    channel_profile_id: str
-    legacy_transcript_attestation: dict | None = None
 
 
-class CreatorProductionWorkflowUpgradeRequest(BaseModel):
-    actor: str
-    reason: str
 
 
-class CreatorSourceEvidenceRequest(BaseModel):
-    ledger: dict
 
 
-class CreatorReviewNoteRequest(BaseModel):
-    id: str
-    sequence_id: str
-    element_id: str | None = None
-    word_id: str | None = None
-    absolute_frame: int
-    note: str
 
 
-class CreatorStudioHandoffRequest(BaseModel):
-    sequence_id: str
-    element_id: str | None = None
-    absolute_frame: int
 
 
-class CreatorStudioEditRequest(BaseModel):
-    handoff: dict
-    edits: list[dict]
 
 
 class SourceClipOrderRequest(BaseModel):
     clip_ids: list[str]
 
 
-class CreatorAssetUpdateRequest(BaseModel):
-    updates: dict
 
 
-class CreatorAssetUseRequest(BaseModel):
-    start_sec: float
-    end_sec: float
-    suggestion_id: str | None = None
 
 
-class SuggestionUpdateRequest(BaseModel):
-    updates: dict
 
 
 class SuggestionDecisionRequest(BaseModel):
@@ -1221,11 +992,6 @@ def open_video_project_dialog() -> dict:
 
 
 @app.get("/api/video-project/visual-prompt")
-def video_project_visual_prompt() -> dict:
-    active = _active_video_project()
-    if active is None:
-        raise HTTPException(status_code=404, detail="Create or open a private video project first.")
-    return {"prompt": build_visual_plan_prompt(active[0], active[1])}
 
 
 @app.get("/api/visual-package/status")
@@ -1499,6 +1265,170 @@ def visual_package_import_placement_image() -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/visual-package/placement/import-media-dialog")
+def visual_package_import_placement_media() -> dict:
+    """Pick an image or video and copy it into the project's placement store."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        source = _choose_visual_asset_file()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Windows media picker error ({type(exc).__name__}): {exc}",
+        ) from exc
+    if source is None:
+        raise HTTPException(status_code=400, detail="No file selected.")
+    try:
+        return import_placement_media(active[0], source)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/visual-package/placement/pexels/settings")
+def visual_package_pexels_settings() -> dict:
+    """Whether a Pexels API key is configured (never returns the key)."""
+
+    from app.core.story_assets import PEXELS_LICENSE_NAME, PEXELS_LICENSE_URL, pexels_settings
+
+    settings = pexels_settings()
+    configured = bool(str(settings.get("apiKey") or "").strip())
+    return {
+        "configured": configured,
+        "source": settings.get("source") or "missing",
+        "license": PEXELS_LICENSE_NAME,
+        "licensePage": PEXELS_LICENSE_URL,
+    }
+
+
+@app.post("/api/visual-package/placement/pexels/settings")
+def visual_package_save_pexels_key(payload: PexelsKeyRequest) -> dict:
+    """Store PEXELS_API_KEY in repo-root .env.local (gitignored; not the project)."""
+
+    from app.core.story_assets import PEXELS_LICENSE_NAME, PEXELS_LICENSE_URL, pexels_settings, save_pexels_key
+
+    try:
+        save_pexels_key(payload.api_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    settings = pexels_settings()
+    return {
+        "configured": True,
+        "source": settings.get("source") or "local-settings",
+        "license": PEXELS_LICENSE_NAME,
+        "licensePage": PEXELS_LICENSE_URL,
+    }
+
+
+@app.post("/api/visual-package/placement/pexels/search")
+def visual_package_search_placement_pexels(payload: dict = Body(...)) -> dict:
+    """Search one page of Pexels landscape 16:9 overlay clips (preview stills + short play URLs)."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    query = str((payload or {}).get("query") or "").strip()
+    try:
+        min_duration = float((payload or {}).get("minDurationSec") or 0)
+    except (TypeError, ValueError):
+        min_duration = 0.0
+    try:
+        page = int((payload or {}).get("page") or 1)
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        max_duration = float((payload or {}).get("maxDurationSec") or 0)
+    except (TypeError, ValueError):
+        max_duration = 0.0
+    size = str((payload or {}).get("size") or "large").strip().lower()
+    try:
+        return search_placement_pexels(
+            query,
+            min_duration_sec=min_duration,
+            max_duration_sec=max_duration,
+            size=size,
+            page=page,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (OSError, TimeoutError, urllib.error.URLError) as exc:
+        raise HTTPException(status_code=400, detail=f"Pexels search failed: {exc}") from exc
+
+
+@app.get("/api/visual-package/placement/library")
+def visual_package_list_placement_library() -> dict:
+    """List frozen overlay clips already downloaded into this project."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        return list_placement_clips(active[0])
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/visual-package/placement/library/{asset_id}/video")
+def visual_package_placement_library_video(
+    asset_id: str,
+    range_header: str | None = Header(default=None, alias="Range"),
+) -> Response:
+    """Stream a frozen placement clip for library / insert preview (seekable)."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        path = placement_library_video_path(active[0], asset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _range_response(path, range_header)
+
+
+@app.get("/api/visual-package/placement/library/{asset_id}/image")
+def visual_package_placement_library_image(asset_id: str) -> Response:
+    """Stream a frozen placement still for overlay craft thumbs."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        path = placement_library_image_path(active[0], asset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    media_type, _encoding = mimetypes.guess_type(path.name)
+    return FileResponse(
+        path,
+        media_type=media_type or "image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/visual-package/placement/pexels/select")
+def visual_package_select_placement_pexels(payload: StockSelectRequest) -> dict:
+    """Download the chosen Pexels clip into the project placement store with license evidence."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        return select_placement_pexels(active[0], payload.candidate)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (OSError, TimeoutError, urllib.error.URLError) as exc:
+        raise HTTPException(status_code=400, detail=f"Pexels download failed: {exc}") from exc
+
+
 @app.put("/api/visual-package/placement/beat")
 def visual_package_save_placement_beat(payload: dict = Body(...)) -> dict:
     """Save lines/timing/lock for one placement beat. Original file untouched."""
@@ -1524,7 +1454,7 @@ def _run_placement_final_job(
     from app.core.placement import FinalRenderCanceled
 
     try:
-        result = render_placement_final_for_video_project(
+        result = render_program_final_for_video_project(
             manifest_path,
             manifest,
             quality=quality,
@@ -1553,11 +1483,11 @@ def _run_placement_final_job(
 
 @app.post("/api/visual-package/placement/final")
 def visual_package_start_placement_final(payload: dict = Body(default={})) -> dict:
-    """Start full-episode Final encode when every assigned placement is locked.
+    """Start Stage 4 delivery Final when every assigned placement is locked.
 
-    Stream-copies locked-cut audio (no second normalize). Duplicate starts reconnect
-    to the in-flight job for this project. Existing final-video.mp4 is overwritten
-    (force defaults True) — receipt reuse never blocks Stage 3 Final.
+    Ensures the A-roll master (reused when the placement fingerprint matches unless
+    force is true), concatenates insert clips, writes the program transcript, and
+    publishes exports/final-video.mp4. Duplicate starts reconnect to the in-flight job.
     """
 
     active = _active_video_project()
@@ -1568,9 +1498,9 @@ def visual_package_start_placement_final(payload: dict = Body(default={})) -> di
     quality = str((payload or {}).get("quality") or "standard").strip().lower() or "standard"
     if quality not in {"draft", "standard", "high"}:
         raise HTTPException(status_code=400, detail="quality must be draft, standard, or high.")
-    # Stage 3 Final always force-rebuilds unless an explicit force:false is sent.
+    # Default force=False reuses a matching A-roll master (insert-only edits).
     force_raw = (payload or {}).get("force")
-    force = True if force_raw is None else bool(force_raw)
+    force = False if force_raw is None else bool(force_raw)
 
     with state.placement_final_start_lock:
         running = next(
@@ -1715,6 +1645,36 @@ def visual_package_placement_final_video(
     return _range_response(Path(snapshot["output_path"]), range_header)
 
 
+@app.put("/api/visual-package/program/inserts")
+def visual_package_save_program_inserts(payload: dict = Body(...)) -> dict:
+    """Save Stage 4 insert list (legal T, frozen clip, mute, display name)."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    try:
+        return save_program_edits_for_video_project(active[0], active[1], payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/visual-package/program/a-roll")
+def visual_package_program_a_roll(
+    range_header: str | None = Header(default=None, alias="Range"),
+) -> Response:
+    """Private A-roll master for Stage 4 preview (graphics on the locked cut)."""
+
+    active = _active_video_project()
+    if active is None:
+        raise HTTPException(status_code=404, detail="No private video project is open.")
+    path = a_roll_output_path_for_project(video_project_root(active[0]))
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="A-roll master is not built yet. Run Final once, or preview A-roll from the locked cut.")
+    return _range_response(path, range_header)
+
+
 @app.get("/api/visual-package/source-video")
 def visual_package_source_video(
     request: Request,
@@ -1837,11 +1797,6 @@ def _choose_output_folder() -> Path | None:
         ) from exc
 
 
-def _choose_visual_plan_file() -> Path | None:
-    try:
-        return _windows_choose_visual_plan_file()
-    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-        raise HTTPException(status_code=500, detail=f"Windows visual-plan picker error ({type(exc).__name__}): {exc}") from exc
 
 
 def _choose_visual_asset_file() -> Path | None:
@@ -2477,508 +2432,14 @@ def cancel_export_cut_job(job_id: str) -> dict:
     return {"ok": True, "job": job.request_cancel()}
 
 
-def _require_visual_plan() -> tuple[Path, dict]:
-    if state.visual_plan_path is None or state.visual_plan is None:
-        raise HTTPException(status_code=404, detail="No private visual-production project is open.")
-    return state.visual_plan_path, state.visual_plan
 
 
-def _creator_production_root() -> Path:
-    plan_path, _plan = _require_visual_plan()
-    return find_visual_root(plan_path)
 
 
-def _creator_job_store() -> CreatorJobStore:
-    root = _creator_production_root().resolve()
-    key = str(root)
-    with state.creator_job_lock:
-        store = state.creator_job_stores.get(key)
-        if store is None:
-            store = CreatorJobStore(root)
-            state.creator_job_stores[key] = store
-        return store
 
 
-def _creator_render_job_store() -> CreatorRenderJobStore:
-    root = _creator_production_root().resolve()
-    key = str(root)
-    with state.creator_job_lock:
-        store = state.creator_render_job_stores.get(key)
-        if store is None:
-            store = CreatorRenderJobStore(root, project_root())
-            state.creator_render_job_stores[key] = store
-        return store
 
 
-def _run_creator_render_job(store: CreatorRenderJobStore, job_id: str) -> None:
-    try:
-        store.run(job_id)
-    finally:
-        with state.creator_job_lock:
-            state.creator_render_job_threads.pop(job_id, None)
-
-
-@app.get("/api/creator-production/channel-profiles")
-def creator_production_channel_profiles() -> dict:
-    plan_path, _plan = _require_visual_plan()
-    profiles = available_channel_profiles(find_visual_root(plan_path))
-    return {
-        "profiles": [
-            {
-                key: profile[key]
-                for key in ("id", "version", "referenceGrammarRef", "fileName")
-            }
-            for profile in profiles
-        ]
-    }
-
-
-@app.post("/api/creator-production/initialize")
-def initialize_creator_production(
-    payload: CreatorProductionInitializeRequest | None = None,
-) -> dict:
-    plan_path, plan = _require_visual_plan()
-    root = find_visual_root(plan_path)
-    source = plan.get("source") if isinstance(plan.get("source"), dict) else {}
-    try:
-        locked_cut = resolve_project_path(root, str(source.get("video") or ""))
-        final_transcript = resolve_project_path(root, str(source.get("transcript") or ""))
-        renderer_assets = resolve_creator_renderer_assets(project_root())
-        hyperframes_package = json.loads(
-            (renderer_assets["hyperframesPackage"] / "package.json").read_text(encoding="utf-8")
-        )
-        hyperframes_version = str(hyperframes_package["version"])
-        animation_source = resolve_hyperframes_animation_source(
-            private_root=root,
-            hyperframes_version=hyperframes_version,
-        )
-        current = initialize_creator_project(
-            root,
-            episode_id=str((plan.get("project") or {}).get("id") or ""),
-            locked_cut=locked_cut,
-            final_transcript=final_transcript,
-            hyperframes_skill_root=animation_source,
-            hyperframes_cli_path=renderer_assets["hyperframesCli"],
-            hyperframes_version=hyperframes_version,
-            channel_profile_id=payload.channel_profile_id if payload else "",
-            preserve_capability_source_cache=True,
-            legacy_transcript_attestation=(
-                payload.legacy_transcript_attestation if payload else None
-            ),
-        )
-        return {
-            "initialized": True,
-            "workflowId": current["workflowId"],
-            "episodeId": current["episodeId"],
-            "state": current["state"],
-            "currentHash": current["currentHash"],
-            "workflowBundleHash": current["workflowBundle"]["bundleHash"],
-            "capabilityBundleHash": current["capabilityBundle"]["bundleHash"],
-        }
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Creator Production initialization failed: {exc}",
-        ) from exc
-
-
-@app.get("/api/creator-production/current")
-def current_creator_production() -> dict:
-    root = _creator_production_root()
-    current_path = root / "creator-production" / "current.json"
-    if not current_path.is_file():
-        return {
-            "initialized": False,
-            "reason": "Creator Production has not been initialized for this private project.",
-            "recoveryAction": "Initialize Creator Production.",
-        }
-    try:
-        current = json.loads(current_path.read_text(encoding="utf-8"))
-        verify_creator_project(root, current)
-        workflow_upgrade_required = False
-        workflow_upgrade_reason = None
-        try:
-            verify_live_workflow_package_matches_lock(root, current)
-        except RuntimeError as exc:
-            workflow_upgrade_required = True
-            workflow_upgrade_reason = str(exc)
-        catalog_ref = current["artifacts"]["capabilityCatalog"]
-        catalog = json.loads((root / catalog_ref["path"]).read_text(encoding="utf-8"))
-        review_stale = False
-        if current["artifacts"].get("reviewState") and current["artifacts"].get("buildLock"):
-            review_state = json.loads(
-                (root / current["artifacts"]["reviewState"]["path"]).read_text(encoding="utf-8")
-            )
-            active_build = json.loads(
-                (root / current["artifacts"]["buildLock"]["path"]).read_text(encoding="utf-8")
-            )
-            review_stale = review_state["buildHash"] != active_build["buildHash"]
-        return {
-            "initialized": True,
-            "workflowId": current["workflowId"],
-            "episodeId": current["episodeId"],
-            "state": current["state"],
-            "currentHash": current["currentHash"],
-            "capabilitySummary": catalog["inventorySummary"],
-            "reviewStale": review_stale,
-            "workflowUpgradeRequired": workflow_upgrade_required,
-            "workflowUpgradeReason": workflow_upgrade_reason,
-            "artifactAvailability": {
-                key: key in current["artifacts"]
-                for key in (
-                    "analysisLedger",
-                    "semanticManifest",
-                    "sourceEvidence",
-                    "episodeManifest",
-                    "compiledEpisode",
-                    "buildLock",
-                    "browserPreflight",
-                    "reviewState",
-                    "finalRenderReceipt",
-                )
-            },
-            "authority": {
-                "productionOwnsRouting": True,
-                "nativeWorkflowDiscoveryPerformed": False,
-                "lockedTranscriptIsTimingAuthority": True,
-                "durationTargetsEnabled": False,
-            },
-        }
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Creator Production verification failed: {exc}") from exc
-
-
-@app.post("/api/creator-production/workflow-upgrade")
-def upgrade_creator_production_workflow(
-    payload: CreatorProductionWorkflowUpgradeRequest,
-) -> dict:
-    try:
-        upgrade_creator_workflow_package(
-            _creator_production_root(),
-            actor=payload.actor,
-            reason=payload.reason,
-        )
-        return current_creator_production()
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Creator Production workflow upgrade failed: {exc}",
-        ) from exc
-
-
-@app.get("/api/creator-production/capabilities")
-def creator_production_capabilities() -> dict:
-    root = _creator_production_root()
-    current_path = root / "creator-production" / "current.json"
-    if not current_path.is_file():
-        raise HTTPException(
-            status_code=409,
-            detail="Capability inventory unavailable until Creator Production is initialized.",
-        )
-    try:
-        current = json.loads(current_path.read_text(encoding="utf-8"))
-        verify_creator_project(root, current)
-        catalog_ref = current["artifacts"]["capabilityCatalog"]
-        catalog_bytes = read_frozen_bytes(root, catalog_ref["object"])
-        catalog = json.loads(catalog_bytes.decode("utf-8"))
-        return catalog
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Capability inventory unavailable: {exc}") from exc
-
-
-@app.get("/api/creator-production/pipeline")
-def creator_production_pipeline() -> dict:
-    try:
-        root = _creator_production_root()
-        current = json.loads(
-            (root / "creator-production" / "current.json").read_text(encoding="utf-8")
-        )
-        verify_creator_project(root, current)
-        catalog_ref = current["artifacts"]["capabilityCatalog"]
-        catalog = json.loads((root / catalog_ref["path"]).read_text(encoding="utf-8"))
-        semantic_ref = current["artifacts"].get("semanticManifest")
-        if not semantic_ref:
-            return {"sequences": [], "adaptationDebt": [], "sourceEvidenceStatus": "not-ready"}
-        semantic = json.loads((root / semantic_ref["path"]).read_text(encoding="utf-8"))
-        capabilities = {item["id"]: item for item in catalog["capabilities"]}
-        decision_ref = current["artifacts"].get("sequenceDecisionIndex")
-        decisions = {}
-        if decision_ref:
-            decision_index = json.loads((root / decision_ref["path"]).read_text(encoding="utf-8"))
-            decisions = {item["sequenceId"]: item for item in decision_index["items"]}
-        source_resources = {}
-        for resource in catalog["sourceResources"]:
-            source_resources.setdefault(
-                (resource["relativePath"], resource["sha256"]), []
-            ).append(resource["id"])
-        sequences = []
-        debt = []
-        for sequence in semantic["sequences"]:
-            candidates = []
-            for capability_id in sequence["candidateCapabilityIds"]:
-                capability = capabilities[capability_id]
-                admissions = [
-                    item
-                    for item in capability.get("projectAdmissions", [])
-                    if item.get("episodeId") == current["episodeId"]
-                    and item.get("sequenceId") == sequence["id"]
-                ]
-                candidate = {
-                    "capabilityId": capability_id,
-                    "sourceResourceIds": source_resources.get(
-                        (
-                            capability["source"]["relativePath"],
-                            capability["source"]["sha256"],
-                        ),
-                        [],
-                    ),
-                    "implementationMaturity": capability["implementationMaturity"],
-                    "technicalAdmission": capability["technicalAdmission"],
-                    "projectAdmissions": admissions,
-                }
-                candidates.append(candidate)
-            item = {
-                "id": sequence["id"],
-                "chapterId": sequence["chapterId"],
-                "absoluteStartFrame": sequence["absoluteStartFrame"],
-                "absoluteEndFrameExclusive": sequence["absoluteEndFrameExclusive"],
-                "editorialJob": sequence["editorialJob"],
-                "semanticForm": sequence["semanticForm"],
-                "presentationRole": sequence["presentationRole"],
-                "candidates": candidates,
-                "decision": decisions.get(sequence["id"]),
-            }
-            sequences.append(item)
-            decision = decisions.get(sequence["id"])
-            if (
-                sequence["presentationRole"] != "source-led"
-                and (not decision or decision["disposition"] != "selected")
-            ):
-                debt.append(item)
-        return {
-            "fps": semantic["fps"],
-            "sequences": sequences,
-            "adaptationDebt": debt,
-            "sourceEvidenceStatus": (
-                "complete"
-                if current["artifacts"].get("sourceEvidence")
-                else (
-                    "layout-classification-blocked"
-                    if current["artifacts"].get("sourceLayoutClassification")
-                    else "agent-classification-required"
-                )
-            ),
-        }
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Production pipeline unavailable: {exc}") from exc
-
-
-@app.get("/api/creator-production/jobs")
-def list_creator_production_jobs() -> dict:
-    try:
-        store = _creator_job_store()
-        recovered = store.recover_interrupted()
-        return {"jobs": store.list(), "recoveredJobIds": recovered}
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Creator Production jobs unavailable: {exc}") from exc
-
-
-@app.post("/api/creator-production/jobs")
-def create_creator_production_job(payload: CreatorProductionJobRequest) -> dict:
-    try:
-        root = _creator_production_root()
-        if payload.task_kind == "classify-layouts":
-            ensure_capture_layout_catalog(root)
-        current = json.loads(
-            (root / "creator-production" / "current.json").read_text(encoding="utf-8")
-        )
-        verify_creator_project(root, current)
-        unknown = sorted(set(payload.input_artifact_keys) - set(current["artifacts"]))
-        if unknown:
-            raise ValueError(f"Unknown current artifact keys: {', '.join(unknown)}")
-        input_refs = [current["artifacts"][key] for key in payload.input_artifact_keys]
-        return _creator_job_store().create(
-            task_kind=payload.task_kind,
-            requested_resource_ids=payload.requested_resource_ids,
-            input_artifact_refs=input_refs,
-            task_parameters=payload.task_parameters,
-        )
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Creator Production job rejected: {exc}") from exc
-
-
-@app.get("/api/creator-production/jobs/{job_id}")
-def get_creator_production_job(job_id: str) -> dict:
-    try:
-        return _creator_job_store().load(job_id)
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=404, detail=f"Creator Production job unavailable: {exc}") from exc
-
-
-@app.post("/api/creator-production/jobs/{job_id}/start")
-def start_creator_production_job(job_id: str) -> dict:
-    """Reject the retired nested Codex execution path."""
-    raise HTTPException(
-        status_code=410,
-        detail=(
-            "Nested Creator Production execution is retired. Use the prepared "
-            "handoff from a normal user-visible Codex task."
-        ),
-    )
-
-
-@app.get("/api/creator-production/jobs/{job_id}/handoff")
-def get_creator_production_handoff(job_id: str) -> dict:
-    try:
-        return _creator_job_store().handoff(job_id)
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Creator Production handoff unavailable: {exc}",
-        ) from exc
-
-
-@app.post("/api/creator-production/jobs/{job_id}/claim")
-def claim_creator_production_job(
-    job_id: str,
-    payload: CreatorProductionClaimRequest,
-) -> dict:
-    try:
-        return _creator_job_store().claim(
-            job_id,
-            task_id=payload.task_id,
-            visible_skill_ids=payload.visible_skill_ids,
-        )
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Creator Production handoff could not be claimed: {exc}",
-        ) from exc
-
-
-@app.post("/api/creator-production/jobs/{job_id}/complete")
-def complete_creator_production_job(
-    job_id: str,
-    payload: CreatorProductionCompleteRequest,
-) -> dict:
-    try:
-        return _creator_job_store().complete(
-            job_id,
-            task_id=payload.task_id,
-            output=payload.output,
-            technical_capability_ids=payload.technical_capability_ids,
-        )
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Creator Production handoff could not complete: {exc}",
-        ) from exc
-
-
-@app.post("/api/creator-production/jobs/{job_id}/cancel")
-def cancel_creator_production_job(job_id: str) -> dict:
-    try:
-        return _creator_job_store().cancel(job_id)
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Creator Production job could not be canceled: {exc}") from exc
-
-
-@app.get("/api/creator-production/source-evidence")
-def get_creator_source_evidence() -> dict:
-    try:
-        root = _creator_production_root()
-        current = json.loads(
-            (root / "creator-production" / "current.json").read_text(encoding="utf-8")
-        )
-        verify_creator_project(root, current)
-        reference = current["artifacts"].get("sourceEvidence")
-        if reference:
-            return {
-                "status": "complete",
-                "ledger": json.loads((root / reference["path"]).read_text(encoding="utf-8")),
-                "artifactRef": reference,
-            }
-        if not current["artifacts"].get("captureLayoutCatalog"):
-            return {"status": "agent-classification-required"}
-        return {"status": "agent-classification-required", "draft": source_evidence_draft(root)}
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Source evidence unavailable: {exc}") from exc
-
-
-@app.post("/api/creator-production/source-evidence")
-def update_creator_source_evidence(payload: CreatorSourceEvidenceRequest) -> dict:
-    try:
-        reference = save_source_evidence(_creator_production_root(), payload.ledger)
-        return {"status": "complete", "artifactRef": reference}
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Source evidence rejected: {exc}") from exc
-
-
-@app.get("/api/creator-production/render-jobs")
-def list_creator_render_jobs() -> dict:
-    try:
-        store = _creator_render_job_store()
-        recovered = store.recover_interrupted()
-        return {"jobs": store.list(), "recoveredJobIds": recovered}
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Creator render jobs unavailable: {exc}") from exc
-
-
-@app.post("/api/creator-production/render-jobs")
-def create_creator_render_job() -> dict:
-    try:
-        return _creator_render_job_store().create()
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Creator review render rejected: {exc}") from exc
-
-
-@app.post("/api/creator-production/render-jobs/{job_id}/start")
-def start_creator_render_job(job_id: str) -> dict:
-    try:
-        store = _creator_render_job_store()
-        job = store.load(job_id)
-        if job["status"] != "queued":
-            raise ValueError(f"Render job cannot start from {job['status']}.")
-        with state.creator_job_lock:
-            thread = threading.Thread(
-                target=_run_creator_render_job,
-                args=(store, job_id),
-                daemon=True,
-                name=f"creator-render-{job_id[:8]}",
-            )
-            state.creator_render_job_threads[job_id] = thread
-            thread.start()
-        return store.load(job_id)
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Creator review render could not start: {exc}") from exc
-
-
-@app.post("/api/creator-production/render-jobs/{job_id}/cancel")
-def cancel_creator_render_job(job_id: str) -> dict:
-    try:
-        return _creator_render_job_store().cancel(job_id)
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Creator review render could not be canceled: {exc}") from exc
-
-
-@app.get("/api/creator-production/review-video")
-def creator_production_review_video(
-    range_header: str | None = Header(default=None, alias="Range"),
-) -> Response:
-    try:
-        root = _creator_production_root()
-        current = json.loads(
-            (root / "creator-production" / "current.json").read_text(encoding="utf-8")
-        )
-        verify_creator_project(root, current)
-        reference = current["artifacts"].get("reviewRenderReceipt")
-        if not reference:
-            raise ValueError("No final-quality review render is available.")
-        receipt = json.loads((root / reference["path"]).read_text(encoding="utf-8"))
-        path = (root / receipt["outputRelativePath"]).resolve()
-        return _range_response(path, range_header)
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=404, detail=f"Review video unavailable: {exc}") from exc
 
 
 def _load_creator_review() -> tuple[Path, dict, dict, dict]:
@@ -3009,333 +2470,6 @@ def _persist_creator_review(root: Path, current: dict, review: dict) -> dict:
     )
     promote_creator_artifact(root, artifact_key="reviewState", artifact_reference=reference)
     return {"review": review, "artifactRef": reference}
-
-
-@app.get("/api/creator-production/review")
-def get_creator_production_review() -> dict:
-    try:
-        root, current, review, build = _load_creator_review()
-        manifest = json.loads(
-            (root / current["artifacts"]["episodeManifest"]["path"]).read_text(
-                encoding="utf-8"
-            )
-        )
-        preflight_ref = current["artifacts"].get("structuralPreflight")
-        preflight = (
-            json.loads((root / preflight_ref["path"]).read_text(encoding="utf-8"))
-            if preflight_ref
-            else None
-        )
-        return {
-            "review": review,
-            "build": build,
-            "manifest": manifest,
-            "preflight": preflight,
-        }
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Creator review unavailable: {exc}") from exc
-
-
-@app.post("/api/creator-production/review/notes")
-def save_creator_production_review_note(payload: CreatorReviewNoteRequest) -> dict:
-    try:
-        root, current, review, build = _load_creator_review()
-        sequence_ids = {item["sequenceId"] for item in build["sequences"]}
-        if payload.sequence_id not in sequence_ids:
-            raise ValueError("Review note targets an unknown sequence.")
-        note = {
-            "id": payload.id,
-            "buildHash": build["buildHash"],
-            "sequenceId": payload.sequence_id,
-            "elementId": payload.element_id,
-            "wordId": payload.word_id,
-            "absoluteFrame": payload.absolute_frame,
-            "note": payload.note,
-            "status": "changes-requested",
-            "saveStatus": "saving",
-            "savedAt": utc_now(),
-        }
-        result = _persist_creator_review(root, current, save_review_note(review, note))
-        if current["state"] == "REVIEW_READY":
-            transition_creator_project(
-                root,
-                target_state="REVISION_REQUESTED",
-                gate_receipt_refs=[result["artifactRef"]["sha256"]],
-                actor="creator",
-            )
-        return result
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Review note was not saved: {exc}") from exc
-
-
-@app.post("/api/creator-production/review/notes/{note_id}/accept")
-def accept_creator_production_review_note(note_id: str) -> dict:
-    try:
-        root, current, review, _build = _load_creator_review()
-        return _persist_creator_review(
-            root,
-            current,
-            accept_review_note(review, note_id, actor_role="creator"),
-        )
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Review note could not be accepted: {exc}") from exc
-
-
-@app.post("/api/creator-production/review/approve")
-def approve_creator_production_review() -> dict:
-    try:
-        root, current, review, build = _load_creator_review()
-        approved = create_approval_record(review, build, actor_role="creator")
-        result = _persist_creator_review(root, current, approved)
-        review_render = current["artifacts"]["reviewRenderReceipt"]
-        promote_creator_artifact(
-            root,
-            artifact_key="finalRenderReceipt",
-            artifact_reference=review_render,
-        )
-        result["delivery"] = {
-            "reusedExactReviewBytes": True,
-            "renderReceiptRef": review_render,
-        }
-        latest = json.loads(
-            (root / "creator-production" / "current.json").read_text(encoding="utf-8")
-        )
-        if latest["state"] == "REVIEW_READY":
-            latest = transition_creator_project(
-                root,
-                target_state="APPROVED",
-                gate_receipt_refs=[result["artifactRef"]["sha256"]],
-                actor="creator",
-            )
-            latest = transition_creator_project(
-                root,
-                target_state="RENDERING",
-                gate_receipt_refs=[review_render["sha256"]],
-                actor="production",
-            )
-            transition_creator_project(
-                root,
-                target_state="DELIVERED",
-                gate_receipt_refs=[review_render["sha256"]],
-                actor="production",
-            )
-        return result
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Complete revision could not be approved: {exc}") from exc
-
-
-@app.post("/api/creator-production/studio/handoff")
-def create_creator_studio_handoff(payload: CreatorStudioHandoffRequest) -> dict:
-    try:
-        root, _current, review, build = _load_creator_review()
-        if review["buildHash"] != build["buildHash"]:
-            raise ValueError("Studio handoff is blocked because the review build is stale.")
-        current = json.loads(
-            (root / "creator-production" / "current.json").read_text(encoding="utf-8")
-        )
-        manifest = json.loads(
-            (root / current["artifacts"]["episodeManifest"]["path"]).read_text(encoding="utf-8")
-        )
-        sequence = next(
-            (
-                item
-                for item in manifest["sequences"]
-                if item["id"] == payload.sequence_id
-            ),
-            None,
-        )
-        if sequence is None:
-            raise ValueError("Studio sequence does not exist.")
-        chapter_lock = next(
-            item for item in build["chapters"]
-            if item["chapterId"] == sequence["chapterId"]
-        )
-        studio_project = (
-            root
-            / "creator-production"
-            / "compositions"
-            / sequence["chapterId"]
-            / chapter_lock["chapterInputHash"]
-        ).resolve()
-        entry = studio_project / "public" / "index.html"
-        if not entry.is_file():
-            raise ValueError(
-                "The exact compiled Studio composition is unavailable; render preflight first."
-            )
-        hyperframes_cli = (
-            project_root()
-            / "node_modules"
-            / "hyperframes"
-            / "dist"
-            / "cli.js"
-        ).resolve()
-        return create_studio_handoff(
-            manifest=manifest,
-            build_lock=build,
-            sequence_id=payload.sequence_id,
-            element_id=payload.element_id,
-            absolute_frame=payload.absolute_frame,
-            studio_context={
-                "projectPath": str(studio_project),
-                "compositionPath": str(entry),
-                "previewCommand": (
-                    f'node "{hyperframes_cli}" preview '
-                    f'"{studio_project}"'
-                ),
-                "selectionQueryCommand": (
-                    f'node "{hyperframes_cli}" preview '
-                    f'"{studio_project}" --selection --json'
-                ),
-            },
-        )
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Studio handoff rejected: {exc}") from exc
-
-
-@app.post("/api/creator-production/studio/edits")
-def apply_creator_studio_edits(payload: CreatorStudioEditRequest) -> dict:
-    try:
-        return persist_studio_edits(
-            _creator_production_root(),
-            handoff=payload.handoff,
-            edits=payload.edits,
-        )
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=f"Studio edits rejected: {exc}") from exc
-
-
-@app.get("/api/visual/current")
-def current_visual_project() -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        plan = load_visual_plan(plan_path)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not reload the private visual plan: {exc}") from exc
-    state.visual_plan = plan
-    return visual_plan_response(plan_path, plan)
-
-
-@app.get("/api/visual/catalog")
-def visual_catalog() -> dict:
-    try:
-        return load_visual_catalog()
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=500, detail=f"Could not load the visual treatment catalog: {exc}") from exc
-
-
-@app.get("/api/visual/catalog/recipes/{recipe_id}/preview")
-def visual_recipe_preview(recipe_id: str) -> FileResponse:
-    try:
-        path = recipe_preview_path(recipe_id)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if path is None:
-        raise HTTPException(status_code=404, detail="No private production preview is available for this recipe yet.")
-    return FileResponse(path)
-
-
-@app.get("/api/visual/catalog/treatments/{treatment_id}/preview")
-def visual_treatment_preview(treatment_id: str) -> FileResponse:
-    try:
-        path = recipe_preview_path(treatment_id, require_recipe=False)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if path is None:
-        raise HTTPException(status_code=404, detail="No private production preview is available for this treatment yet.")
-    return FileResponse(path)
-
-
-@app.get("/api/visual/catalog/treatments/{treatment_id}/motion-preview")
-def visual_treatment_motion_preview(treatment_id: str) -> FileResponse:
-    try:
-        path = treatment_motion_preview_path(treatment_id)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if path is None:
-        raise HTTPException(status_code=404, detail="No private motion preview is available for this treatment yet.")
-    return FileResponse(path, media_type="video/mp4")
-
-
-@app.patch("/api/visual/catalog/treatments/{treatment_id}")
-def patch_visual_treatment(treatment_id: str, payload: TreatmentUpdateRequest) -> dict:
-    try:
-        treatment, _library = update_treatment_metadata(treatment_id, payload.updates)
-        return treatment
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/visual/source-frame")
-def visual_source_frame(time_sec: float) -> FileResponse:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        return FileResponse(scene_frame_preview(plan_path, time_sec), media_type="image/jpeg")
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/visual/review-prompt")
-def visual_review_prompt(payload: ReviewPromptRequest) -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        prompt, plan, count = build_review_prompt(plan_path, set(payload.review_ids) if payload.review_ids is not None else None)
-        state.visual_plan = plan
-        response = visual_plan_response(plan_path, plan)
-        response.update({"prompt": prompt, "noteCount": count})
-        return response
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not prepare review notes: {exc}") from exc
-
-
-@app.get("/api/creator-library")
-def creator_library(query: str = "") -> dict:
-    return {"root": str(default_creator_library()), "assets": search_creator_library(query)}
-
-
-@app.post("/api/creator-library/import-dialog")
-def import_creator_library_asset() -> dict:
-    source = _choose_visual_asset_file()
-    if source is None:
-        raise HTTPException(status_code=400, detail="No AI footage or image selected.")
-    try:
-        asset, library, duplicate = import_creator_asset(source)
-        return {"asset": asset, "duplicate": duplicate, "assets": library["assets"]}
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not import Creator Library asset: {exc}") from exc
-
-
-@app.get("/api/creator-library/{asset_id}/media")
-def creator_library_media(asset_id: str, range: str | None = Header(default=None)) -> Response:
-    try:
-        return _range_response(creator_asset_path(asset_id), range)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.patch("/api/creator-library/{asset_id}")
-def patch_creator_library_asset(asset_id: str, payload: CreatorAssetUpdateRequest) -> dict:
-    try:
-        asset, library = update_creator_asset(asset_id, payload.updates)
-        return {"asset": asset, "assets": library["assets"]}
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/creator-library/{asset_id}/use")
-def use_creator_library_asset(asset_id: str, payload: CreatorAssetUseRequest) -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        _cue, plan = freeze_creator_asset(
-            plan_path,
-            asset_id,
-            start_sec=payload.start_sec,
-            end_sec=payload.end_sec,
-            suggestion_id=payload.suggestion_id,
-        )
-        state.visual_plan = plan
-        return visual_plan_response(plan_path, plan)
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not add Creator Library asset: {exc}") from exc
 
 
 def _set_graphics_library_env(path: Path) -> None:
@@ -3549,248 +2683,6 @@ def render_graphics_library_sample(entry_id: str, payload: GraphicsLibraryRender
     )
 
 
-@app.get("/api/visual/suggestions")
-def visual_suggestions() -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        return load_visual_suggestions(plan_path)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not load visual suggestions: {exc}") from exc
-
-
-@app.patch("/api/visual/suggestions/{suggestion_id}")
-def patch_visual_suggestion(suggestion_id: str, payload: SuggestionUpdateRequest) -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        return update_suggestion(plan_path, suggestion_id, payload.updates)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/visual/suggestions/{suggestion_id}/decision")
-def decide_visual_suggestion(suggestion_id: str, payload: SuggestionDecisionRequest) -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        suggestion, suggestions, plan = decide_suggestion(
-            plan_path,
-            suggestion_id,
-            action=payload.action,
-            notes=payload.notes,
-        )
-        state.visual_plan = plan
-        response = visual_plan_response(plan_path, plan)
-        response.update({"suggestion": suggestion, "suggestions": suggestions["suggestions"], "coverage": suggestions.get("coverage")})
-        return response
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/visual/suggestions/{suggestion_id}/approval-evidence/prepare")
-def prepare_visual_suggestion_approval_evidence(suggestion_id: str) -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        suggestion, suggestions = prepare_suggestion_approval_evidence(plan_path, suggestion_id)
-        return {"suggestion": suggestion, "suggestions": suggestions["suggestions"], "coverage": suggestions.get("coverage")}
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/visual/suggestions/{suggestion_id}/approval-frame")
-def visual_suggestion_approval_frame(suggestion_id: str) -> FileResponse:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        return FileResponse(suggestion_approval_frame_path(plan_path, suggestion_id), media_type="image/png")
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post("/api/visual/suggestions/recipe")
-def add_recipe_suggestion(payload: RecipeSuggestionRequest) -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        return create_recipe_suggestion(
-            plan_path,
-            payload.recipe_id,
-            start_sec=payload.start_sec,
-            end_sec=payload.end_sec,
-        )
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/visual/suggestions/{suggestion_id}/build")
-def build_visual_suggestion(suggestion_id: str) -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        _cue, plan = build_nonmedia_suggestion(plan_path, suggestion_id)
-        state.visual_plan = plan
-        return visual_plan_response(plan_path, plan)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/visual/pexels/settings")
-def pexels_configuration() -> dict:
-    settings = pexels_settings()
-    return {"configured": bool(settings["apiKey"]), "source": settings["source"]}
-
-
-@app.post("/api/visual/pexels/settings")
-def save_pexels_configuration(payload: PexelsKeyRequest) -> dict:
-    try:
-        save_pexels_key(payload.api_key)
-    except (OSError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"configured": True, "source": "local-settings"}
-
-
-@app.post("/api/visual/suggestions/{suggestion_id}/pexels/search")
-def search_suggestion_stock(suggestion_id: str) -> dict:
-    plan_path, _plan = _require_visual_plan()
-    suggestions = load_visual_suggestions(plan_path)
-    suggestion = next((item for item in suggestions["suggestions"] if item.get("id") == suggestion_id), None)
-    if suggestion is None:
-        raise HTTPException(status_code=404, detail="Visual suggestion not found.")
-    try:
-        candidates = search_pexels_videos(suggestion.get("stockBrief") or {}, limit=5)
-        update_suggestion(plan_path, suggestion_id, {"status": "prepared", "candidates": candidates})
-        return {"suggestionId": suggestion_id, "candidates": candidates}
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, urllib.error.URLError) as exc:
-        raise HTTPException(status_code=400, detail=f"Pexels search failed: {exc}") from exc
-
-
-@app.post("/api/visual/suggestions/{suggestion_id}/pexels/select")
-def select_suggestion_stock(suggestion_id: str, payload: StockSelectRequest) -> dict:
-    plan_path, _plan = _require_visual_plan()
-    suggestions = load_visual_suggestions(plan_path)
-    suggestion = next((item for item in suggestions["suggestions"] if item.get("id") == suggestion_id), None)
-    if suggestion is None:
-        raise HTTPException(status_code=404, detail="Visual suggestion not found.")
-    try:
-        _cue, plan = select_pexels_candidate(plan_path, suggestion_id, payload.candidate, start_sec=float(suggestion["startSec"]), end_sec=float(suggestion["endSec"]))
-        state.visual_plan = plan
-        response = visual_plan_response(plan_path, plan)
-        response["credits"] = credits_text(plan_path)
-        return response
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, urllib.error.URLError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not use Pexels footage: {exc}") from exc
-
-
-@app.get("/api/visual/credits")
-def visual_credits() -> dict:
-    plan_path, _plan = _require_visual_plan()
-    return {"credits": credits_text(plan_path)}
-
-
-@app.post("/api/visual/create-dialog")
-def create_visual_project_dialog() -> dict:
-    active = _active_video_project()
-    if active is not None:
-        return ensure_visual_project()
-    source = _choose_video_file()
-    if source is None:
-        raise HTTPException(status_code=400, detail="No locked video selected.")
-    transcript = editor_project_document(state.project, state.edits) if state.project is not None else None
-    try:
-        plan_path, plan = create_visual_project(source, transcript_document=transcript)
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not create the private visual project: {exc}") from exc
-    state.visual_plan_path = plan_path
-    state.visual_plan = plan
-    return visual_plan_response(plan_path, plan)
-
-
-@app.post("/api/visual/open-dialog")
-def open_visual_project_dialog() -> dict:
-    path = _choose_visual_plan_file()
-    if path is None:
-        raise HTTPException(status_code=400, detail="No visual plan selected.")
-    try:
-        plan = load_visual_plan(path)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not open the visual plan: {exc}") from exc
-    state.visual_plan_path = path.resolve()
-    state.visual_plan = plan
-    return visual_plan_response(state.visual_plan_path, plan)
-
-
-@app.post("/api/visual/ensure")
-def ensure_visual_project() -> dict:
-    active = _active_video_project()
-    if active is None:
-        raise HTTPException(status_code=400, detail="Create or open a parent video project first.")
-    manifest_path, manifest = active
-    plan_path = resolve_video_project_path(manifest_path, manifest, "visualPlan")
-    if plan_path.is_file():
-        plan = load_visual_plan(plan_path)
-    else:
-        locked_cut = resolve_video_project_path(manifest_path, manifest, "lockedCut")
-        if not artifact_current(manifest, "lockedCutRevision"):
-            raise HTTPException(status_code=400, detail="Export the current source sequence as a locked cut before starting Visual Production.")
-        final_transcript = resolve_video_project_path(manifest_path, manifest, "finalTranscript")
-        transcript = final_transcript if final_transcript.is_file() else resolve_video_project_path(manifest_path, manifest, "editorProject")
-        try:
-            plan_path, plan = create_visual_plan_in_video_project(
-                video_project_root(manifest_path),
-                source_video=locked_cut,
-                transcript_path=transcript,
-                plan_path=plan_path,
-            )
-        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-            raise HTTPException(status_code=400, detail=f"Could not initialize Visual Production: {exc}") from exc
-        # The plan is authored against this sequence revision. A later re-cut bumps the revision
-        # and this artifact stops being current, alongside the source hash recorded in the plan.
-        mark_artifact_current(manifest, "visualPlanRevision")
-        save_video_project(manifest_path, manifest)
-    state.visual_plan_path = plan_path
-    state.visual_plan = plan
-    return visual_plan_response(plan_path, plan)
-
-
-@app.post("/api/visual/save")
-def save_current_visual_plan(payload: VisualPlanSaveRequest) -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        plan = save_visual_plan(plan_path, payload.plan)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not save the visual plan: {exc}") from exc
-    state.visual_plan = plan
-    return visual_plan_response(plan_path, plan)
-
-
-@app.post("/api/visual/assets/import-dialog")
-def import_visual_asset_dialog() -> dict:
-    plan_path, _plan = _require_visual_plan()
-    source = _choose_visual_asset_file()
-    if source is None:
-        raise HTTPException(status_code=400, detail="No animation or image selected.")
-    try:
-        asset, plan = import_visual_asset(plan_path, source)
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not import the visual asset: {exc}") from exc
-    state.visual_plan = plan
-    response = visual_plan_response(plan_path, plan)
-    response["importedAsset"] = asset
-    return response
-
-
-@app.get("/api/visual/source")
-def visual_source_video(request: Request, range: str | None = Header(default=None)) -> Response:
-    plan_path, plan = _require_visual_plan()
-    root = find_visual_root(plan_path)
-    path = resolve_project_path(root, plan["source"]["video"])
-    return _range_response(path, range)
-
-
-@app.get("/api/visual/final")
-def visual_final_video(request: Request, range: str | None = Header(default=None)) -> Response:
-    plan_path, plan = _require_visual_plan()
-    path, _revision = active_visual_master(plan_path, plan)
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="No persisted Visual Production master is available.")
-    return _range_response(path, range)
-
-
 def _hyperframes_distribution_file(name: str) -> Path:
     path = Path(__file__).resolve().parents[1] / "node_modules" / "hyperframes" / "dist" / name
     if not path.is_file():
@@ -3806,159 +2698,6 @@ def visual_runtime_player() -> FileResponse:
 @app.get("/api/visual/runtime/core.js")
 def visual_runtime_core() -> FileResponse:
     return FileResponse(_hyperframes_distribution_file("hyperframe.runtime.iife.js"), media_type="application/javascript")
-
-
-@app.get("/api/visual/runtime/composition/{relative_path:path}")
-def visual_runtime_composition_file(relative_path: str) -> Response:
-    plan_path, plan = _require_visual_plan()
-    runtime_root, runtime_entry, _composition = active_visual_runtime(plan_path, plan)
-    if runtime_root is None or runtime_entry is None:
-        try:
-            runtime_root, _duration = build_hyperframes_composition(plan_path)
-            runtime_entry = runtime_root / "index.html"
-        except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
-            raise HTTPException(status_code=400, detail=f"Could not prepare the HyperFrames preview: {exc}") from exc
-    requested = relative_path or runtime_entry.name
-    target = (runtime_root / requested).resolve()
-    try:
-        target.relative_to(runtime_root.resolve())
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="HyperFrames preview path escapes the registered composition.") from exc
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="HyperFrames preview file not found.")
-    if target.suffix.lower() == ".html" and target.resolve() == runtime_entry.resolve():
-        document = target.read_text(encoding="utf-8")
-        runtime_script = '<script src="/api/visual/runtime/core.js" data-vcg-runtime="hyperframes"></script>'
-        document = document.replace("</body>", f"{runtime_script}</body>") if "</body>" in document else f"{document}{runtime_script}"
-        return HTMLResponse(document, headers={"Cache-Control": "no-store"})
-    return FileResponse(target)
-
-
-@app.post("/api/visual/gates/representative")
-def approve_visual_representative(payload: VisualRepresentativeApprovalRequest) -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        plan = approve_representative_scene(plan_path, payload.cue_id)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not approve the representative scene: {exc}") from exc
-    state.visual_plan = plan
-    return visual_plan_response(plan_path, plan)
-
-
-@app.post("/api/visual/gates/full-review")
-def approve_visual_full_review() -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        plan = approve_full_review(plan_path)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not approve the full review: {exc}") from exc
-    state.visual_plan = plan
-    return visual_plan_response(plan_path, plan)
-
-
-@app.post("/api/visual/gates/reopen")
-def verify_visual_delivery_reopened(payload: VisualReopenVerificationRequest) -> dict:
-    plan_path, _plan = _require_visual_plan()
-    try:
-        plan = verify_delivered_revision_reopened(plan_path, payload.revision_number, payload.plan_hash)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail=f"Could not verify the reopened delivery: {exc}") from exc
-    state.visual_plan = plan
-    return visual_plan_response(plan_path, plan)
-
-
-@app.get("/api/visual/assets/{asset_id}")
-def visual_asset(asset_id: str, request: Request, range: str | None = Header(default=None)) -> Response:
-    plan_path, plan = _require_visual_plan()
-    asset = next((item for item in plan.get("assets", []) if item.get("id") == asset_id), None)
-    if asset is None:
-        raise HTTPException(status_code=404, detail="Visual asset not found.")
-    root = find_visual_root(plan_path)
-    path = resolve_project_path(root, asset["path"])
-    return _range_response(path, range)
-
-
-@app.post("/api/visual/render")
-def start_visual_render(payload: VisualRenderRequest) -> dict:
-    """Reject retired visual render execution."""
-    raise HTTPException(
-        status_code=410,
-        detail=(
-            "Legacy Visual Production rendering is retired. Existing projects and "
-            "persisted outputs remain available for read-only recovery; use Creator "
-            "Production for new render work."
-        ),
-    )
-
-
-def _run_visual_render_job(job: VisualRenderJob, plan_path: Path, output: Path, payload: VisualRenderRequest, purpose: str) -> None:
-    try:
-        rendered = render_visual_plan(
-            plan_path,
-            output,
-            start_sec=payload.start_sec,
-            end_sec=payload.end_sec,
-            quality=payload.quality,
-            purpose=purpose,
-            progress=job.update,
-        )
-        job.complete(rendered)
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
-        job.fail(str(exc))
-
-
-@app.get("/api/visual/render/jobs/{job_id}")
-def visual_render_job(job_id: str) -> dict:
-    job = state.visual_render_jobs.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Visual render job not found.")
-    return job.snapshot(job_id)
-
-
-@app.get("/api/visual/render/active")
-def active_visual_render_job() -> dict:
-    plan_path, _plan = _require_visual_plan()
-    active = next(
-        (
-            job for job in reversed(list(state.visual_render_jobs.values()))
-            if job.plan_path == plan_path.resolve() and job.status == "running"
-        ),
-        None,
-    )
-    if active is not None:
-        return {"job": active.snapshot(active.job_id)}
-
-    state_path = plan_path.parent / "render-job.json"
-    if not state_path.is_file():
-        return {"job": None}
-    try:
-        persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"job": None}
-    if persisted.get("status") == "running":
-        persisted.update({
-            "status": "failed",
-            "stage": "failed",
-            "error": "The application restarted before this export completed. Start Export final again.",
-            "message": "The application restarted before this export completed. Start Export final again.",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        })
-        try:
-            state_path.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
-        except OSError:
-            pass
-    return {"job": persisted}
-
-
-@app.get("/api/visual/render/jobs/{job_id}/video")
-def visual_render_video(job_id: str, range: str | None = Header(default=None)) -> Response:
-    job = state.visual_render_jobs.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Visual render job not found.")
-    snapshot = job.snapshot(job_id)
-    if snapshot["status"] != "complete" or not snapshot["output_path"]:
-        raise HTTPException(status_code=409, detail="Visual render is not complete.")
-    return _range_response(Path(snapshot["output_path"]), range)
 
 
 @app.get("/api/caption/options")
@@ -4603,7 +3342,9 @@ def _save_final_transcript(project: TranscriptProject, plan: SplicePlan, locked_
         )
         temporary.replace(analysis_destination)
     remapped = replace(remap_transcript(project, plan.kept_ranges), source=str(locked_cut.resolve()))
-    timing_hash = transcript_word_timing_hash(editor_project_document(remapped, EditDecisionList()))
+    timing_hash = hashlib.sha256(
+        json.dumps(editor_project_document(remapped, EditDecisionList()), sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
     remapped = replace(
         remapped,
         generation={

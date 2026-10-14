@@ -4,7 +4,6 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
-  ClipboardCopy,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -29,10 +28,9 @@ import {
 import type { Dispatch, KeyboardEvent as ReactKeyboardEvent, MutableRefObject, PointerEvent as ReactPointerEvent, ReactNode, RefObject, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HexColorInput, HexColorPicker } from "react-colorful";
-import CreatorProductionWorkspace from "./creator-production";
 import GraphicsLibraryWorkspace from "./graphics-library";
+import { CutFrameCard, formatFrameTimecode } from "./cut-frame-card";
 import VisualPackageWorkspace, { VISUAL_PACKAGE_RAIL_HOST_ID } from "./visual-package";
-import VisualProductionWorkspace from "./visual-production";
 import {
   API_BASE,
   type AudioAnalysisResponse,
@@ -79,7 +77,6 @@ import {
   getTranscriptionJob,
   getCurrentProject,
   getCurrentVideoProject,
-  getVisualPlanPrompt,
   liveCutPreview,
   normalizeVideoAudio,
   openProjectDialog,
@@ -115,7 +112,7 @@ type PreviewState = {
   loop: boolean;
 };
 
-type ActiveTab = "transcript" | "caption" | "audio" | "visual" | "creator" | "graphics" | "package";
+type ActiveTab = "transcript" | "caption" | "audio" | "graphics" | "package";
 
 const DEFAULT_WHISPER_MODEL = "Large v3 - best accuracy";
 const DEFAULT_WHISPER_COMPUTE = "NVIDIA GPU";
@@ -155,7 +152,6 @@ export default function Home() {
   const [graphicsLibraryRefreshSignal, setGraphicsLibraryRefreshSignal] = useState(0);
   const [project, setProject] = useState<EditorProjectResponse | null>(null);
   const [videoProject, setVideoProject] = useState<VideoProjectResponse | null>(null);
-  const [visualPrompt, setVisualPrompt] = useState<string | null>(null);
   const [showSourceSequence, setShowSourceSequence] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
   const [anchorToken, setAnchorToken] = useState<string | null>(null);
@@ -445,16 +441,6 @@ export default function Home() {
 
   const handleOpenVideoProject = () => {
     void run(openVideoProject, applyVideoProject);
-  };
-
-  const handleCookVisualPlanPrompt = () => {
-    void run(getVisualPlanPrompt, ({ prompt }) => {
-      setVisualPrompt(prompt);
-      void navigator.clipboard.writeText(prompt).then(
-        () => setStatus("Cook Visual Plan prompt copied to the clipboard."),
-        () => setStatus("Prompt generated. Use Copy Prompt in the dialog."),
-      );
-    });
   };
 
   const handleAddSourceClips = () => {
@@ -1120,22 +1106,6 @@ export default function Home() {
       {previewRenderProgress && (
         <PreviewRenderModal progress={previewRenderProgress} onClose={() => setPreviewRenderProgress(null)} />
       )}
-      {visualPrompt && (
-        <div className="modal-backdrop" role="presentation">
-          <section className="visual-prompt-modal" role="dialog" aria-modal="true" aria-labelledby="visual-prompt-title">
-            <div className="visual-prompt-heading">
-              <div><span className="eyebrow">Codex handoff</span><h2 id="visual-prompt-title">Cook a Visual Plan</h2></div>
-              <button className="header-icon-button" aria-label="Close prompt" onClick={() => setVisualPrompt(null)}><X size={18} /></button>
-            </div>
-            <p>This includes the active project’s exact private paths and the VCG editorial rules. Paste it into a new Codex task.</p>
-            <textarea readOnly value={visualPrompt} aria-label="Cook Visual Plan prompt" />
-            <div className="visual-prompt-actions">
-              <button onClick={() => setVisualPrompt(null)}>Close</button>
-              <button className="primary" onClick={() => void navigator.clipboard.writeText(visualPrompt).then(() => setStatus("Cook Visual Plan prompt copied."))}><ClipboardCopy size={16} /> Copy Prompt</button>
-            </div>
-          </section>
-        </div>
-      )}
       {showSourceSequence && videoProject && (
         <div className="modal-backdrop" role="presentation">
           <section className="source-sequence-modal" role="dialog" aria-modal="true" aria-labelledby="source-sequence-title">
@@ -1230,12 +1200,6 @@ export default function Home() {
             </button>
             <button type="button" className={activeTab === "audio" ? "active" : ""} onClick={() => selectToolTab("audio")}>
               Audio Normalizer
-            </button>
-            <button type="button" className={activeTab === "visual" ? "active" : ""} onClick={() => selectToolTab("visual")}>
-              Visual Production
-            </button>
-            <button type="button" className={activeTab === "creator" ? "active" : ""} onClick={() => selectToolTab("creator")}>
-              Creator Production
             </button>
             <button type="button" className={activeTab === "graphics" ? "active" : ""} onClick={() => selectToolTab("graphics")}>
               Graphics Library
@@ -1352,12 +1316,8 @@ export default function Home() {
                 <button onClick={handleAnalyzeAudio} disabled={busy || !audioSource}><Gauge size={16} /> Analyze Audio</button>
                 <button className="outline-primary" onClick={handleNormalizeAudio} disabled={busy || !audioAnalysis}><WandSparkles size={16} /> Export Corrected Video</button>
               </>
-            ) : activeTab === "creator" ? (
-              <span className="workflow-status">Creator Production pipeline (jobs)</span>
-            ) : activeTab === "graphics" ? (
-              <span className="workflow-status">Graphics Library (review samples & promote usages)</span>
             ) : (
-              <span className="workflow-status">Private post-cut graphics, timeline, player, and rendering</span>
+              <span className="workflow-status">Graphics Library (review samples & promote usages)</span>
             )}
           </div>
         )}
@@ -1406,16 +1366,6 @@ export default function Home() {
                 disabled={busy || !videoProject}
               >
                 <Scissors size={15} /> Manage Source Clips
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  closeHeaderMenus();
-                  handleCookVisualPlanPrompt();
-                }}
-                disabled={busy || !videoProject}
-              >
-                <ClipboardCopy size={15} /> Cook Visual Plan Prompt
               </button>
               <button
                 type="button"
@@ -1601,17 +1551,13 @@ export default function Home() {
             setAudioPreview(null);
           }}
         />
-      ) : activeTab === "creator" ? (
-        <CreatorProductionWorkspace />
       ) : activeTab === "graphics" ? (
         <GraphicsLibraryWorkspace refreshSignal={graphicsLibraryRefreshSignal} />
-      ) : activeTab === "package" ? (
+      ) : (
         <VisualPackageWorkspace
           hasVideoProject={Boolean(videoProject)}
           projectName={videoProject?.name}
         />
-      ) : (
-        <VisualProductionWorkspace />
       )}
     </main>
   );
@@ -4501,77 +4447,6 @@ function SpliceReviewPanel({
       </div>
     </section>
   );
-}
-
-function CutFrameCard({
-  title,
-  frame,
-  fps,
-  minFrame,
-  maxFrame,
-  onNudge,
-}: {
-  title: string;
-  frame: number;
-  fps: number;
-  /** Kept for call-site compatibility; adjustment chrome removed. */
-  adjustment?: number;
-  /** Kept for call-site compatibility; Whisper/source label chrome removed. */
-  whisperFrame?: number;
-  /** Kept for call-site compatibility; assisted-suggestion chrome removed. */
-  suggestedFrame?: number;
-  minFrame?: number;
-  maxFrame?: number;
-  onNudge: (delta: number) => void;
-  /** Kept for call-site compatibility; Whisper/source label chrome removed. */
-  sourceLabel?: string;
-}) {
-  const allowedDelta = (requested: number) => {
-    const requestedFrame = frame + requested;
-    const boundedFrame = Math.min(maxFrame ?? Number.POSITIVE_INFINITY, Math.max(minFrame ?? 0, requestedFrame));
-    return boundedFrame - frame;
-  };
-  const nudge = (requested: number) => {
-    const delta = allowedDelta(requested);
-    if (delta !== 0) onNudge(delta);
-  };
-  const buttonTitle = (requested: number) => {
-    const delta = allowedDelta(requested);
-    if (delta === 0) return requested > 0 ? "At the next IN-frame safety limit" : "At the earliest legal frame";
-    if (delta !== requested) return `Move ${Math.abs(delta)} frame${Math.abs(delta) === 1 ? "" : "s"} to the safety limit`;
-    return `Move ${Math.abs(delta)} frame${Math.abs(delta) === 1 ? "" : "s"}`;
-  };
-  return (
-    <div className="cut-frame-card">
-      <div className="cut-frame-header">
-        <span className="cut-frame-title">{title}</span>
-        <span className="cut-frame-timecode">{formatFrameTimecode(frame, fps)}</span>
-        <span className="cut-frame-number">{frame.toLocaleString()}</span>
-      </div>
-      {(frame === minFrame || frame === maxFrame) && (
-        <div className="cut-boundary-limit">Safety boundary reached at frame {frame.toLocaleString()}</div>
-      )}
-      <div className="nudge-buttons" aria-label={`${title} nudges`}>
-        <button disabled={allowedDelta(-10) === 0} title={buttonTitle(-10)} onClick={() => nudge(-10)}><ArrowLeft size={13} /> 10</button>
-        <button disabled={allowedDelta(-5) === 0} title={buttonTitle(-5)} onClick={() => nudge(-5)}><ArrowLeft size={13} /> 5</button>
-        <button disabled={allowedDelta(-1) === 0} title={buttonTitle(-1)} onClick={() => nudge(-1)}><ArrowLeft size={13} /> 1</button>
-        <button disabled={allowedDelta(1) === 0} title={buttonTitle(1)} onClick={() => nudge(1)}>1 <ArrowRight size={13} /></button>
-        <button disabled={allowedDelta(5) === 0} title={buttonTitle(5)} onClick={() => nudge(5)}>5 <ArrowRight size={13} /></button>
-        <button disabled={allowedDelta(10) === 0} title={buttonTitle(10)} onClick={() => nudge(10)}>10 <ArrowRight size={13} /></button>
-      </div>
-    </div>
-  );
-}
-
-function formatFrameTimecode(frame: number, fps: number) {
-  const roundedFps = Math.max(1, Math.round(fps));
-  const safeFrame = Math.max(0, frame);
-  const frames = safeFrame % roundedFps;
-  const totalSeconds = Math.floor(safeFrame / roundedFps);
-  const seconds = totalSeconds % 60;
-  const minutes = Math.floor(totalSeconds / 60) % 60;
-  const hours = Math.floor(totalSeconds / 3600);
-  return [hours, minutes, seconds, frames].map((value) => String(value).padStart(2, "0")).join(":");
 }
 
 function formatPreviewTimecode(seconds: number, fps: number) {

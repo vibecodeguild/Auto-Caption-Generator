@@ -713,4 +713,9 @@ def merge_visual_package_status(
     status["placement"] = placement_status_for_video_project(
         manifest_path, manifest, library_root=library_root
     )
+    from app.core.program_edits import program_status_for_video_project
+
+    status["program"] = program_status_for_video_project(
+        manifest_path, manifest, library_root=library_root
+    )
     return status
