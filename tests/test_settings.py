@@ -10,9 +10,10 @@ from app.core.settings import (
 )
 
 
-def test_default_whisper_model_uses_large_v3() -> None:
-    assert DEFAULT_MODEL_LABEL == "Large v3 - best accuracy"
-    assert MODEL_OPTIONS[DEFAULT_MODEL_LABEL] == "large-v3"
+def test_default_uses_parakeet_and_retains_whisper_rollback() -> None:
+    assert DEFAULT_MODEL_LABEL == "Parakeet v3 - default"
+    assert MODEL_OPTIONS[DEFAULT_MODEL_LABEL] == "parakeet-tdt-0.6b-v3"
+    assert MODEL_OPTIONS["Large v3 - best accuracy"] == "large-v3"
 
 
 def test_default_compute_uses_nvidia_gpu() -> None:

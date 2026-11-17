@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
+import math
 
 from app.core.action_logger import ActionLogger
 from app.core.ffmpeg_runner import extract_audio
 from app.core.media_probe import probe_video_fps
 from app.core.transcriber import transcribe_audio, words_to_transcript_project
 from app.core.transcript_model import TranscriptProject
+from app.core.parakeet import transcription_notice
+from app.core.video_project import probe_source_clip
 
 
 def generate_editor_transcript(
@@ -28,8 +32,8 @@ def generate_editor_transcript(
     audio_path = extract_audio(input_video_path, working_dir / "editor_audio.wav")
     _log(logger, f"Extracted audio to {audio_path}")
 
-    _progress(progress_callback, -1, "Transcribing words... first run may download the selected Whisper model.")
-    _log(logger, f"Starting faster-whisper model={model_size} compute={compute_mode}")
+    _progress(progress_callback, -1, "Transcribing words with the selected local model...")
+    _log(logger, f"Starting transcription model={model_size} compute={compute_mode}")
     words = transcribe_audio(
         audio_path,
         model_size=model_size,
@@ -46,7 +50,17 @@ def generate_editor_transcript(
 
     _progress(progress_callback, 90, "Building transcript editor project...")
     project = words_to_transcript_project(str(input_video_path), words, fps=fps)
-    _progress(progress_callback, 100, "Transcript ready.")
+    project = replace(project, generation={"boundary_review_version": 1,
+                                         "execution": getattr(words, "metadata", {})})
+    try:
+        duration = probe_source_clip(input_video_path)["durationSec"]
+        project.generation["source_maximum_frame"] = max(0, math.ceil(duration * fps) - 1)
+    except (OSError, RuntimeError, ValueError, KeyError):
+        pass  # Legacy/probe-unavailable projects retain the existing boundary checks.
+    notice = transcription_notice(words)
+    project.generation["transcription_notice"] = notice
+    _log(logger, notice)
+    _progress(progress_callback, 100, f"Transcript ready. {notice}".strip())
     return project
 
 

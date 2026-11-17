@@ -30,6 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HexColorInput, HexColorPicker } from "react-colorful";
 import GraphicsLibraryWorkspace from "./graphics-library";
 import { CutFrameCard, formatFrameTimecode } from "./cut-frame-card";
+import { EndpointFrameEntry } from "./endpoint-frame-entry";
 import VisualPackageWorkspace, { VISUAL_PACKAGE_RAIL_HOST_ID } from "./visual-package";
 import ShortsWorkspace, { SHORTS_RAIL_HOST_ID } from "./shorts";
 import {
@@ -115,9 +116,6 @@ type PreviewState = {
 
 type ActiveTab = "transcript" | "caption" | "audio" | "graphics" | "package" | "shorts";
 
-const DEFAULT_WHISPER_MODEL = "Large v3 - best accuracy";
-const DEFAULT_WHISPER_COMPUTE = "NVIDIA GPU";
-
 type ExportProgressState = {
   status: "running" | "canceling" | "canceled" | "complete" | "failed";
   message: string;
@@ -180,8 +178,8 @@ export default function Home() {
   const [captionStyle, setCaptionStyle] = useState<CaptionStylePayload | null>(null);
   const [captionPreset, setCaptionPreset] = useState<CaptionPresetPayload | null>(null);
   const [captionStyleName, setCaptionStyleName] = useState("Magenta Pop");
-  const [captionModel, setCaptionModel] = useState(DEFAULT_WHISPER_MODEL);
-  const [captionCompute, setCaptionCompute] = useState(DEFAULT_WHISPER_COMPUTE);
+  const [captionModel, setCaptionModel] = useState("");
+  const [captionCompute, setCaptionCompute] = useState("");
   const [captionPreview, setCaptionPreview] = useState<CaptionPreviewResponse | null>(null);
   const [transcriptSource, setTranscriptSource] = useState<string | null>(null);
   const [transcriptionProgress, setTranscriptionProgress] = useState<TranscriptionJobStatus | null>(null);
@@ -345,10 +343,10 @@ export default function Home() {
     setCaptionStyle(data.styles[styleName] ?? data.default_style);
     setCaptionPreset(data.presets.Creator ?? Object.values(data.presets)[0] ?? null);
     if (!data.models[captionModel]) {
-      setCaptionModel(data.models[DEFAULT_WHISPER_MODEL] ? DEFAULT_WHISPER_MODEL : (Object.keys(data.models)[0] ?? DEFAULT_WHISPER_MODEL));
+      setCaptionModel(data.default_model);
     }
     if (!data.compute[captionCompute]) {
-      setCaptionCompute(data.compute[DEFAULT_WHISPER_COMPUTE] ? DEFAULT_WHISPER_COMPUTE : (Object.keys(data.compute)[0] ?? DEFAULT_WHISPER_COMPUTE));
+      setCaptionCompute(data.default_compute);
     }
   }, [captionCompute, captionModel, captionStyleName]);
 
@@ -499,7 +497,7 @@ export default function Home() {
         setTranscriptSource(data.project.source);
         setActiveWorkflowStage(2);
         setTranscriptionProgress(null);
-        setStatus(`Transcript ready: ${data.project.words.length} words`);
+        setStatus(`Transcript ready: ${data.project.words.length} words. ${String(data.project.generation.transcription_notice ?? "")}`);
       },
     );
   };
@@ -760,7 +758,7 @@ export default function Home() {
       }),
       (data) => {
         setCaptionPreview(data);
-        setCaptionStatus(`Live preview ready: ${data.word_count} words${data.used_project_transcript ? " from project transcript" : ""}`);
+        setCaptionStatus(`Live preview ready: ${data.word_count} words${data.used_project_transcript ? " from project transcript" : ""}. ${data.transcription_notice ?? ""}`);
       },
     );
   };
@@ -912,30 +910,7 @@ export default function Home() {
       });
   };
 
-  const playFinalCut = (seconds: 2 | 4 | 6) => {
-    const video = previewRef.current;
-    const finalCut = project?.final_cut;
-    if (!video || !finalCut || !project) return;
-    const endSeconds = (finalCut.out_frame + 1) / project.project.fps;
-    const keptStartSeconds = finalCut.minimum_out_frame / project.project.fps;
-    const startSeconds = Math.max(keptStartSeconds, endSeconds - seconds);
-    // The shared monitor stops half a frame before a segment boundary, so offset
-    // this preview boundary by half a frame to match the export's inclusive OUT.
-    const monitoredEndSeconds = endSeconds + 0.5 / project.project.fps;
-    const requestId = beginPreviewRequest(previewRequestRef);
-    previewState.current = { segments: [[startSeconds, monitoredEndSeconds]], index: 0, loop: false };
-    setStatus(`Previewing the final ${seconds}s through OUT frame ${finalCut.out_frame}`);
-    stopPreviewMonitor();
-    video.pause();
-    void playMediaAt(video, startSeconds)
-      .then(() => startPreviewMonitor(requestId))
-      .catch((error) => {
-        if (!isCurrentPreviewRequest(previewRequestRef, requestId)) return;
-        setStatus(`Final preview failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
-  };
 
-  /** Stage 4 CapCut-style: instant EDL plan, no FFmpeg bake. */
   const handleLiveCutPreview = useCallback((options?: { quiet?: boolean }) => {
     if (!project) return;
     const quiet = Boolean(options?.quiet);
@@ -1460,8 +1435,7 @@ export default function Home() {
           <SpliceReviewPanel
             loop={loop}
             moveSpliceSelection={moveSpliceSelection}
-            playFinalCut={playFinalCut}
-            playSplice={playSplice}
+              playSplice={playSplice}
             project={project}
             reviewSpliceAndAdvance={reviewSpliceAndAdvance}
             selectedSplice={selectedSplice}
@@ -2196,9 +2170,9 @@ function CaptionGenerator({
             </select>
           </label>
           <label>
-            Whisper model
+            Transcription model
             <select value={captionModel} onChange={(event) => setCaptionModel(event.target.value)}>
-              {Object.keys(captionOptionsData.models).map((name) => <option key={name}>{name}</option>)}
+              {Object.keys(captionOptionsData.models).map((name) => <option key={name} value={name}>{name.startsWith("Parakeet") ? name : `Whisper · ${name}`}</option>)}
             </select>
           </label>
           <label>
@@ -3048,13 +3022,14 @@ function RenderedCutPreviewWorkspace({
   const renderedPlayheadSecondsRef = useRef(0);
   const timelinePlaybackFrameRef = useRef<number | null>(null);
   const manualPreviewRef = useRef<{
-    segments: [[number, number], [number, number]];
+    segments: [number, number][];
     index: number;
     /** Base-timeline continuous times for playhead (pre-roll start, IN start). */
     baseContinuous?: [number, number];
   } | null>(null);
   const previewMarkerByAnchor = new Map(preview.splices.map((splice) => [splice.anchor_key, splice]));
   const isFrontTrim = selectedSplice?.kind === "front_trim";
+  const isEndTrim = selectedSplice?.kind === "end_trim";
   type CutSegment = RenderedCutPreviewResponse["segments"][number];
 
   // Keep the left controls card the same height as the video card (video defines height).
@@ -3375,7 +3350,7 @@ function RenderedCutPreviewWorkspace({
       if (manualPreview) {
         const segment = manualPreview.segments[manualPreview.index];
         if (segment && video.currentTime >= segment[1] - frameGuard / 2) {
-          if (manualPreview.index === 0) {
+          if (manualPreview.index === 0 && manualPreview.segments[1]) {
             manualPreview.index = 1;
             video.currentTime = manualPreview.segments[1][0];
             commitPlayhead(manualPreview.segments[1][0]);
@@ -3687,7 +3662,7 @@ function RenderedCutPreviewWorkspace({
       return;
     }
 
-    let segments: [[number, number], [number, number]] | null = null;
+    let segments: [number, number][] | null = null;
 
     // Prefer an in-progress draft OUT/IN when both sides are set.
     const draftResolved = manualOutTime.trim() && manualInTime.trim()
@@ -3722,11 +3697,8 @@ function RenderedCutPreviewWorkspace({
       // Accepted splices: use server-built source pre/post rolls (same half-math).
       const key = `preview_segments_${seconds}s` as const;
       const prepared = selectedSplice[key];
-      if (prepared?.length >= 2) {
-        segments = [
-          [prepared[0][0], prepared[0][1]],
-          [prepared[1][0], prepared[1][1]],
-        ];
+      if (prepared?.length) {
+        segments = prepared;
       } else {
         // Fallback if preview segments are missing from the project payload.
         const halfSeconds = seconds / 2;
@@ -3806,6 +3778,10 @@ function RenderedCutPreviewWorkspace({
       clearManualDraft();
       return;
     }
+    if (selectedSplice?.kind === "end_trim") {
+      await updateSplice(() => setFinalOutFrame(null));
+      return;
+    }
     if (!selectedSplice) {
       setManualCutError("Select a splice to remove, or set a draft OUT/IN to clear.");
       return;
@@ -3872,7 +3848,7 @@ function RenderedCutPreviewWorkspace({
                   {project.splices.map((splice, index) => (
                     <option key={splice.anchor_key} value={splice.anchor_key}>
                       {`Splice ${index + 1} of ${project.splices.length}${
-                        splice.kind === "manual" ? " · Manual" : splice.kind === "front_trim" ? " · Front trim" : ""
+                        splice.kind === "manual" ? " · Manual" : splice.kind === "front_trim" ? " · Start" : splice.kind === "end_trim" ? " · End" : ""
                       }`}
                     </option>
                   ))}
@@ -3886,6 +3862,8 @@ function RenderedCutPreviewWorkspace({
             <div className="rendered-frame-grid">
               <CutFrameCard
                 title="Draft OUT frame"
+                waveformSource={project.project.source}
+                waveformSide="out"
                 frame={manualDraftFrames.outFrame}
                 fps={project.project.fps}
                 adjustment={manualDraftFrames.outFrame - resolvedManualDraft.outFrame}
@@ -3898,6 +3876,8 @@ function RenderedCutPreviewWorkspace({
               />
               <CutFrameCard
                 title="Draft IN frame"
+                waveformSource={project.project.source}
+                waveformSide="in"
                 frame={manualDraftFrames.inFrame}
                 fps={project.project.fps}
                 adjustment={manualDraftFrames.inFrame - resolvedManualDraft.inFrame}
@@ -3910,37 +3890,58 @@ function RenderedCutPreviewWorkspace({
               />
             </div>
           ) : selectedSplice && (
-            <div className={isFrontTrim ? "rendered-frame-grid single" : "rendered-frame-grid"}>
+            <div className={isFrontTrim || isEndTrim ? "rendered-frame-grid single" : "rendered-frame-grid"}>
               {!isFrontTrim && (
                 <CutFrameCard
-                  title="OUT frame"
+                  title={isEndTrim ? "END OUT frame" : "OUT frame"}
+                  waveformSource={project.project.source}
+                  waveformSide="out"
                   frame={selectedSplice.left_out_frame}
                   fps={project.project.fps}
                   adjustment={selectedSplice.left_out_adjustment}
                   whisperFrame={selectedSplice.left_whisper_out_frame}
                   suggestedFrame={selectedSplice.left_suggested_out_frame}
-                  maxFrame={selectedSplice.right_in_frame - (selectedSplice.kind === "manual" ? 2 : 1)}
+                  minFrame={selectedSplice.minimum_out_frame}
+                  maxFrame={selectedSplice.maximum_out_frame ?? undefined}
                   sourceLabel={selectedSplice.kind === "manual" ? "Initial" : "Whisper"}
                   onNudge={(delta) => void updateSplice(() => selectedSplice.kind === "manual"
                     ? adjustManualCut(selectedSplice.manual_cut_id, delta, 0)
                     : adjustSplice(selectedSplice.anchor_key, delta, 0))}
                 />
               )}
-              <CutFrameCard
-                title={isFrontTrim ? "START frame" : "IN frame"}
+              {!isEndTrim && <CutFrameCard
+                waveformSource={project.project.source}
+                waveformSide="in"
+                title={isFrontTrim ? "START IN frame" : "IN frame"}
                 frame={selectedSplice.right_in_frame}
                 fps={project.project.fps}
                 adjustment={selectedSplice.right_in_adjustment}
-                whisperFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
-                suggestedFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
-                minFrame={isFrontTrim ? 0 : selectedSplice.left_out_frame + (selectedSplice.kind === "manual" ? 2 : 1)}
+                whisperFrame={selectedSplice.right_whisper_in_frame}
+                suggestedFrame={selectedSplice.right_suggested_in_frame}
+                minFrame={selectedSplice.minimum_in_frame}
+                maxFrame={selectedSplice.maximum_in_frame}
                 sourceLabel={selectedSplice.kind === "manual" ? "Initial" : "Whisper"}
                 onNudge={(delta) => void updateSplice(() => selectedSplice.kind === "manual"
                   ? adjustManualCut(selectedSplice.manual_cut_id, 0, delta)
                   : adjustSplice(selectedSplice.anchor_key, 0, delta))}
-              />
+              />}
             </div>
           )}
+          {!resolvedManualDraft && selectedSplice && (isFrontTrim || isEndTrim) && <EndpointFrameEntry
+            frame={isEndTrim ? selectedSplice.left_out_frame : selectedSplice.right_in_frame}
+            onSet={(next) => void updateSplice(() => adjustSplice(selectedSplice.anchor_key,
+              isEndTrim ? next - selectedSplice.left_out_frame : 0,
+              isFrontTrim ? next - selectedSplice.right_in_frame : 0))}
+            onPlayhead={() => {
+              const video = videoRef.current;
+              if (!video) return;
+              const frame = isLive ? Math.round(video.currentTime * fps) : sourceFrameAtPreviewTime(video.currentTime);
+              if (frame !== null) void updateSplice(() => adjustSplice(selectedSplice.anchor_key,
+                isEndTrim ? frame - selectedSplice.left_out_frame : 0,
+                isFrontTrim ? frame - selectedSplice.right_in_frame : 0));
+            }}
+            onReset={isEndTrim ? () => void updateSplice(() => setFinalOutFrame(null)) : undefined}
+          />}
         </section>
         <div className="rendered-timeline-shell">
           <div className="rendered-timeline-toolbar">
@@ -4024,6 +4025,7 @@ function RenderedCutPreviewWorkspace({
                 const marker = previewMarkerByAnchor.get(splice.anchor_key);
                 const pending = !marker;
                 const isFrontTrimCut = splice.kind === "front_trim";
+                const isEndTrimCut = splice.kind === "end_trim";
                 const outTime = isLive
                   ? sourceTimeForFrame(splice.left_out_frame)
                   : (marker?.preview_time_seconds ?? previewTimeAtSourceFrame(splice.left_out_frame) ?? 0);
@@ -4036,8 +4038,8 @@ function RenderedCutPreviewWorkspace({
                 const label = splice.kind === "manual"
                   ? "Manual cut"
                   : isFrontTrimCut
-                    ? "Front trim"
-                    : `Splice ${index + 1}`;
+                    ? "Start"
+                    : isEndTrimCut ? "End" : `Splice ${index + 1}`;
                 const removedSeconds = Math.max(0, (splice.right_in_frame - splice.left_out_frame) / fps);
                 return (
                   <button
@@ -4055,15 +4057,17 @@ function RenderedCutPreviewWorkspace({
                       left: timelinePct(rangeStart),
                       width: `${Math.max(0.15, rangeWidth / Math.max(timelineDurationSeconds, 0.001) * 100)}%`,
                     }}
-                    title={`${label} · remove ${formatTime(removedSeconds)} · OUT ${formatPreviewTimecode(outTime, fps)} → IN ${formatPreviewTimecode(inTime, fps)}${pending ? " · accepted, not yet in the working video" : ""}`}
-                    aria-label={`${label}, removes ${formatTime(removedSeconds)}`}
+                    title={isFrontTrimCut ? `Start · IN ${formatPreviewTimecode(inTime, fps)}`
+                      : isEndTrimCut ? `End · OUT ${formatPreviewTimecode(outTime, fps)}`
+                      : `${label} · remove ${formatTime(removedSeconds)} · OUT ${formatPreviewTimecode(outTime, fps)} → IN ${formatPreviewTimecode(inTime, fps)}${pending ? " · accepted, not yet in the working video" : ""}`}
+                    aria-label={isFrontTrimCut || isEndTrimCut ? `${label} boundary` : `${label}, removes ${formatTime(removedSeconds)}`}
                     onClick={() => selectSplice(splice)}
                   >
                     <span className="timeline-cut-range" aria-hidden="true" />
                     {!isFrontTrimCut && (
                       <span className="manual-draft-boundary out" aria-hidden="true" />
                     )}
-                    <span className="manual-draft-boundary in" aria-hidden="true" />
+                    {!isEndTrimCut && <span className="manual-draft-boundary in" aria-hidden="true" />}
                   </button>
                 );
               })}
@@ -4266,7 +4270,6 @@ function SpliceReviewPanel({
   loop,
   moveSpliceSelection,
   playSplice,
-  playFinalCut,
   project,
   reviewSpliceAndAdvance,
   selectedSplice,
@@ -4278,7 +4281,6 @@ function SpliceReviewPanel({
   loop: boolean;
   moveSpliceSelection: (direction: -1 | 1) => void;
   playSplice: (splice: DynamicSplice, seconds: 2 | 4 | 6) => void;
-  playFinalCut: (seconds: 2 | 4 | 6) => void;
   project: EditorProjectResponse | null;
   reviewSpliceAndAdvance: (splice: DynamicSplice) => void;
   selectedSplice: DynamicSplice | undefined;
@@ -4288,170 +4290,56 @@ function SpliceReviewPanel({
   updateSplice: (operation: () => Promise<EditorProjectResponse>) => void;
 }) {
   const count = project?.splices.length ?? 0;
-  const isFrontTrim = selectedSplice?.left_word_id === "";
-  const finalCut = project?.final_cut ?? null;
-  const [finalCutExpanded, setFinalCutExpanded] = useState(false);
-  const [finalOutDraft, setFinalOutDraft] = useState(finalCut ? String(finalCut.out_frame) : "");
-  useEffect(() => {
-    setFinalOutDraft(finalCut ? String(finalCut.out_frame) : "");
-  }, [finalCut?.out_frame]);
-  const sourceVideo = sourceVideoRef.current;
-  const sourceMaximumOutFrame = sourceVideo && Number.isFinite(sourceVideo.duration)
-    ? Math.max(0, Math.ceil(sourceVideo.duration * (project?.project.fps ?? 30)) - 1)
-    : null;
-  const maximumOutFrame = finalCut?.maximum_out_frame === null
-    ? sourceMaximumOutFrame
-    : sourceMaximumOutFrame === null
-      ? finalCut?.maximum_out_frame
-      : Math.min(finalCut?.maximum_out_frame ?? sourceMaximumOutFrame, sourceMaximumOutFrame);
-  const parsedFinalOutDraft = Number(finalOutDraft);
-  const finalOutDraftValid = !!finalCut
-    && finalOutDraft.trim() !== ""
-    && Number.isInteger(parsedFinalOutDraft)
-    && parsedFinalOutDraft >= finalCut.minimum_out_frame
-    && (maximumOutFrame === null || maximumOutFrame === undefined || parsedFinalOutDraft <= maximumOutFrame);
-  const setFinalFromPlayhead = () => {
-    if (!finalCut || !sourceVideo || !Number.isFinite(sourceVideo.currentTime)) return;
-    const requestedFrame = Math.max(0, Math.round(sourceVideo.currentTime * (project?.project.fps ?? 30)));
-    const frame = maximumOutFrame === null || maximumOutFrame === undefined
-      ? requestedFrame
-      : Math.min(maximumOutFrame, requestedFrame);
-    setFinalOutDraft(String(frame));
-    updateSplice(() => setFinalOutFrame(frame));
+  const isStart = selectedSplice?.kind === "front_trim";
+  const isEnd = selectedSplice?.kind === "end_trim";
+  const endpoint = isStart || isEnd;
+  const frame = isStart ? selectedSplice?.right_in_frame : selectedSplice?.left_out_frame;
+  const applyFrame = (next: number) => {
+    if (!selectedSplice || frame === undefined || !Number.isInteger(next)) return;
+    updateSplice(() => adjustSplice(selectedSplice.anchor_key, isEnd ? next - frame : 0, isStart ? next - frame : 0));
   };
   return (
     <section className="splice-review-panel">
       <div className="splice-review-header">
         <div>
-          <span className="eyebrow">Splice Review</span>
-          <span className="splice-count-label">
-            {selectedSplice ? `Splice ${selectedSpliceIndex + 1} of ${count}` : "No splice selected"}
-          </span>
+          <span className="splice-count-label">{selectedSplice
+            ? `${isStart ? "Start" : isEnd ? "End" : "Splice"} · ${selectedSpliceIndex + 1} of ${count}`
+            : "No boundary selected"}</span></div>
+        <div className="review-playbar splice-review-toolbar" aria-label="Splice navigation and playback">
+          <button title="Previous boundary" onClick={() => moveSpliceSelection(-1)} disabled={!selectedSplice || selectedSpliceIndex <= 0}><ChevronLeft size={13} /> Prev</button>
+          <button onClick={() => selectedSplice && reviewSpliceAndAdvance(selectedSplice)} disabled={!selectedSplice}
+            title={selectedSplice?.reviewed ? "Reviewed — click to mark as needing review" : "Accept boundary and advance"}
+            className={selectedSplice?.reviewed ? "review-toggle reviewed" : "review-toggle"}>
+            <Check size={13} /> Accpt</button>
+          <button title="Next boundary" onClick={() => moveSpliceSelection(1)} disabled={!selectedSplice || selectedSpliceIndex >= count - 1}>Next <ChevronRight size={13} /></button>
+          {([2, 4, 6] as const).map((seconds) => <button key={seconds} disabled={!selectedSplice}
+            title={`Play ${seconds}-second audition`} onClick={() => selectedSplice && playSplice(selectedSplice, seconds)}><Play size={13} /> {seconds}</button>)}
+          <button disabled={!selectedSplice} className={loop ? "toggle on" : "toggle"} onClick={() => setLoop((value) => !value)}><RotateCcw size={13} /> Loop</button>
         </div>
-        <div className="review-nav">
-          <button onClick={() => moveSpliceSelection(-1)} disabled={!selectedSplice || selectedSpliceIndex <= 0}>
-            <ChevronLeft size={16} /> Previous
-          </button>
-          <button
-            onClick={() => selectedSplice && reviewSpliceAndAdvance(selectedSplice)}
-            disabled={!selectedSplice}
-            className={selectedSplice?.reviewed ? "review-toggle reviewed" : "review-toggle"}
-          >
-            {selectedSplice?.reviewed ? <Check size={14} /> : <Scissors size={14} />}
-            {selectedSplice?.reviewed ? "Reviewed" : "Needs review"}
-          </button>
-          <button onClick={() => moveSpliceSelection(1)} disabled={!selectedSplice || selectedSpliceIndex >= count - 1}>
-            Next <ChevronRight size={16} />
-          </button>
-        </div>
-        {selectedSplice && (
-          <div className="review-playbar">
-            <span>Play</span>
-            <button onClick={() => playSplice(selectedSplice, 2)}><Play size={13} /> 2</button>
-            <button onClick={() => playSplice(selectedSplice, 4)}><Play size={13} /> 4</button>
-            <button onClick={() => playSplice(selectedSplice, 6)}><Play size={13} /> 6</button>
-            <button className={loop ? "toggle on" : "toggle"} onClick={() => setLoop((value) => !value)}>
-              <RotateCcw size={13} /> Loop
-            </button>
-          </div>
-        )}
       </div>
       <div className="splice-review-content">
-        {selectedSplice ? (
-          <div className={isFrontTrim ? "splice-review-body single" : "splice-review-body"}>
-            {!isFrontTrim && (
-              <CutFrameCard
-                title="OUT frame"
-                frame={selectedSplice.left_out_frame}
-                fps={project?.project.fps ?? 30}
-                adjustment={selectedSplice.left_out_adjustment}
-                whisperFrame={selectedSplice.left_whisper_out_frame}
-                suggestedFrame={selectedSplice.left_suggested_out_frame}
-                maxFrame={selectedSplice.right_in_frame - 1}
-                onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, delta, 0))}
-              />
-            )}
-            <CutFrameCard
-              title={isFrontTrim ? "START frame" : "IN frame"}
-              frame={selectedSplice.right_in_frame}
-              fps={project?.project.fps ?? 30}
-              adjustment={selectedSplice.right_in_adjustment}
-              whisperFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
-              suggestedFrame={selectedSplice.right_in_frame - selectedSplice.right_in_adjustment}
-              minFrame={isFrontTrim ? 0 : selectedSplice.left_out_frame + 1}
-              onNudge={(delta) => updateSplice(() => adjustSplice(selectedSplice.anchor_key, 0, delta))}
-            />
-          </div>
-        ) : (
-          <p className="muted">Delete content to create splice points for review.</p>
-        )}
-        {finalCut && (
-          <div className={finalCutExpanded ? "final-cut-control expanded" : "final-cut-control collapsed"}>
-            <div className="final-cut-heading">
-              <button
-                type="button"
-                className="final-cut-toggle"
-                aria-expanded={finalCutExpanded}
-                aria-controls="final-cut-details"
-                onClick={() => setFinalCutExpanded((expanded) => !expanded)}
-              >
-                <span>
-                  <strong>Final endpoint</strong>
-                  <small>
-                    {finalCutExpanded
-                      ? "Seek the source preview to the end of the final word, then set its exact frame."
-                      : `FINAL OUT ${formatFrameTimecode(finalCut.out_frame, project?.project.fps ?? 30)} · frame ${finalCut.out_frame.toLocaleString()}`}
-                  </small>
-                </span>
-                {finalCutExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-              </button>
-              {finalCutExpanded && finalCut.custom && <button onClick={() => updateSplice(() => setFinalOutFrame(null))}>Reset to transcript</button>}
-            </div>
-            {finalCutExpanded && (
-              <div className="final-cut-details" id="final-cut-details">
-                <CutFrameCard
-                  title="FINAL OUT frame"
-                  frame={finalCut.out_frame}
-                  fps={project?.project.fps ?? 30}
-                  adjustment={finalCut.adjustment}
-                  whisperFrame={finalCut.suggested_out_frame}
-                  suggestedFrame={finalCut.suggested_out_frame}
-                  minFrame={finalCut.minimum_out_frame}
-                  maxFrame={maximumOutFrame ?? undefined}
-                  sourceLabel="Transcript"
-                  onNudge={(delta) => updateSplice(() => setFinalOutFrame(finalCut.out_frame + delta))}
-                />
-                <div className="review-playbar final-cut-playbar">
-                  <span>Preview final</span>
-                  {([2, 4, 6] as const).map((seconds) => (
-                    <button key={seconds} onClick={() => playFinalCut(seconds)}><Play size={13} /> {seconds}s</button>
-                  ))}
-                  <small>Plays the retained source and stops on FINAL OUT.</small>
-                </div>
-                <div className="final-cut-actions">
-                  <label>
-                    Exact frame
-                    <input
-                      type="number"
-                      min={finalCut.minimum_out_frame}
-                      max={maximumOutFrame ?? undefined}
-                      step={1}
-                      value={finalOutDraft}
-                      onChange={(event) => setFinalOutDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" && finalOutDraftValid) {
-                          updateSplice(() => setFinalOutFrame(parsedFinalOutDraft));
-                        }
-                      }}
-                    />
-                  </label>
-                  <button disabled={!finalOutDraftValid || parsedFinalOutDraft === finalCut.out_frame} onClick={() => updateSplice(() => setFinalOutFrame(parsedFinalOutDraft))}>Set frame</button>
-                  <button onClick={setFinalFromPlayhead} disabled={!sourceVideo}>Set from playhead</button>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
+        {selectedSplice ? <div className={endpoint ? "splice-review-body single" : "splice-review-body"}>
+          {!isStart && <CutFrameCard title={isEnd ? "END OUT frame" : "OUT frame"}
+            waveformSource={project?.project.source} waveformSide="out"
+            frame={selectedSplice.left_out_frame} fps={project?.project.fps ?? 30}
+            whisperFrame={selectedSplice.left_whisper_out_frame} suggestedFrame={selectedSplice.left_suggested_out_frame}
+            minFrame={selectedSplice.minimum_out_frame} maxFrame={selectedSplice.maximum_out_frame ?? undefined}
+            onNudge={(delta) => updateSplice(() => selectedSplice.kind === "manual"
+              ? adjustManualCut(selectedSplice.manual_cut_id, delta, 0) : adjustSplice(selectedSplice.anchor_key, delta, 0))} />}
+          {!isEnd && <CutFrameCard title={isStart ? "START IN frame" : "IN frame"}
+            waveformSource={project?.project.source} waveformSide="in"
+            frame={selectedSplice.right_in_frame} fps={project?.project.fps ?? 30}
+            whisperFrame={selectedSplice.right_whisper_in_frame} suggestedFrame={selectedSplice.right_suggested_in_frame}
+            minFrame={selectedSplice.minimum_in_frame} maxFrame={selectedSplice.maximum_in_frame}
+            onNudge={(delta) => updateSplice(() => selectedSplice.kind === "manual"
+              ? adjustManualCut(selectedSplice.manual_cut_id, 0, delta) : adjustSplice(selectedSplice.anchor_key, 0, delta))} />}
+          {endpoint && frame !== undefined && <EndpointFrameEntry frame={frame} onSet={applyFrame}
+            onPlayhead={() => {
+              const video = sourceVideoRef.current;
+              if (video && Number.isFinite(video.currentTime)) applyFrame(Math.round(video.currentTime * (project?.project.fps ?? 30)));
+            }} onReset={isEnd ? () => updateSplice(() => setFinalOutFrame(null)) : undefined} />}
+
+        </div> : <p className="muted">No retained content to review.</p>}
       </div>
     </section>
   );

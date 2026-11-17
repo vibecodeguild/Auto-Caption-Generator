@@ -2,6 +2,14 @@
 
 Approved: July 10, 2026.
 
+Addendum approved November 17, 2026: [Parakeet and waveform boundary
+review](parakeet-waveform-plan.md) defines the application-wide Parakeet default,
+explicit Whisper rollback, GPU-first/visible CPU fallback, long-form support,
+visual-only waveforms, and Start/End plus IN-point Fine Tune. It supersedes the
+OUT-only Fine Tune scope and separate final-endpoint surface for new projects.
+Earlier decisions below remain the historical record. Existing playback and
+2/4/6-second auditions remain unchanged.
+
 This plan records the next production work for VCG AutoCaption. The application
 is used daily, so changes must remain incremental, backward compatible, covered
 by regression tests, and independently reversible.

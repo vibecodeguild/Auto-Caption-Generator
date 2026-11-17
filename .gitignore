@@ -1,4 +1,5 @@
 .venv/
+.venv-parakeet/
 venv/
 __pycache__/
 *.py[cod]

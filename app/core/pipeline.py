@@ -10,6 +10,7 @@ from app.core.file_utils import ensure_output_path, validate_input_video
 from app.core.media_probe import ass_play_resolution_for_video
 from app.core.settings import CaptionPreset, CaptionStyle, fonts_dir
 from app.core.transcriber import transcribe_audio
+from app.core.parakeet import transcription_notice
 
 
 def _progress(callback, value: int, message: str) -> None:
@@ -85,5 +86,5 @@ def generate_captioned_video(
     _progress(progress_callback, 80, "Rendering video...")
     burn_subtitles(input_path, ass_path, output_path, fonts_dir())
 
-    _progress(progress_callback, 100, "Done.")
+    _progress(progress_callback, 100, f"Done. {transcription_notice(words)}".strip())
     return str(output_path)

@@ -566,6 +566,7 @@ def test_analyze_boundaries_updates_existing_project(tmp_path: Path, monkeypatch
         return {word_id: project.word_by_id(word_id).end_frame + 3 for word_id in word_ids}
 
     monkeypatch.setattr(web_api, "suggest_word_end_boundaries", assisted)
+    monkeypatch.setattr(web_api, "suggest_word_start_boundaries", lambda *_args: {})
 
     response = TestClient(app).post("/api/projects/current/analyze-boundaries", json={})
 
@@ -616,6 +617,7 @@ def test_fine_tune_only_reuses_word_local_measured_pause(
         return {word_id: project.word_by_id(word_id).end_frame + 3 for word_id in word_ids}
 
     monkeypatch.setattr(web_api, "suggest_word_end_boundaries", assisted)
+    monkeypatch.setattr(web_api, "suggest_word_start_boundaries", lambda *_args: {})
 
     response = TestClient(app).post("/api/projects/current/analyze-boundaries", json={})
 

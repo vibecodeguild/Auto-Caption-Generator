@@ -1,6 +1,7 @@
 "use client";
 
 import { ArrowLeft, ArrowRight } from "lucide-react";
+import { BoundaryWaveform } from "./boundary-waveform";
 
 export function formatFrameTimecode(frame: number, fps: number) {
   const roundedFps = Math.max(1, Math.round(fps));
@@ -21,6 +22,8 @@ export function CutFrameCard({
   maxFrame,
   onNudge,
   resolveDelta,
+  waveformSource,
+  waveformSide,
 }: {
   title: string;
   frame: number;
@@ -38,6 +41,8 @@ export function CutFrameCard({
   resolveDelta?: (requested: number) => number;
   /** Kept for call-site compatibility; Whisper/source label chrome removed. */
   sourceLabel?: string;
+  waveformSource?: string;
+  waveformSide?: "in" | "out";
 }) {
   const allowedDelta = (requested: number) => {
     if (resolveDelta) return resolveDelta(requested);
@@ -69,6 +74,8 @@ export function CutFrameCard({
         <span className="cut-frame-timecode">{formatFrameTimecode(frame, fps)}</span>
         <span className="cut-frame-number">{frame.toLocaleString()}</span>
       </div>
+      {waveformSource && waveformSide && <BoundaryWaveform source={waveformSource} side={waveformSide}
+        frame={frame} fps={fps} />}
       {(frame === minFrame || frame === maxFrame) && (
         <div className="cut-boundary-limit">Safety boundary reached at frame {frame.toLocaleString()}</div>
       )}

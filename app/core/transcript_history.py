@@ -27,13 +27,13 @@ def build_generation_metadata(
         faster_whisper_version = None
     return {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "engine": "faster-whisper",
-        "engine_version": faster_whisper_version,
+        "engine": "parakeet" if model_id == "parakeet-tdt-0.6b-v3" else "faster-whisper",
+        "engine_version": None if model_id == "parakeet-tdt-0.6b-v3" else faster_whisper_version,
         "model_label": model_label,
         "model_id": model_id,
         "compute_label": compute_label,
         "compute": dict(compute),
-        "options": {"word_timestamps": True, "vad_filter": True},
+        "options": {"word_timestamps": True, "vad_filter": model_id != "parakeet-tdt-0.6b-v3"},
         "source": {
             "path": str(source.resolve()),
             "size_bytes": stat.st_size,

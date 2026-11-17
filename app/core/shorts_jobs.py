@@ -61,7 +61,8 @@ class ShortsJob:
         try:
             result = execute(self.project, self.short, self.operation, self)
             with self.lock:
-                self.data.update(status="complete", value=100, message="Short ready.", result=result)
+                self.data.update(status="complete", value=100,
+                                 message=f"Short ready. {result.get('transcriptionNotice', '')}".strip(), result=result)
         except CutCanceled as exc:
             with self.lock:
                 self.data.update(status="canceled", message=str(exc))

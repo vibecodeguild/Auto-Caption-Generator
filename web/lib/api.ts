@@ -50,8 +50,12 @@ export type DynamicSplice = {
   left_context: string;
   right_context: string;
   reviewed: boolean;
-  kind: "transcript" | "front_trim" | "manual";
+  kind: "transcript" | "front_trim" | "end_trim" | "manual";
   manual_cut_id: string;
+  minimum_out_frame?: number;
+  maximum_out_frame?: number | null;
+  minimum_in_frame?: number;
+  maximum_in_frame?: number;
   preview_segments_2s: [number, number][];
   preview_segments_4s: [number, number][];
   preview_segments_6s: [number, number][];
@@ -187,6 +191,8 @@ export type CaptionStylePayload = {
 export type CaptionOptionsResponse = {
   presets: Record<string, CaptionPresetPayload>;
   models: Record<string, string>;
+  default_model: string;
+  default_compute: string;
   compute: Record<string, { device: string; compute_type: string }>;
   styles: Record<string, CaptionStylePayload>;
   built_in_styles: string[];
@@ -239,6 +245,7 @@ export type CaptionPreviewGroup = {
 };
 
 export type CaptionPreviewResponse = {
+  transcription_notice?: string;
   source: string;
   word_count: number;
   used_project_transcript: boolean;

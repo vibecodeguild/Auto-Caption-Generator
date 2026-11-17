@@ -171,6 +171,37 @@ def _assisted_end_seconds(
     return max(whisper_end, (last_active_index + 1) * WINDOW_SECONDS)
 
 
+def suggest_word_start_boundaries(
+    project: TranscriptProject, audio_path: Path, word_ids: set[str],
+) -> dict[str, int | None]:
+    """Trim evidenced leading quiet only; never move IN earlier or skip an onset.
+
+    Search at most one second into the word's baseline interval. A quiet run at
+    the original IN must precede the first audible window. Round toward earlier
+    frames to preserve the onset, including quiet consonants.
+    """
+    samples, rate = _read_mono_pcm16(audio_path)
+    levels = _window_dbfs(samples, max(1, round(rate * WINDOW_SECONDS)))
+    result: dict[str, int | None] = {word_id: None for word_id in word_ids}
+    for word in project.words:
+        if word.id not in word_ids:
+            continue
+        first = max(0, math.floor(word.start / WINDOW_SECONDS))
+        last = min(len(levels), math.ceil(min(word.end, word.start + 1.0) / WINDOW_SECONDS))
+        context = levels[first:last]
+        if len(context) < 6:
+            continue
+        quiet_floor = sorted(context)[int((len(context) - 1) * 0.2)]
+        threshold = max(MIN_ACTIVE_DBFS, quiet_floor + NOISE_MARGIN_DB, max(context) - 40.0)
+        onset = next((index for index, level in enumerate(context) if level >= threshold), None)
+        if onset is None or onset * WINDOW_SECONDS < MIN_SILENCE_SECONDS:
+            continue
+        frame = math.floor((first + onset) * WINDOW_SECONDS * project.fps)
+        if word.start_frame < frame < word.end_frame:
+            result[word.id] = frame
+    return result
+
+
 def _read_mono_pcm16(path: Path) -> tuple[array, int]:
     with wave.open(str(path), "rb") as source:
         if source.getnchannels() != 1 or source.getsampwidth() != 2:

@@ -85,6 +85,9 @@ def transcribe_audio(
     compute_mode: str,
     progress_callback=None,
 ) -> list[WordTimestamp]:
+    if model_size == "parakeet-tdt-0.6b-v3":
+        from app.core.parakeet import transcribe_parakeet
+        return transcribe_parakeet(audio_path, compute_mode, progress_callback)
     if compute_mode == "NVIDIA GPU":
         configure_cuda_dll_paths()
         missing = missing_cuda_runtime_dlls()

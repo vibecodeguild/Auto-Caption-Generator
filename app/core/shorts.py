@@ -33,6 +33,7 @@ from app.core.settings import (
 from app.core.style_library import BUILT_IN_STYLES
 from app.core.shorts_platforms import CHECKED_ON, PROFILES, guidance
 from app.core.transcriber import transcribe_audio
+from app.core.parakeet import transcription_notice
 from app.core.video_cutter import frame_intervals_to_seconds, run_cut
 from app.core.video_project import load_video_project, resolve_video_project_path, video_project_root
 from app.core.visual_production import probe_visual_source
@@ -483,6 +484,7 @@ def next_delivery_path(project: ShortsProject, short: dict, number: int) -> Path
 def execute(project: ShortsProject, short: dict, operation: str, job) -> dict:
     """Build into a new job directory; publish only against the captured revision."""
     job.check()
+    notice = ""
     if short["source"] != project.source():
         raise ValueError("The locked cut changed. Create a new candidate plan before rendering.")
     key = edit_key(short)
@@ -515,6 +517,7 @@ def execute(project: ShortsProject, short: dict, operation: str, job) -> dict:
         job.update(60, "Transcribing this short's own audio…")
         settings = short["settings"]
         words = transcribe_audio(audio, model_size=MODEL_OPTIONS[settings["modelLabel"]], compute_mode=settings["computeLabel"])
+        notice = transcription_notice(words)
         job.check()
         valid = []
         for word in words:
@@ -529,7 +532,8 @@ def execute(project: ShortsProject, short: dict, operation: str, job) -> dict:
         transcript_path = project.path(f"shorts/{short['id']}/transcripts/{job.id}.json")
         document = {"schemaVersion": 1, "editKey": key, "assemblySha256": assembly["sha256"],
                     "modelLabel": settings["modelLabel"], "computeLabel": settings["computeLabel"],
-                    "durationSec": expected, "createdAt": now(), "words": valid}
+                    "durationSec": expected, "createdAt": now(), "words": valid,
+                    "execution": getattr(words, "metadata", {}), "transcriptionNotice": notice}
         write_json(transcript_path, document)
         candidate["caption"] = {"editKey": key, "assemblySha256": assembly["sha256"], "path": transcript_path.relative_to(project.root).as_posix(), "sha256": media_hash(transcript_path)}
     if operation == "export":
@@ -587,4 +591,5 @@ def execute(project: ShortsProject, short: dict, operation: str, job) -> dict:
         current["revision"] += 1
         project._save(data, {"action": operation, "shortId": short["id"], "jobId": job.id})
     return {"shortId": short["id"], "operation": operation,
+            "transcriptionNotice": notice,
             "outputPath": str(project.path(candidate["delivery"]["path"])) if operation == "export" else None}

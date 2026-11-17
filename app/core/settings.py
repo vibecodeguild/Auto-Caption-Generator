@@ -9,13 +9,14 @@ from pathlib import Path
 
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 MODEL_OPTIONS = {
+    "Parakeet v3 - default": "parakeet-tdt-0.6b-v3",
     "Tiny - fastest": "tiny.en",
     "Base - balanced": "base.en",
     "Small - better accuracy": "small.en",
     "Medium - high accuracy": "medium.en",
     "Large v3 - best accuracy": "large-v3",
 }
-DEFAULT_MODEL_LABEL = "Large v3 - best accuracy"
+DEFAULT_MODEL_LABEL = "Parakeet v3 - default"
 COMPUTE_OPTIONS = {
     "CPU": {"device": "cpu", "compute_type": "int8"},
     "NVIDIA GPU": {"device": "cuda", "compute_type": "float16"},

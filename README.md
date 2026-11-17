@@ -8,7 +8,7 @@ VCG AutoCaption is a local Windows video utility with three working workflows:
 
 The current product interface is a Next.js web UI backed by a local FastAPI
 process. Media processing stays on the computer and is performed with
-`faster-whisper` and FFmpeg. No account, cloud upload, analytics service, or API
+Parakeet (default), faster-whisper (explicit rollback), and FFmpeg. No account, cloud upload, analytics service, or API
 key is required.
 
 The repository also retains the earlier PySide6 desktop prototype. It remains a
@@ -39,7 +39,7 @@ The currently approved production sequence and rendered-preview design are in
 ## Requirements
 
 - Windows 10 or newer
-- Python 3.10 or newer
+- Python 3.12 recommended for the isolated Parakeet runtime
 - Node.js and npm compatible with Next.js 16
 - FFmpeg supplied by `imageio-ffmpeg`, available on `PATH`, or placed at
   `tools\ffmpeg\ffmpeg.exe`
@@ -65,7 +65,20 @@ Install frontend dependencies:
 npm install
 ```
 
-For optional NVIDIA support, install the GPU packages in the same environment:
+Install the isolated Parakeet runtime and model (including NVIDIA runtime libraries):
+
+```powershell
+.\scripts\setup_parakeet.ps1
+```
+
+Parakeet attempts verified GPU execution first in NVIDIA mode, then retries on
+CPU with the fallback reason shown in the existing transcription status. There
+is no three-minute limit. CPU mode is also available explicitly. The shared
+transcription service is used by Transcript Edit, Caption Generator, Shorts,
+and spoken insert clips.
+
+For optional NVIDIA **Whisper rollback** support, install these packages in the
+application environment:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
@@ -102,16 +115,20 @@ reverse proxy, router, container mapping, or firewall rule.
 2. Review the Source Sequence. Add recordings, move them up or down, or remove
    them before transcription. Matching same-camera clips combine quickly without
    re-encoding; incompatible clips are standardized automatically.
-3. If starting from video, choose the Whisper model and CPU/GPU mode, then
+3. If starting from video, choose the transcription model and CPU/GPU mode, then
    generate the transcript.
 4. Click **Analyze Pauses** to measure only Whisper gaps that meet the configured
    long-pause threshold. Candidates measured below the threshold disappear.
 5. Select transcript words or validated long-pause chips and delete or restore
    them. Bulk removal shows how many measured pauses currently qualify.
-6. Click **Fine Tune** to analyze only the current unreviewed splice OUT points.
+6. Click **Fine Tune** to analyze unreviewed OUT points and trim evidenced leading silence at IN points. Manually adjusted boundaries remain unchanged.
    The utility reports how many cuts were checked, adjusted, or unchanged.
 7. Review the dynamic splice queue. Preview 2, 4, or 6 seconds around each join,
    adjust the OUT and IN frames, and mark reviewed splices.
+   New projects include **Start** (IN only) and **End** (OUT only) in the same
+   review queue. Visual-only waveforms help guide existing frame nudges; no
+   word labels or waveform drag controls are added. Exact-frame and playhead
+   endpoint adjustment remain available.
 8. In Stage 4, render the complete edited video as a fast review draft. Use the
    full-duration splice timeline and compact splice list to navigate joins,
    adjust OUT/IN frames in the preview workspace, and refresh the complete
@@ -130,7 +147,7 @@ delete decisions, splice adjustments, artifact revisions, and review state.
 
 1. Use the active project cut and project-managed export folder. Standalone
    legacy use can still choose these manually.
-2. Select a Whisper model, compute mode, grouping preset, and caption style.
+2. Select a transcription model, compute mode, grouping preset, and caption style.
 3. Prepare the live preview. If the same video is loaded in Transcript Edit,
    the existing transcript is reused; otherwise the preview transcribes and
    caches the selected source/model combination.
@@ -140,7 +157,7 @@ delete decisions, splice adjustments, artifact revisions, and review state.
 6. Generate `<source>_captioned.mp4`.
 
 Caption text itself is not yet manually editable. The current controls affect
-grouping and presentation of the Whisper result.
+grouping and presentation of the transcription result.
 
 ### Audio Normalizer
 
@@ -227,7 +244,7 @@ npm run build
 .\.venv\Scripts\python.exe -m pytest tests
 ```
 
-The Python suite currently contains 141 tests covering transcript/edit models,
+The Python suite covers transcript/edit models,
 splice generation and preview, project persistence, caption grouping/ASS
 generation, FFmpeg command construction, audio normalization, local API
 behavior, host/origin enforcement, Windows dialog integration, and repository

@@ -46,7 +46,7 @@ from app.core.ffmpeg_locator import find_ffmpeg
 from app.core.ffmpeg_runner import extract_audio
 from app.core.project_store import editor_project_document, load_editor_project, save_editor_project
 from app.core.repetition_detection import detect_repeated_word_ids
-from app.core.settings import COMPUTE_OPTIONS, MODEL_OPTIONS, PRESETS, CaptionPreset, CaptionStyle, WordTimestamp, default_style, exports_dir, project_root, temp_dir
+from app.core.settings import COMPUTE_OPTIONS, MODEL_OPTIONS, PRESETS, DEFAULT_MODEL_LABEL, DEFAULT_COMPUTE_LABEL, CaptionPreset, CaptionStyle, WordTimestamp, default_style, exports_dir, project_root, temp_dir
 from app.core.splice_generation import (
     DynamicSplice,
     InvalidCutPlanError,
@@ -107,6 +107,9 @@ from app.core.masterbeater import (
     save_masterbeater_edits_for_video_project,
 )
 from app.core.transcriber import transcribe_audio
+from app.core.audio_boundary import suggest_word_start_boundaries
+from app.core.audio_waveform import waveform_window
+from app.core.parakeet import TranscribedWords, transcription_notice
 from app.core.transcript_history import build_edit_analysis, build_generation_metadata, with_initial_repeat_suggestions
 from app.core.transcript_remap import remap_transcript
 from app.core.transcript_model import TranscriptProject
@@ -1830,7 +1833,7 @@ def choose_transcript_video() -> dict:
 @app.post("/api/projects/transcribe")
 def transcribe_project(payload: TranscribeProjectRequest) -> dict:
     if payload.model_label not in MODEL_OPTIONS:
-        raise HTTPException(status_code=400, detail=f"Unknown Whisper model: {payload.model_label}")
+        raise HTTPException(status_code=400, detail=f"Unknown transcription model: {payload.model_label}")
     if payload.compute_label not in COMPUTE_OPTIONS:
         raise HTTPException(status_code=400, detail=f"Unknown compute device: {payload.compute_label}")
     if state.transcript_video_path is None:
@@ -1853,7 +1856,7 @@ def transcribe_project(payload: TranscribeProjectRequest) -> dict:
 @app.post("/api/projects/transcribe/start")
 def start_transcribe_project(payload: TranscribeProjectRequest) -> dict:
     if payload.model_label not in MODEL_OPTIONS:
-        raise HTTPException(status_code=400, detail=f"Unknown Whisper model: {payload.model_label}")
+        raise HTTPException(status_code=400, detail=f"Unknown transcription model: {payload.model_label}")
     if payload.compute_label not in COMPUTE_OPTIONS:
         raise HTTPException(status_code=400, detail=f"Unknown compute device: {payload.compute_label}")
     if state.transcript_video_path is None:
@@ -1985,7 +1988,7 @@ def analyze_current_pauses() -> dict:
 def analyze_current_boundaries() -> dict:
     project = _require_project()
     plan = generate_splices(project, state.edits)
-    targets = [splice for splice in plan.splices if not splice.reviewed and splice.left_word_id]
+    targets = [splice for splice in plan.splices if not splice.reviewed and splice.kind != "manual"]
     if not targets:
         return _project_response(
             fine_tune_summary={"cuts_checked": 0, "cuts_adjusted": 0, "cuts_unchanged": 0}
@@ -1999,7 +2002,10 @@ def analyze_current_boundaries() -> dict:
         suggestions = suggest_word_end_boundaries(
             project,
             audio_path,
-            {splice.left_word_id for splice in targets},
+            {splice.left_word_id for splice in targets if splice.left_word_id},
+        )
+        in_suggestions = suggest_word_start_boundaries(
+            project, audio_path, {splice.right_word_id for splice in targets if splice.right_word_id},
         )
     except (OSError, RuntimeError, ValueError, wave.Error) as exc:
         raise HTTPException(status_code=400, detail=f"Audio boundary analysis failed: {exc}") from exc
@@ -2007,13 +2013,20 @@ def analyze_current_boundaries() -> dict:
     previous_edits = copy.deepcopy(state.edits)
     adjusted = 0
     for splice in targets:
-        suggestion = suggestions.get(splice.left_word_id)
-        measured_suggestion = _measured_pause_out_frame(project, splice.left_word_id, splice.right_word_id)
-        if measured_suggestion is not None:
-            suggestion = measured_suggestion
-        state.edits.set_assisted_out_frame(splice.anchor_key, suggestion)
-        if suggestion is not None and suggestion != splice.left_whisper_out_frame:
-            adjusted += 1
+        changed = False
+        if splice.left_word_id:
+            suggestion = suggestions.get(splice.left_word_id)
+            measured_suggestion = _measured_pause_out_frame(project, splice.left_word_id, splice.right_word_id) if splice.right_word_id else None
+            if measured_suggestion is not None:
+                suggestion = measured_suggestion
+            if splice.left_out_adjustment == 0 and not (splice.kind == "end_trim" and state.edits.final_out_frame is not None):
+                state.edits.set_assisted_out_frame(splice.anchor_key, suggestion)
+                changed |= suggestion is not None and suggestion != splice.left_suggested_out_frame
+        if splice.right_word_id and splice.right_in_adjustment == 0:
+            suggestion_in = in_suggestions.get(splice.right_word_id)
+            state.edits.set_assisted_in_frame(splice.anchor_key, suggestion_in)
+            changed |= suggestion_in is not None and suggestion_in != splice.right_suggested_in_frame
+        adjusted += int(changed)
     try:
         generate_splices(project, state.edits)
     except InvalidCutPlanError as exc:
@@ -2035,9 +2048,18 @@ def analyze_current_boundaries() -> dict:
 def adjust_splice(payload: AdjustSpliceRequest) -> dict:
     project = _require_project()
     previous_edits = copy.deepcopy(state.edits)
+    selected = next((item for item in generate_splices(project, state.edits).splices if item.anchor_key == payload.anchor_key), None)
+    if selected is None:
+        raise HTTPException(status_code=404, detail="Unknown boundary.")
+    if selected.kind == "end_trim":
+        if payload.right_delta:
+            raise HTTPException(status_code=400, detail="End has only an OUT boundary.")
+        state.edits.set_final_out_frame(selected.left_out_frame + payload.left_delta)
+    elif selected.kind == "front_trim" and payload.left_delta:
+        raise HTTPException(status_code=400, detail="Start has only an IN boundary.")
     state.edits.adjust_splice(
         payload.anchor_key,
-        left_out_delta=payload.left_delta,
+        left_out_delta=payload.left_delta if selected.kind != "end_trim" else 0,
         right_in_delta=payload.right_delta,
     )
     try:
@@ -2047,6 +2069,18 @@ def adjust_splice(payload: AdjustSpliceRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _save_current_project_if_loaded(project)
     return _project_response()
+
+
+@app.get("/api/projects/current/waveform")
+def current_waveform(source: str, start: float, end: float) -> dict:
+    """Return cached PCM waveform peaks for the visible source interval."""
+    project = _require_project()
+    if source != project.source:
+        raise HTTPException(status_code=409, detail="Waveform source changed.")
+    try:
+        return waveform_window(Path(project.source), temp_dir() / "waveforms", start, end)
+    except (OSError, RuntimeError, ValueError, wave.Error) as exc:
+        raise HTTPException(status_code=400, detail=f"Waveform unavailable: {exc}") from exc
 
 
 @app.post("/api/projects/current/splices/review")
@@ -2129,6 +2163,10 @@ def set_final_out_frame(payload: FinalOutFrameRequest) -> dict:
     project = _require_project()
     previous_edits = copy.deepcopy(state.edits)
     state.edits.set_final_out_frame(payload.frame)
+    if payload.frame is None and project.generation.get("boundary_review_version"):
+        for anchor in list(state.edits.splice_adjustments):
+            if anchor.endswith("->END"):
+                state.edits.splice_adjustments.pop(anchor)
     try:
         generate_splices(project, state.edits)
     except InvalidCutPlanError as exc:
@@ -2710,6 +2748,8 @@ def caption_options() -> dict:
     return {
         "presets": {name: asdict(preset) for name, preset in PRESETS.items()},
         "models": MODEL_OPTIONS,
+        "default_model": DEFAULT_MODEL_LABEL,
+        "default_compute": DEFAULT_COMPUTE_LABEL,
         "compute": COMPUTE_OPTIONS,
         "styles": styles,
         "built_in_styles": [name for name in styles if is_built_in_style(name)],
@@ -3113,7 +3153,7 @@ def generate_caption_video(payload: CaptionGenerateRequest) -> dict:
     if not source.exists():
         raise HTTPException(status_code=400, detail=f"Source video not found: {source}")
     if payload.model_label not in MODEL_OPTIONS:
-        raise HTTPException(status_code=400, detail=f"Unknown Whisper model: {payload.model_label}")
+        raise HTTPException(status_code=400, detail=f"Unknown transcription model: {payload.model_label}")
     if payload.compute_label not in COMPUTE_OPTIONS:
         raise HTTPException(status_code=400, detail=f"Unknown compute device: {payload.compute_label}")
 
@@ -3144,7 +3184,7 @@ def generate_caption_video(payload: CaptionGenerateRequest) -> dict:
 def caption_preview(payload: CaptionPreviewRequest) -> dict:
     source = _caption_source_path(payload.input_video_path)
     if payload.model_label not in MODEL_OPTIONS:
-        raise HTTPException(status_code=400, detail=f"Unknown Whisper model: {payload.model_label}")
+        raise HTTPException(status_code=400, detail=f"Unknown transcription model: {payload.model_label}")
     if payload.compute_label not in COMPUTE_OPTIONS:
         raise HTTPException(status_code=400, detail=f"Unknown compute device: {payload.compute_label}")
 
@@ -3165,6 +3205,7 @@ def caption_preview(payload: CaptionPreviewRequest) -> dict:
     return {
         "source": str(source),
         "word_count": len(words),
+        "transcription_notice": transcription_notice(words),
         "used_project_transcript": used_project_transcript,
         "words": [asdict(word) for word in words],
         "groups": [
@@ -3193,10 +3234,9 @@ def _caption_source_path(input_video_path: str | None) -> Path:
 
 def _caption_preview_words(source: Path, model_size: str, compute_label: str) -> tuple[list[WordTimestamp], bool]:
     if state.project is not None and Path(state.project.source).expanduser().resolve() == source:
-        return [
-            WordTimestamp(text=word.text, start=word.start, end=word.end)
-            for word in state.project.words
-        ], True
+        return TranscribedWords(
+            [WordTimestamp(text=word.text, start=word.start, end=word.end) for word in state.project.words],
+            metadata=state.project.generation.get("execution", {})), True
 
     cache_key = (str(source), model_size, compute_label)
     if state.caption_preview_cache_key == cache_key and state.caption_preview_words is not None:
@@ -3456,6 +3496,11 @@ def _annotate_generated_project(
         compute=COMPUTE_OPTIONS[compute_label],
         sequence_revision=sequence_revision,
     )
+    generation.update(project.generation)
+    if generation.get("execution"):
+        generation["engine_version"] = generation["execution"].get("engine_version")
+        generation["requested_compute"] = generation["compute"]
+        generation["compute"] = {"device": generation["execution"]["device"], "compute_type": "int8"}
     annotated = replace(project, generation=generation)
     repeats = detect_repeated_word_ids(annotated.words)
     return replace(annotated, generation=with_initial_repeat_suggestions(annotated, repeats))
@@ -3623,7 +3668,7 @@ def _project_response(
         },
         "fine_tune_summary": fine_tune_summary,
         "pause_analysis_summary": pause_analysis_summary,
-        "splices": [_splice_dict(splice, project.fps) for splice in plan.splices],
+        "splices": [_splice_dict(splice, project, plan) for splice in plan.splices],
         "kept_ranges": [asdict(item) for item in plan.kept_ranges],
         "final_cut": final_cut,
     }
@@ -3664,11 +3709,24 @@ def _silence_duration_seconds(silence, fps: float) -> float:
     return max(0, silence.end_frame - silence.start_frame + 1) / fps
 
 
-def _splice_dict(splice: DynamicSplice, fps: float) -> dict:
+def _splice_dict(splice: DynamicSplice, project: TranscriptProject, plan: SplicePlan) -> dict:
+    fps = project.fps
     data = asdict(splice)
-    data["preview_segments_2s"] = source_splice_preview_segments(splice, fps=fps, seconds=2)
-    data["preview_segments_4s"] = source_splice_preview_segments(splice, fps=fps, seconds=4)
-    data["preview_segments_6s"] = source_splice_preview_segments(splice, fps=fps, seconds=6)
+    left = next((item for item in plan.kept_ranges if item.id == splice.left_keep_range_id), None)
+    right = next((item for item in plan.kept_ranges if item.id == splice.right_keep_range_id), None)
+    data["minimum_out_frame"] = left.adjusted_start_frame if left else 0
+    data["maximum_out_frame"] = splice.right_in_frame - (2 if splice.kind == "manual" else 1)
+    if splice.kind == "end_trim":
+        index = project.word_index(splice.left_word_id)
+        data["maximum_out_frame"] = project.words[index + 1].start_frame - 1 if index + 1 < len(project.words) else project.generation.get("source_maximum_frame")
+    data["minimum_in_frame"] = splice.left_out_frame + (2 if splice.kind == "manual" else 1) if left else 0
+    data["maximum_in_frame"] = right.adjusted_end_frame if right else splice.right_in_frame
+    for seconds in (2, 4, 6):
+        data[f"preview_segments_{seconds}s"] = source_splice_preview_segments(
+            splice, fps=fps, seconds=seconds,
+            minimum_frame=left.adjusted_start_frame if left else 0,
+            maximum_frame=right.adjusted_end_frame if right else None,
+        )
     return data
 
 
@@ -3683,6 +3741,10 @@ def _remove_splice_edits(project: TranscriptProject, anchor_key: str) -> None:
     splice = next((item for item in plan.splices if item.anchor_key == anchor_key), None)
     if splice is None:
         raise KeyError(f"Unknown splice: {anchor_key}")
+    if splice.kind == "end_trim":
+        state.edits.set_final_out_frame(None)
+        state.edits.splice_adjustments.pop(anchor_key, None)
+        return
 
     deleted_words = _deleted_word_ids(project)
     deleted_silences = _deleted_silence_ids()

@@ -428,11 +428,13 @@ def build_program_transcript(
         fps = transcript_fps(document)
 
     generation = (document.get("project") or document).get("generation") or {}
-    model_label = str(generation.get("modelLabel") or DEFAULT_MODEL_LABEL)
+    model_label = str(generation.get("model_label") or generation.get("modelLabel") or DEFAULT_MODEL_LABEL)
     model_size = model_size or MODEL_OPTIONS.get(model_label, MODEL_OPTIONS[DEFAULT_MODEL_LABEL])
-    compute_mode = compute_mode or str(generation.get("computeLabel") or DEFAULT_COMPUTE_LABEL)
+    compute_mode = compute_mode or str(generation.get("compute_label") or generation.get("computeLabel") or DEFAULT_COMPUTE_LABEL)
 
     words: list[dict[str, Any]] = []
+    transcription_notices: list[str] = []
+    from app.core.parakeet import transcription_notice
     for word in aroll_words:
         words.append(shift_aroll_word(word, inserts=inserts, fps=fps))
 
@@ -480,6 +482,9 @@ def build_program_transcript(
             continue
         work.mkdir(parents=True, exist_ok=True)
         clip_words = transcribe_clip(clip_path)
+        notice = transcription_notice(clip_words)
+        if notice:
+            transcription_notices.append(f"{insert_id}: {notice}")
         clip_start = float(row.get("clipStartSec") or 0.0)
         duration_sec = float(piece.get("durationSec") or 0.0)
         program_start_sec = program_start / fps
@@ -519,6 +524,7 @@ def build_program_transcript(
         "durationFrames": duration_frames,
         "updatedAt": _now(),
         "words": words,
+        "transcriptionNotices": transcription_notices,
         "inserts": [
             {
                 "id": row.get("id"),
@@ -882,7 +888,7 @@ def render_program_final_for_video_project(
     t_path = program_transcript_path_for_project(root)
     t_path.parent.mkdir(parents=True, exist_ok=True)
     t_path.write_text(json.dumps(transcript, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    progress(100, "Program Final ready.")
+    progress(100, "Program Final ready. " + " ".join(transcript.get("transcriptionNotices", [])))
     return {
         "ok": True,
         "outputPath": str(published),
@@ -891,5 +897,6 @@ def render_program_final_for_video_project(
         "insertCount": len(inserts),
         "programDurationSec": transcript["durationSec"],
         "transcriptPath": str(t_path),
+        "transcriptionNotices": transcript.get("transcriptionNotices", []),
         "quality": quality,
     }

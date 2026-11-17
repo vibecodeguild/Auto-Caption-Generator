@@ -58,8 +58,30 @@ def generate_splices(project: TranscriptProject, edits: EditDecisionList) -> Spl
     kept_ranges = _apply_manual_cuts(project, kept_ranges, edits.manual_cuts)
     kept_ranges = _apply_final_out_frame(project, kept_ranges, edits.final_out_frame)
     splices = _finalize_splices(project, kept_ranges, transcript_splices, edits.manual_cuts)
+    if project.generation.get("boundary_review_version") and kept_ranges:
+        final_range = kept_ranges[-1]
+        word = project.word_by_id(final_range.end_word_id)
+        anchor = f"{word.id}->END"
+        adjustment = edits.splice_adjustments.get(anchor)
+        assisted = adjustment.assisted_left_out_frame if adjustment else None
+        suggested = assisted if assisted is not None else word.end_frame
+        frame = edits.final_out_frame if edits.final_out_frame is not None else suggested
+        kept_ranges = _apply_final_out_frame(project, kept_ranges, frame)
+        splices.append(DynamicSplice(
+            id="end", anchor_key=anchor, left_keep_range_id=final_range.id,
+            right_keep_range_id="", left_word_id=word.id, right_word_id="",
+            left_out_frame=frame, right_in_frame=frame + 1,
+            left_whisper_out_frame=word.end_frame, left_suggested_out_frame=suggested,
+            right_whisper_in_frame=frame + 1, right_suggested_in_frame=frame + 1,
+            left_out_adjustment=frame - suggested, right_in_adjustment=0,
+            left_context=_context_before(project.words, word.id), right_context="End of source",
+            reviewed=adjustment.reviewed if adjustment else False, kind="end_trim",
+        ))
     plan = SplicePlan(kept_ranges=kept_ranges, splices=splices)
     validate_cut_plan(plan)
+    maximum = project.generation.get("source_maximum_frame")
+    if maximum is not None and any(item.adjusted_end_frame > maximum for item in kept_ranges):
+        raise InvalidCutPlanError("OUT must stay within the source video.")
     return plan
 
 
@@ -242,7 +264,7 @@ def _build_splices(
 ) -> list[DynamicSplice]:
     splices: list[DynamicSplice] = []
     first_kept = kept_ranges[0] if kept_ranges else None
-    if first_kept is not None and first_kept.start_word_id != project.words[0].id:
+    if first_kept is not None and (project.generation.get("boundary_review_version") or first_kept.start_word_id != project.words[0].id):
         anchor_key = f"START->{first_kept.start_word_id}"
         adjustment = edits.splice_adjustments.get(anchor_key)
         right_delta = adjustment.right_in_delta if adjustment else 0

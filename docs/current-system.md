@@ -45,7 +45,7 @@ and custom styles remain supported.
 | `web/app/visual-production.tsx` | Separate private visual-finishing workspace, library, preview, inspector, render controls, and layered timeline |
 | `web/lib/api.ts` | Typed client contracts and API calls |
 | `app/web_api.py` | FastAPI routes, active process state, validation, file selection, job management, and media responses |
-| `app/core/editor_pipeline.py` | Video probing, audio extraction, Whisper transcription, and transcript-project construction |
+| `app/core/editor_pipeline.py` | Video probing, audio extraction, shared local transcription, and transcript-project construction |
 | `app/core/edit_decisions.py` | Word/silence deletion and restoration state |
 | `app/core/splice_generation.py` | Derives current splice joins and preserves frame adjustments by source anchors |
 | `app/core/splice_preview.py` | Calculates before/after source playback segments |
@@ -259,16 +259,20 @@ Current kept ranges generate the splice queue dynamically. A splice records:
 The browser previews a splice by playing the outgoing source segment, seeking
 to the incoming segment, and continuing playback. It does not render a preview
 MP4. The compact splice controls show exact timecode, absolute frame, the
-Whisper-suggested frame, and the user's manual adjustment without duplicating
+original model frame, and the user's manual adjustment without duplicating
 the source preview as separate frame images.
 
 The cut plan is validated after every frame adjustment and again before export.
 Collapsed, reversed, negative, or overlapping kept ranges are rejected, and a
-rejected adjustment is rolled back rather than saved. Whisper word timestamps
+rejected adjustment is rolled back rather than saved. Original word timestamps
 remain the immutable baseline. The primary **Fine Tune** action extracts a mono
-WAV and examines only OUT points for current unreviewed splices. It can extend a
+WAV and examines OUT and IN points for current unreviewed transcript boundaries,
+including Start and End on new projects. Manual cuts and manually adjusted
+sides remain unchanged. IN assistance removes only evidenced leading quiet
+within a bounded word-local search; it never moves IN earlier or skips the
+first detected opening sound. OUT assistance retains the existing behavior. It can extend a
 suggestion to the first sustained local silence, up to `0.35s` and never beyond
-the next word. The Whisper frame, splice-level assisted suggestion, and manual
+the next word. The original frame, splice-level assisted suggestion, and manual
 adjustment remain separate. For a deleted validated pause, Fine Tune reuses its
 measured outgoing acoustic boundary. Reviewed splices are not analyzed or
 changed.
@@ -278,14 +282,21 @@ OUT point can move no farther than `IN - 1`, and an IN point can move no earlier
 than `OUT + 1`. Buttons disable at those limits while the backend retains its
 independent overlap/collapse validation.
 
-Stage 3 also exposes the final source OUT frame independently of splice joins.
-The user can enter an exact frame, capture the current source-preview playhead,
-or nudge by 1, 5, or 10 frames. Dedicated 2-, 4-, and 6-second previews play the
-last retained source section into that inclusive OUT frame and stop there. The
-optional boundary is stored in the editor project and changes the last interval
-used by both Stage 4 rendering and final export. Reset restores the last kept
-word's transcript end. The control cannot extend into transcript words
-deliberately deleted from the end.
+For new projects, Start (IN only) and End (OUT only) are entries in the same
+boundary review queue. Exact frame entry, playhead capture, 1/5/10-frame nudges,
+and existing 2/4/6-second auditions remain available. The separate final-endpoint
+surface is superseded by End; saved `final_out_frame` values remain authoritative.
+Deleted trailing content and source-duration limits remain protected.
+
+Stage 3 and Stage 4 frame cards show visual-only waveforms with one pink
+current-boundary marker and fixed ±1-second context. The legend
+text and context-selection buttons were removed at the user's request.
+Splice navigation shares one compact row with playback: Prev, Accpt, Next,
+2/4/6-second auditions, and Loop. Acceptance/review behavior is unchanged.
+Waveforms have no word labels or pointer-based editing. PCM min/max peaks are
+cached separately from ASR by source path, size, and nanosecond modification
+time. Visible-window requests are bounded to eight seconds, reject a stale
+project source, and never change transcript or cut decisions.
 
 Stage 4 renders the complete current cut as a fast review draft using the same
 interval conversion and cutter as final export. Its dedicated workspace has a
@@ -333,10 +344,10 @@ with the same 2s/4s/6s convention as transcript splices: the rendered video
 plays the first half into OUT, jumps to IN, then plays the second half. These
 guides and previews remain temporary until **Add Manual Cut** succeeds.
 
-Whisper still records candidate gaps from `0.35s`, but those raw gaps are not
+Transcription still records candidate gaps from `0.35s`, but those raw gaps are not
 all shown as dead space. The primary **Analyze Pauses** action measures only raw
 candidates meeting the project threshold (default `0.8s`) against the source
-audio. It stores measured boundaries alongside the Whisper gap, hides measured
+audio. It stores measured boundaries alongside the model gap, hides measured
 pauses below the threshold, and restores any rejected candidate that had been
 deleted. Displayed chips, the toolbar count, and bulk removal all use the same
 frame-based measured duration. Raw candidates are labeled separately, and bulk
@@ -356,10 +367,20 @@ caption render or write an integrated cut-plus-caption deliverable.
 
 ## Caption Generator Workflow
 
-Caption options expose grouping presets, Whisper model labels, CPU/NVIDIA
+Caption options expose grouping presets, shared transcription model labels, CPU/NVIDIA
 compute modes, three built-in styles, custom styles, selected source, and output
-folder. Fresh sessions default to Large v3 on NVIDIA GPU while retaining the
-other model and compute choices.
+folder. Fresh sessions take the Parakeet default from the backend; Whisper
+models remain explicitly selectable. See [Parakeet and waveform plan](parakeet-waveform-plan.md)
+for the approved scope, runtime setup, and validation record.
+
+Parakeet runs in `.venv-parakeet` through an isolated worker, with a shared
+application adapter and serialized inference. Long recordings use 28-second
+cores with two seconds of overlapping context on each side. Word and source-time
+anchors reconcile overlaps without deduplicating repeated speech. Initial ends
+use the approved last lexical token + 80 ms estimate, capped at the next word
+or audio end; punctuation emission does not extend acoustic timing. Invalid
+GPU results retry the complete recording on CPU with the reason reported.
+Raw tokens, timestamps, and durations remain separate from editable cut anchors.
 
 Preparing live preview obtains word timestamps in this order:
 
@@ -506,7 +527,7 @@ downloadable briefs and importable agent responses rather than an in-app AI serv
 
 ## API Inventory
 
-Generated from `app/web_api.py` by `scripts/generate_api_inventory.py`. 110 routes.
+Generated from `app/web_api.py` by `scripts/generate_api_inventory.py`. 111 routes.
 Edit the route or its docstring, then regenerate; do not edit this section by hand.
 
 ### Visual Package
@@ -621,6 +642,7 @@ Edit the route or its docstring, then regenerate; do not edit this section by ha
 | POST | `/api/projects/current/splices/adjust` | Adjust splice |
 | POST | `/api/projects/current/splices/review` | Review splice |
 | DELETE | `/api/projects/current/splices/{anchor_key:path}` | Undo a Stage 4 splice: drop a manual cut, or restore the deleted gap for a transcript cut |
+| GET | `/api/projects/current/waveform` | Return cached PCM waveform peaks for the visible source interval |
 | POST | `/api/projects/open` | Open project |
 | POST | `/api/projects/open-dialog` | Open project dialog |
 | POST | `/api/projects/transcribe` | Transcribe project |
