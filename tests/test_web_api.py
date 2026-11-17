@@ -245,6 +245,10 @@ def test_choose_transcript_video_and_transcribe_loads_new_project(tmp_path: Path
     assert original_edits == EditDecisionList()
 
     locked_cut = Path(data["video_project"]["resolvedPaths"]["lockedCut"])
+    assert not locked_cut.parent.exists()
+    # This fixture supplies a completed cut; production export creates its
+    # destination on write, rather than during project creation.
+    locked_cut.parent.mkdir(parents=True, exist_ok=True)
     locked_cut.write_bytes(b"locked")
     web_api._save_final_transcript(state.project, generate_splices(state.project, state.edits), locked_cut)
     current_video_project = web_api.video_project_response(state.video_project_path, state.video_project)

@@ -48,6 +48,28 @@ def test_video_project_paths_cannot_escape_private_root(tmp_path: Path, monkeypa
         video_project.save_video_project(manifest_path, manifest)
 
 
+def test_new_project_only_creates_used_folders_and_keeps_all_mappings(tmp_path: Path, monkeypatch) -> None:
+    manifest_path, manifest = _create(tmp_path, monkeypatch)
+    root = manifest_path.parent
+    assert {path.name for path in root.iterdir() if path.is_dir()} == {"source", "working"}
+    assert manifest["paths"] == video_project.DEFAULT_PROJECT_PATHS
+
+    # Reading/opening the project and resolving future destinations must not
+    # create empty tool folders. The first actual save creates transcripts/.
+    loaded = video_project.load_video_project(manifest_path)
+    video_project.video_project_response(manifest_path, loaded)
+    editor = video_project.resolve_video_project_path(manifest_path, loaded, "editorProject")
+    assert not editor.parent.exists()
+    from app.core.project_store import save_editor_project
+    from app.core.transcript_model import TranscriptProject
+    from app.core.edit_decisions import EditDecisionList
+    save_editor_project(editor, TranscriptProject(source="fixture.mp4", fps=30, words=[], silence_ranges=[]), EditDecisionList())
+    assert editor.is_file()
+    assert not (root / "exports").exists()
+    assert not (root / "previews").exists()
+    assert not (root / "assets").exists()
+
+
 def test_visual_prompt_geometry_agrees_with_the_measured_scene_file() -> None:
     """The prompt restates measured geometry rather than a hand-written copy that can drift."""
     geometry = visual_production.scene_geometry()
@@ -146,6 +168,7 @@ def test_preferred_source_advances_from_original_to_locked_cut(tmp_path: Path, m
     locked = video_project.resolve_video_project_path(manifest_path, manifest, "lockedCut")
 
     assert video_project.preferred_stage_source(manifest_path, manifest) == original
+    locked.parent.mkdir(parents=True, exist_ok=True)
     locked.write_bytes(b"locked")
     video_project.mark_artifact_current(manifest, "lockedCutRevision")
     assert video_project.preferred_stage_source(manifest_path, manifest) == locked

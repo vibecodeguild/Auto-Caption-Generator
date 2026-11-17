@@ -334,7 +334,9 @@ to navigate back to another screen to nudge a cut.
 
 ## Approved Header Direction
 
-![Approved single-row staged header](assets/single-row-stage-header-approved.png)
+The approved screenshot is retained locally but excluded from public Git because
+it contains private source context. The design approval and requirements below
+remain in effect.
 
 The production header remains a single row. A conventional **Tools** hover menu
 contains Transcript Edit, Caption Generator, Audio Normalizer, and the separate

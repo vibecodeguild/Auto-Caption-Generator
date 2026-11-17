@@ -1,5 +1,70 @@
 # Public Release Security Review
 
+## Publication review: November 17, 2026
+
+The privacy issue identified in this review has been removed from the current
+publication tree and all reachable local Git refs. The application is **not
+fully release-ready**: dependency advisories and failing cut-export tests remain.
+The June review below is retained as history; its clean-audit result is
+superseded by this review.
+
+### PR-1: Private information in a tracked screenshot (fixed locally)
+
+- Severity: High for publication privacy.
+- Location: the former `docs/assets/single-row-stage-header-approved.png`.
+- Evidence: the source-preview header displayed a personal Windows directory
+  and recording filename inside the image pixels. Text searches did not detect it.
+- Impact: publishing the image disclosed private source context.
+- Resolution: preserve the local image, ignore it, remove the public Markdown
+  embed, and retain the approved written design requirements. Add privacy-guard
+  regression coverage for the image, environment files, and key containers.
+- With explicit user authorization, rewrite local branch history to remove
+  the image. Also sanitize the local non-commit checkpoint tree. Verify the
+  image blob is unreachable from every local ref. Preserve working files and
+  the index during the rewrite.
+- Nothing was pushed. GitHub remains unchanged. If the old history is already
+  published, a coordinated remote replacement and any required cache/fork
+  cleanup remain separate work. A normal new commit cannot erase old history.
+
+### PR-2: Dependency advisories (unresolved)
+
+- Severity: Critical reported by npm; exploitability was not established here.
+- Locations: `package.json`, `package-lock.json`, and the local Python environment.
+- `npm audit --omit=dev` reports 14 affected packages: 1 critical, 10 high,
+  and 3 moderate. Next.js is the critical package. One reported advisory is
+  [Windows-hosted server remote code execution](https://github.com/advisories/GHSA-p293-qw3h-jr36).
+- `pip-audit --local` reports 23 advisory entries across 8 installed packages;
+  the output includes duplicate entries. GPU builds of torch and torchaudio
+  could not be audited. This is an environment audit, not proof that every
+  reported package is a direct application dependency.
+- Dependency upgrades require compatibility work and renewed verification;
+  none were made in this privacy cleanup. Keep the documented local-only
+  server boundary in place. Public source publication does not authorize
+  exposing either application server to the network.
+
+### Privacy verification and limits
+
+- Scanned 538 reachable historical blobs and the publication candidates for
+  common credential tokens, private keys, credential-bearing URLs, personal
+  paths, and private email patterns. Compared the local environment's populated
+  credential value against the candidate files and historical blobs without
+  printing it. No credential match was found.
+- Inspected all four tracked design images visually. Email matches in the three
+  remaining concept images belong to vendor provenance metadata; they are not
+  personal contact details identified by this review.
+- Local environment files remain ignored. Commit author and committer emails
+  use GitHub noreply addresses; public account attribution remains visible.
+- `python scripts/check_repo_privacy.py --history` passes after cleanup.
+- All 23 privacy regression tests pass. TypeScript typecheck, all 3 web tests,
+  and the Next.js production build pass. `git diff --check` passes.
+- The full Python suite has 484 passing tests and 3 failures in existing
+  cut-export API tests. The focused run has 114 passes and the same 3 failures.
+  No product behavior was changed to address those tests.
+- Pattern scans and visual inspection reduce disclosure risk; they do not
+  certify that every possible secret or private fact has been detected.
+
+## Earlier review (superseded)
+
 > Point-in-time audit record. This report covers the repository as reviewed on
 > June 18, 2026 and has not been re-certified for later working-tree changes.
 > Current operating guidance remains in `SECURITY.md`; rerun the verification

@@ -36,6 +36,8 @@ from app.core.audio_boundary import (
     suggest_word_end_boundaries,
 )
 from app.core.pipeline import generate_captioned_video
+from app.core.shorts import ShortsProject, PLATFORMS as SHORTS_PLATFORMS, render_key as shorts_render_key
+from app.core.shorts_jobs import jobs as shorts_jobs
 from app.core.caption_grouping import group_words
 from app.core.editor_pipeline import generate_editor_transcript
 from app.core.edit_decisions import EditDecisionList
@@ -2936,6 +2938,167 @@ def delete_caption_style(name: str) -> dict:
         raise HTTPException(status_code=400, detail="Built-in styles cannot be deleted.")
     delete_user_style(name)
     return caption_options()
+
+
+def _shorts_project() -> ShortsProject:
+    if state.video_project_path is None:
+        raise HTTPException(status_code=400, detail="Open a private video project before using Shorts.")
+    return ShortsProject(state.video_project_path)
+
+
+@app.get("/api/shorts")
+def shorts_status() -> dict:
+    """Read Shorts decisions, source readiness, caption state, and composition."""
+    try:
+        return _shorts_project().view()
+    except (ValueError, OSError, RuntimeError, KeyError, json.JSONDecodeError, HTTPException) as exc:
+        return {"ready": False, "reason": exc.detail if isinstance(exc, HTTPException) else str(exc), "shorts": []}
+
+
+@app.get("/api/shorts/brief")
+def shorts_candidate_brief() -> dict:
+    """Export the locked transcript and source-bound candidate-plan instructions."""
+    try:
+        return _shorts_project().brief()
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/shorts/import")
+def shorts_import_plan(payload: dict = Body(...)) -> dict:
+    """Import word-anchored candidates without altering long-form decisions."""
+    try:
+        project = _shorts_project()
+        project.add(payload, imported=True)
+        return project.view()
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/shorts")
+def shorts_create(payload: dict = Body(...)) -> dict:
+    """Create a manual short from frame-accurate source sections."""
+    try:
+        project = _shorts_project()
+        project.add(payload)
+        return project.view()
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/shorts/{short_id}")
+def shorts_save(short_id: str, payload: dict = Body(...)) -> dict:
+    """Save reviewed frame boundaries, title, caption styling, or posting drafts."""
+    try:
+        project = _shorts_project()
+        project.update(short_id, payload)
+        return project.view()
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/shorts/source-video")
+def shorts_source_video(range_header: str | None = Header(default=None, alias="Range")) -> Response:
+    """Stream the active locked cut for manual Shorts source selection."""
+    try:
+        project = _shorts_project()
+        details = project.source_details()
+        return _range_response(details["media"], range_header)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/shorts/{short_id}/jobs")
+def shorts_start_job(short_id: str, payload: dict = Body(...)) -> dict:
+    """Start or reconnect to assembly, short transcription, or vertical export."""
+    try:
+        return shorts_jobs.start(_shorts_project(), short_id, payload.get("operation", ""))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/shorts/{short_id}/job")
+def shorts_active_job(short_id: str) -> dict:
+    """Restore durable progress for this project's selected short."""
+    try:
+        project = _shorts_project()
+        project.find(project.load(), short_id)
+        return {"job": shorts_jobs.active(project, short_id)}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/shorts/{short_id}/jobs/{job_id}/cancel")
+def shorts_cancel_job(short_id: str, job_id: str) -> dict:
+    """Cancel only the selected short job and preserve successful outputs."""
+    try:
+        return shorts_jobs.cancel_job(_shorts_project(), short_id, job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/shorts/{short_id}/media/{kind}")
+def shorts_media(short_id: str, kind: str, range_header: str | None = Header(default=None, alias="Range")) -> Response:
+    """Stream current assembled or delivered Shorts media."""
+    try:
+        project = _shorts_project()
+        short = project.find(project.load(), short_id)
+        if short["source"] != project.source():
+            raise ValueError("This short belongs to an older locked cut.")
+        if kind == "assembly" and project.assembly_current(short):
+            receipt = short["assembly"]
+        elif kind == "delivery" and (short.get("delivery") or {}).get("renderKey") == shorts_render_key(short):
+            receipt = short["delivery"]
+        else:
+            raise ValueError("This media is not current. Build the short again.")
+        return _range_response(project.path(receipt["path"]), range_header)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/shorts/{short_id}/posting-brief")
+def shorts_posting_brief(short_id: str) -> dict:
+    """Export this short's actual transcript for platform-specific posting drafts."""
+    try:
+        project = _shorts_project()
+        short = project.find(project.load(), short_id)
+        if short["source"] != project.source():
+            raise ValueError("This short belongs to an older locked cut.")
+        transcript = project.caption_document(short)
+        return {"instructions": "Write editable platform-specific posting titles and descriptions based only on this actual short. Aim for reach and subscribers without adding a CTA, invented claims, or performance promises. Use relevant hashtags sparingly. Return responseShape, replacing empty strings.",
+                "shortTitle": short["title"], "transcript": transcript["words"],
+                "responseShape": {"schemaVersion": 1, "shortId": short_id, "captionSha256": short["caption"]["sha256"],
+                                  "posting": {p: {"title": "", "text": ""} for p in SHORTS_PLATFORMS}}}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/shorts/{short_id}/posting-import")
+def shorts_import_posting(short_id: str, payload: dict = Body(...)) -> dict:
+    """Import posting drafts bound to the current short-owned caption transcript."""
+    try:
+        project = _shorts_project()
+        with project.lock:
+            short = project.find(project.load(), short_id)
+            project.caption_document(short)
+            if payload.get("schemaVersion") != 1 or payload.get("shortId") != short_id or payload.get("captionSha256") != short["caption"]["sha256"]:
+                raise ValueError("Posting drafts do not match this short's current transcript.")
+            project.update(short_id, {"revision": short["revision"], "posting": payload.get("posting")})
+        return project.view()
+    except (ValueError, OSError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/shorts/{short_id}/posting-package")
+def shorts_posting_package(short_id: str) -> dict:
+    """Download editable posting copy with its review and revision status."""
+    try:
+        project = _shorts_project()
+        short = project.find(project.load(), short_id)
+        return {"shortId": short_id, "title": short["title"], "posting": short["posting"],
+                "reviewed": short["source"] == project.source() and project.posting_current(short), "source": short["source"]}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/caption/generate")

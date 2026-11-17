@@ -35,20 +35,6 @@ DEFAULT_PROJECT_PATHS = {
     "audioPreviews": "previews/audio",
     "visualPreviews": "previews/visual",
 }
-PROJECT_DIRECTORIES = (
-    "source",
-    "transcripts",
-    "edits",
-    "audio",
-    "assets/imported",
-    "assets/generated",
-    "visual-production",
-    "working",
-    "previews/cut",
-    "previews/audio",
-    "previews/visual",
-    "exports",
-)
 
 
 def default_video_workspace() -> Path:
@@ -86,8 +72,9 @@ def create_video_project_from_sources(
         raise ValueError("The private video-project workspace must be outside the public Git checkout.")
     workspace.mkdir(parents=True, exist_ok=True)
     root = _unique_root(workspace, sources[0].stem)
-    for directory in PROJECT_DIRECTORIES:
-        (root / directory).mkdir(parents=True, exist_ok=True)
+    # Only source copies are needed here. Each tool creates its existing mapped
+    # destination when writing; building the sequence creates working/ below.
+    (root / "source").mkdir(parents=True, exist_ok=True)
     (root / ".vcg-private").write_text(
         "Private VCG video project. Never add this directory to a public repository.\n",
         encoding="utf-8",

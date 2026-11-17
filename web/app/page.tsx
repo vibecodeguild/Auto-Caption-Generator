@@ -31,6 +31,7 @@ import { HexColorInput, HexColorPicker } from "react-colorful";
 import GraphicsLibraryWorkspace from "./graphics-library";
 import { CutFrameCard, formatFrameTimecode } from "./cut-frame-card";
 import VisualPackageWorkspace, { VISUAL_PACKAGE_RAIL_HOST_ID } from "./visual-package";
+import ShortsWorkspace, { SHORTS_RAIL_HOST_ID } from "./shorts";
 import {
   API_BASE,
   type AudioAnalysisResponse,
@@ -112,7 +113,7 @@ type PreviewState = {
   loop: boolean;
 };
 
-type ActiveTab = "transcript" | "caption" | "audio" | "graphics" | "package";
+type ActiveTab = "transcript" | "caption" | "audio" | "graphics" | "package" | "shorts";
 
 const DEFAULT_WHISPER_MODEL = "Large v3 - best accuracy";
 const DEFAULT_WHISPER_COMPUTE = "NVIDIA GPU";
@@ -1207,6 +1208,9 @@ export default function Home() {
             <button type="button" className={activeTab === "package" ? "active" : ""} onClick={() => selectToolTab("package")}>
               Visual Package
             </button>
+            <button type="button" className={activeTab === "shorts" ? "active" : ""} onClick={() => selectToolTab("shorts")}>
+              Shorts
+            </button>
           </div>
         </div>
 
@@ -1301,6 +1305,8 @@ export default function Home() {
           </nav>
         ) : activeTab === "package" ? (
           <div id={VISUAL_PACKAGE_RAIL_HOST_ID} className="workflow-rail-host" />
+        ) : activeTab === "shorts" ? (
+          <div id={SHORTS_RAIL_HOST_ID} className="workflow-rail-host" />
         ) : (
           <div className="contextual-tool-actions">
             {activeTab === "caption" ? (
@@ -1553,6 +1559,8 @@ export default function Home() {
         />
       ) : activeTab === "graphics" ? (
         <GraphicsLibraryWorkspace refreshSignal={graphicsLibraryRefreshSignal} />
+      ) : activeTab === "shorts" ? (
+        <ShortsWorkspace key={videoProject?.manifestPath ?? "no-project"} hasVideoProject={Boolean(videoProject)} />
       ) : (
         <VisualPackageWorkspace
           hasVideoProject={Boolean(videoProject)}

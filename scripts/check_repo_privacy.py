@@ -90,6 +90,13 @@ def forbidden_path_reason(path: str) -> str | None:
     lowered = normalized.lower()
     name = Path(lowered).name
 
+    if lowered == "docs/assets/single-row-stage-header-approved.png":
+        return "private design screenshot (includes source context)"
+    if name == ".env" or name.startswith(".env."):
+        return "local environment/credential file"
+    if lowered.endswith((".key", ".pem", ".p12", ".pfx")):
+        return "private key or certificate container"
+
     if lowered == "internal" or lowered.startswith("internal/"):
         return "private internal workspace"
     for directory in ("projects", "app/exports", "app/temp"):

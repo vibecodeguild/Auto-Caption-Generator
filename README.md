@@ -28,6 +28,7 @@ process.
 | Audio Normalizer | Inherit the active project cut and export folder, analyze loudness, make Original/Corrected A/B previews, and export a normalized MP4. |
 | Visual Package | Masterbeater beats, scenelayer, assignment, placement, overlay B-roll, Stage 4 insert clips, and one delivery Final on the program clock. |
 | Graphics Library | Author, sample, and promote golden usages for assignment. |
+| Shorts | Assemble talking-head excerpts from the locked cut, nudge source boundaries, prepare a short-owned caption transcript, and export vertical video with posting drafts. |
 
 For a detailed implementation inventory, data-flow description, and API list,
 see [Current System](docs/current-system.md). For the known gaps and recommended
@@ -155,6 +156,39 @@ grouping and presentation of the Whisper result.
 Defaults target `-14 LUFS` integrated loudness, `-1.5 dBTP` true peak, and
 `7 LU` loudness range. The export stream-copies video when possible and writes
 48 kHz AAC audio. The original file is not modified.
+
+### Shorts
+
+Open a private project with a current locked cut and matching final transcript,
+then choose **Tools → Shorts**. The vertical composition keeps the complete
+widescreen picture, with the title above and captions below on black.
+
+1. Use **New short** to mark source IN/OUT positions, or download a **Candidate
+   brief**, give it to your agent, and **Import plan** to load its word-anchored
+   suggestions. Imported candidates may stitch several sections in playback order.
+2. Review boundaries with frame nudges and 2/4/6-second auditions. Build the
+   assembled preview to review the complete short and its joins.
+3. Save caption styling/model settings, then **Prepare captions**. This
+   transcribes the assembled short's own audio and saves an independent transcript.
+   Caption preview and export reuse those exact saved words and times. Frame
+   changes require regeneration; style changes do not.
+4. Download a **Posting brief** from the short's actual transcript, ask your agent
+   for destination-specific drafts, and **Import copy**. Review and edit copy for
+   Facebook, LinkedIn, YouTube, TikTok, Instagram, and Threads. No CTA is requested.
+5. **Export short** writes a 1080 × 1920 MP4 directly under the private project's
+   `exports/shorts/`, using a readable name such as `01-a-useful-short.mp4` with
+   matching `01-a-useful-short-posting.json` and `01-a-useful-short-posting.txt`.
+   Repeat exports add a numbered suffix and preserve earlier packages.
+
+There is no in-app AI provider or automatic publishing. Briefs contain private
+transcript content. Source-bound imports reject a different cut or transcript;
+stale caption jobs cannot replace newer edits. Failed or canceled work preserves
+previous successful outputs. Canceling local transcription takes effect after
+the current inference returns. Platform guidance distinguishes checked upload
+constraints from limits that still need checking in the destination account.
+
+See [Shorts Workflow Plan](docs/shorts-workflow-plan.md) for the product contract,
+data model, implementation sequence, and verification boundaries.
 
 ## Files and Local Data
 

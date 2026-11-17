@@ -2,6 +2,9 @@
 
 Last verified against the working tree: July 11, 2026.
 
+Shorts implementation added October 13, 2026; its current behavior and verification
+boundaries are recorded in [Shorts Workflow Plan](shorts-workflow-plan.md).
+
 This document is the implementation-oriented source of truth for what exists in
 VCG AutoCaption today. It describes the current working tree, including
 uncommitted local changes; consult `git status` before treating every detail as
@@ -102,9 +105,11 @@ when B-roll is correctly judged unsuitable. See
 
 Phase 1 creates a private parent project when the user chooses one or more raw
 recordings. Every recording is copied under `source/`, and the application creates a portable
-`project.vcg-project.json` manifest plus standard transcript, audio, asset,
-preview, working, visual-production, and export directories. Manifest paths are
-project-relative, so moving the entire folder preserves their relationships.
+`project.vcg-project.json` manifest. Creation makes only `source/` and the
+`working/` folder needed to build the source sequence. Other tool folders are
+created when first written. All existing manifest path mappings remain unchanged
+and project-relative, so moving the entire folder preserves their relationships.
+Existing project directories are not moved or deleted.
 
 The parent manifest stores an ordered `sourceSequence` with clip ids, original
 names, technical metadata, durations, and continuous-timeline start offsets.
@@ -474,9 +479,34 @@ checks remain available, but `POST /api/visual/render` returns HTTP 410 and
 cannot execute the retired `talking-head-recut` request. It is not an authority
 inside a new Creator Production project.
 
+## Shorts
+
+Tools → Shorts is a project-owned workspace for talking-head material from the
+locked cut before graphics. Its composition is a title above the full landscape
+picture, captions underneath, and a black 1080 × 1920 canvas. Source selection
+uses the final long-form transcript; caption timing comes from transcribing the
+assembled short independently.
+
+`app/core/shorts.py` owns source hashes, word-anchor plan import, reviewed frame
+ranges, independent caption revisions, assembly and composition, and posting
+artifacts. `app/core/shorts_jobs.py` owns durable background-job receipts,
+reconnection, cancellation, and late-result protection. `web/app/shorts.tsx` and
+`web/lib/shorts-api.ts` implement the dedicated workspace and client contract.
+`app/core/shorts_platforms.py` separates dated destination guidance from editorial
+duration choices. Unknown or account-dependent limits are not presented as verified.
+
+Private `shorts/` data stores original import receipts, reviewed decisions,
+an edit ledger, caption transcript revisions, and posting drafts. Work lives
+under `working/shorts/`; deliveries publish directly under `exports/shorts/`
+with numbered, title-based MP4 names and matching `-posting.json` / `-posting.txt`
+files. Repeat exports use a numbered suffix without replacing previous files.
+Long-form decisions, standalone caption export behavior, and
+graphics engine defaults are unchanged. Candidate selection and copywriting use
+downloadable briefs and importable agent responses rather than an in-app AI service.
+
 ## API Inventory
 
-Generated from `app/web_api.py` by `scripts/generate_api_inventory.py`. 97 routes.
+Generated from `app/web_api.py` by `scripts/generate_api_inventory.py`. 110 routes.
 Edit the route or its docstring, then regenerate; do not edit this section by hand.
 
 ### Visual Package
@@ -610,6 +640,19 @@ Edit the route or its docstring, then regenerate; do not edit this section by ha
 | POST | `/api/caption/styles` | Save caption style |
 | DELETE | `/api/caption/styles/{name}` | Delete caption style |
 | GET | `/api/health` | Health |
+| GET | `/api/shorts` | Read Shorts decisions, source readiness, caption state, and composition |
+| POST | `/api/shorts` | Create a manual short from frame-accurate source sections |
+| GET | `/api/shorts/brief` | Export the locked transcript and source-bound candidate-plan instructions |
+| POST | `/api/shorts/import` | Import word-anchored candidates without altering long-form decisions |
+| GET | `/api/shorts/source-video` | Stream the active locked cut for manual Shorts source selection |
+| PUT | `/api/shorts/{short_id}` | Save reviewed frame boundaries, title, caption styling, or posting drafts |
+| GET | `/api/shorts/{short_id}/job` | Restore durable progress for this project's selected short |
+| POST | `/api/shorts/{short_id}/jobs` | Start or reconnect to assembly, short transcription, or vertical export |
+| POST | `/api/shorts/{short_id}/jobs/{job_id}/cancel` | Cancel only the selected short job and preserve successful outputs |
+| GET | `/api/shorts/{short_id}/media/{kind}` | Stream current assembled or delivered Shorts media |
+| GET | `/api/shorts/{short_id}/posting-brief` | Export this short's actual transcript for platform-specific posting drafts |
+| POST | `/api/shorts/{short_id}/posting-import` | Import posting drafts bound to the current short-owned caption transcript |
+| GET | `/api/shorts/{short_id}/posting-package` | Download editable posting copy with its review and revision status |
 
 ## Storage and State
 
